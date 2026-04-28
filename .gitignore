@@ -1,0 +1,6 @@
+# Per-installation runtime artifacts
+extension/node_modules/
+extension/package-lock.json
+
+# OS junk
+.DS_Store

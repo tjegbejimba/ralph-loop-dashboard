@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Ralph Loop Dashboard</title>
+        <script src="/__bridge.js"></script>
+        <link rel="stylesheet" href="style.css" />
+    </head>
+    <body>
+        <header>
+            <div class="brand">
+                <span class="dot" id="status-dot"></span>
+                <h1>Ralph Loop</h1>
+            </div>
+            <div class="meta">
+                <span id="last-updated">—</span>
+                <button id="start-btn" type="button" class="loop-btn start" hidden>▶ Start loop</button>
+                <button id="stop-btn" type="button" class="loop-btn stop" hidden>■ Stop loop</button>
+                <button id="refresh-btn" type="button">↻ Refresh</button>
+            </div>
+        </header>
+
+        <main>
+            <section class="panel current">
+                <h2>Current iteration <span id="stage-badge" class="stage-badge" hidden></span></h2>
+                <div id="current-body" class="placeholder">loading…</div>
+                <div id="iteration-strip" class="iteration-strip" hidden>
+                    <span class="strip-item" id="strip-heartbeat" title="seconds since last log write">heartbeat: —</span>
+                    <span class="strip-item" id="strip-review">review: —</span>
+                    <span class="strip-item" id="strip-tokens" hidden>tokens: —</span>
+                </div>
+                <div id="pr-card" class="pr-card" hidden></div>
+                <pre id="current-tail" class="log"></pre>
+            </section>
+
+            <section class="panel cumulative" id="cumulative-panel">
+                <h2>Today <span id="cumulative-stats" class="count">—</span></h2>
+            </section>
+
+            <section class="panel queue">
+                <h2>Queue <span id="queue-count" class="count">—</span></h2>
+                <ul id="queue-list" class="placeholder">loading…</ul>
+            </section>
+
+            <section class="panel prs">
+                <h2>Recent PRs</h2>
+                <ul id="prs-list" class="placeholder">loading…</ul>
+            </section>
+
+            <section class="panel loop-out">
+                <h2>Iteration history <span id="history-stats" class="count">—</span></h2>
+                <ul id="history-list" class="placeholder">loading…</ul>
+            </section>
+        </main>
+
+        <aside id="detail-drawer" class="drawer hidden" aria-hidden="true">
+            <div class="drawer-backdrop" data-close="1"></div>
+            <div class="drawer-panel" role="dialog" aria-labelledby="detail-title">
+                <header class="drawer-header">
+                    <h3 id="detail-title">Loading…</h3>
+                    <button id="detail-close" type="button" aria-label="Close">×</button>
+                </header>
+                <div id="detail-body" class="drawer-body placeholder">loading…</div>
+            </div>
+        </aside>
+
+        <script src="main.js"></script>
+    </body>
+</html>
