@@ -41,6 +41,12 @@ function resolveRepoRoot() {
 const REPO_ROOT = resolveRepoRoot();
 const LOOP_LOG = join(REPO_ROOT, ".ralph", "loop.out");
 const LOGS_DIR = join(REPO_ROOT, ".ralph", "logs");
+const STATE_FILE = join(REPO_ROOT, ".ralph", "state.json");
+
+// Iteration log filenames may include an optional worker-id segment:
+//   iter-{YYYYMMDD}-{HHMMSS}-w{id}-issue-{N}.log   (parallel workers)
+//   iter-{YYYYMMDD}-{HHMMSS}-issue-{N}.log         (legacy single worker)
+const ITER_LOG_REGEX = /^iter-(\d{8})-(\d{6})(?:-w(\d+))?-issue-(\d+)\.log$/;
 
 // Issue title pattern. Default matches "Slice N:" but can be overridden so
 // other workflows (e.g., "Task N:" or "Step N:") work without code changes.
@@ -119,45 +125,136 @@ function detectTokens(logBody) {
   return null;
 }
 
-function getCurrentIteration() {
-  if (!existsSync(LOGS_DIR)) return null;
+// Caches the last successfully-parsed claim list so a transient mid-write
+// read doesn't collapse the dashboard from N workers to legacy-fallback mode.
+let _lastClaims = null;
+let _stateFilePresent = false;
+
+// Returns { claims, stateMissing } so callers can distinguish "no state.json"
+// (legacy install -> use most-recent-log fallback) from "state.json unreadable"
+// (transient parse failure -> reuse last good claims).
+function readClaims() {
+  if (!existsSync(STATE_FILE)) {
+    _stateFilePresent = false;
+    _lastClaims = null;
+    return { claims: [], stateMissing: true };
+  }
+  _stateFilePresent = true;
+  try {
+    const raw = readFileSync(STATE_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    const claimsObj = parsed?.claims || {};
+    const claims = Object.entries(claimsObj).map(([issue, c]) => ({
+      issue: Number(issue),
+      // Coerce workerId to a finite number or null. Defends against any
+      // bad/malicious state.json injecting strings into the rendered HTML.
+      workerId: Number.isFinite(Number(c?.workerId)) ? Number(c.workerId) : null,
+      pid: Number.isFinite(Number(c?.pid)) ? Number(c.pid) : null,
+      startedAt: typeof c?.startedAt === "string" ? c.startedAt : null,
+      logFile: typeof c?.logFile === "string" ? c.logFile : null,
+    }));
+    _lastClaims = claims;
+    return { claims, stateMissing: false };
+  } catch {
+    // File present but unreadable/corrupt — keep prior tick rather than
+    // silently reverting to legacy-latest-log mode.
+    return { claims: _lastClaims || [], stateMissing: false };
+  }
+}
+
+function buildIteration(logFile) {
+  if (!logFile) return null;
+  const m = logFile.match(ITER_LOG_REGEX);
+  if (!m) return null;
+  const [, date, time, workerId, issue] = m;
+  const startedAt = new Date(
+    `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}`,
+  ).toISOString();
+  let tail = "";
+  let fullBody = "";
+  let lastWriteMs = 0;
+  const fullPath = join(LOGS_DIR, logFile);
+  try {
+    const stat = statSync(fullPath);
+    lastWriteMs = stat.mtimeMs;
+    fullBody = readFileSync(fullPath, "utf8");
+    tail = fullBody.split("\n").slice(-40).join("\n");
+  } catch {}
+  const ageSec = lastWriteMs ? Math.floor((Date.now() - lastWriteMs) / 1000) : null;
+  return {
+    issue: Number(issue),
+    workerId: workerId ? Number(workerId) : null,
+    startedAt,
+    logFile,
+    tail,
+    stage: detectStage(fullBody),
+    reviewStats: detectReviewStats(fullBody),
+    tokens: detectTokens(fullBody),
+    lastWriteAt: lastWriteMs ? new Date(lastWriteMs).toISOString() : null,
+    ageSec,
+    stuck: ageSec !== null && ageSec > 300,
+  };
+}
+
+// Returns one iteration object per active worker, derived from state.json.
+// Falls back to "latest log file" mode when state.json doesn't exist (the
+// loop hasn't been upgraded yet, or this is a single-worker legacy install).
+function getCurrentIterations() {
+  const { claims, stateMissing } = readClaims();
+  if (claims.length > 0) {
+    return claims
+      .map((c) => {
+        const it = buildIteration(c.logFile);
+        if (!it) {
+          // state.json claim with no resolvable log — surface what we know.
+          // Compute ageSec from startedAt so a worker hung before its first
+          // log byte still trips the stuck threshold (>300s).
+          let ageSec = null;
+          if (c.startedAt) {
+            const t = Date.parse(c.startedAt);
+            if (!Number.isNaN(t)) ageSec = Math.floor((Date.now() - t) / 1000);
+          }
+          return {
+            issue: c.issue,
+            workerId: c.workerId,
+            startedAt: c.startedAt,
+            logFile: c.logFile,
+            tail: "",
+            stage: { stage: "starting", label: "starting", icon: "○" },
+            reviewStats: null,
+            tokens: null,
+            lastWriteAt: null,
+            ageSec,
+            stuck: ageSec !== null && ageSec > 300,
+            pid: c.pid,
+          };
+        }
+        return { ...it, workerId: c.workerId ?? it.workerId, pid: c.pid };
+      })
+      .sort((a, b) => (a.workerId ?? 0) - (b.workerId ?? 0));
+  }
+  // Legacy fallback — only when state.json is genuinely absent. If the file
+  // is present but yielded zero claims (parse failure with no prior cache),
+  // don't fabricate a worker from a stale log file.
+  if (!stateMissing) return [];
+  if (!existsSync(LOGS_DIR)) return [];
   try {
     const files = readdirSync(LOGS_DIR)
-      .filter((f) => /^iter-.*-issue-\d+\.log$/.test(f))
+      .filter((f) => ITER_LOG_REGEX.test(f))
       .map((f) => ({ name: f, mtime: statSync(join(LOGS_DIR, f)).mtimeMs }))
       .sort((a, b) => b.mtime - a.mtime);
-    if (!files.length) return null;
-    const latest = files[0];
-    const m = latest.name.match(/^iter-(\d{8})-(\d{6})-issue-(\d+)\.log$/);
-    if (!m) return null;
-    const [, date, time, issue] = m;
-    const startedAt = new Date(
-      `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}`,
-    ).toISOString();
-    let tail = "";
-    let fullBody = "";
-    try {
-      fullBody = readFileSync(join(LOGS_DIR, latest.name), "utf8");
-      tail = fullBody.split("\n").slice(-40).join("\n");
-    } catch {}
-    // Heartbeat — seconds since last log write. >300s = stuck.
-    const lastWriteMs = latest.mtime;
-    const ageSec = Math.floor((Date.now() - lastWriteMs) / 1000);
-    return {
-      issue: Number(issue),
-      startedAt,
-      logFile: latest.name,
-      tail,
-      stage: detectStage(fullBody),
-      reviewStats: detectReviewStats(fullBody),
-      tokens: detectTokens(fullBody),
-      lastWriteAt: new Date(lastWriteMs).toISOString(),
-      ageSec,
-      stuck: ageSec > 300,
-    };
+    if (!files.length) return [];
+    const it = buildIteration(files[0].name);
+    return it ? [it] : [];
   } catch {
-    return null;
+    return [];
   }
+}
+
+// Back-compat alias for callers that only need the most recent iteration.
+function getCurrentIteration() {
+  const all = getCurrentIterations();
+  return all[0] || null;
 }
 
 function getLoopOutTail(lines = 20) {
@@ -174,16 +271,17 @@ function getIterationHistory(limit = 20) {
   if (!existsSync(LOGS_DIR)) return { iterations: [], stats: null };
   try {
     const files = readdirSync(LOGS_DIR)
-      .filter((f) => /^iter-(\d{8})-(\d{6})-issue-\d+\.log$/.test(f))
+      .filter((f) => ITER_LOG_REGEX.test(f))
       .map((f) => {
-        const m = f.match(/^iter-(\d{8})-(\d{6})-issue-(\d+)\.log$/);
-        const [, date, time, issue] = m;
+        const m = f.match(ITER_LOG_REGEX);
+        const [, date, time, workerId, issue] = m;
         const startedAt = new Date(
           `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}T${time.slice(0, 2)}:${time.slice(2, 4)}:${time.slice(4, 6)}`,
         );
         const stat = statSync(join(LOGS_DIR, f));
         return {
           issue: Number(issue),
+          workerId: workerId ? Number(workerId) : null,
           startedAt: startedAt.toISOString(),
           startedAtMs: startedAt.getTime(),
           finishedAtMs: stat.mtimeMs,
@@ -390,14 +488,25 @@ async function getStatus() {
     else status = "closed";
     return { ...it, status, prUrl: mergedByIssue.get(it.issue)?.url || null };
   });
-  const currentIteration = getCurrentIteration();
-  const currentPr = currentIteration ? await getCurrentPr(currentIteration.issue) : null;
+  // One iteration object per active worker (parallel-safe). Each gets its
+  // own PR lookup in parallel — keeps the dashboard reactive when a worker
+  // count grows beyond 1.
+  const currentIterations = getCurrentIterations();
+  const workerPanels = await Promise.all(
+    currentIterations.map(async (it) => ({
+      ...it,
+      currentPr: it.issue ? await getCurrentPr(it.issue) : null,
+    })),
+  );
   return {
     timestamp: new Date().toISOString(),
     loopRunning: procs.some((p) => p.cmd.includes("ralph.sh")),
     processes: procs,
-    currentIteration,
-    currentPr,
+    workers: workerPanels,
+    // Back-compat singletons — first worker is "current". Older content/
+    // bundles still reading these continue to work.
+    currentIteration: workerPanels[0] || null,
+    currentPr: workerPanels[0]?.currentPr || null,
     cumulative: getCumulativeStats(prs),
     loopOutTail: getLoopOutTail(20),
     iterationHistory: { iterations, stats: history.stats },
