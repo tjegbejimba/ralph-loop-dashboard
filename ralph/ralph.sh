@@ -56,10 +56,27 @@ state_init
 # Sync the current branch to origin/main. Works both when run on `main` itself
 # (legacy single-checkout mode) and in a dedicated worktree on a non-main branch
 # (preferred — see .ralph/launch.sh, prevents collisions with local edits).
+#
+# Wraps git fetch in a retry loop because N concurrent workers share a single
+# .git/ and can race on refs/remotes/origin/main.lock. With set -euo pipefail,
+# a single ref-lock collision would kill the worker; nohup launches don't
+# respawn, silently degrading parallelism.
 sync_to_origin_main() {
-  local branch
+  local branch attempt rc
   branch=$(git rev-parse --abbrev-ref HEAD)
-  git fetch origin main >/dev/null
+  for attempt in 1 2 3 4 5; do
+    if git fetch origin main >/dev/null 2>&1; then
+      rc=0
+      break
+    fi
+    rc=$?
+    # Jittered backoff: 0.5–1.5s × attempt
+    sleep "$(awk -v a="$attempt" 'BEGIN{srand(); printf "%.2f", a*(0.5+rand())}')"
+  done
+  if [[ "${rc:-1}" -ne 0 ]]; then
+    echo "⚠️  git fetch origin main failed after 5 attempts (rc=$rc). Halting." >&2
+    return "$rc"
+  fi
   if [[ "$branch" == "main" ]]; then
     git checkout main >/dev/null
     git pull --ff-only origin main >/dev/null
@@ -69,20 +86,25 @@ sync_to_origin_main() {
   fi
 }
 
-# Per-worker lock — prevents the same WORKER_ID from being launched twice.
-# Concurrent workers with distinct ids each have their own lock.
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "⚠️  Worker $WORKER_ID already running (lock at $LOCK_DIR). Exiting." >&2
+# Per-worker singleton lock — prevents the same WORKER_ID from running twice.
+# Uses acquire_lockdir with the strict ralph-cmd predicate because this lock
+# can live for hours (an entire worker session), long enough for PID reuse
+# to be a real concern if a worker crashes ungracefully. The default
+# bare-liveness predicate would risk handing the lock to a recycled PID
+# inheriting some unrelated process.
+if ! acquire_lockdir "$LOCK_DIR" is_pid_alive_and_ralph; then
+  echo "⚠️  Worker $WORKER_ID already running (lock at $LOCK_DIR held by live ralph process). Exiting." >&2
   exit 1
 fi
 # Release lock on exit. Also release any in-flight claim — see
-# CURRENT_CLAIM tracking below.
+# CURRENT_CLAIM tracking below. (SIGKILL bypasses this trap; that's why
+# acquire_lockdir does stale-takeover on next launch.)
 CURRENT_CLAIM=""
 cleanup() {
   if [[ -n "$CURRENT_CLAIM" ]]; then
     state_lock && state_release "$CURRENT_CLAIM" && state_unlock || true
   fi
-  rmdir "$LOCK_DIR" 2>/dev/null || true
+  release_lockdir "$LOCK_DIR"
 }
 trap cleanup EXIT
 
@@ -128,7 +150,23 @@ while true; do
         | @base64
       ')
 
-  num=""; title=""; body=""
+  # Memoize blocker satisfaction across this selection round so M candidates
+  # × K blockers don't translate into M×K `gh issue view`/`gh pr view` calls.
+  # Cache lives only until the next polling cycle to stay fresh.
+  declare -A BLOCKER_CACHE=()
+  blocker_satisfied() {
+    local b="$1"
+    if [[ -n "${BLOCKER_CACHE[$b]+x}" ]]; then
+      printf '%s' "${BLOCKER_CACHE[$b]}"
+      return
+    fi
+    local v
+    v=$(is_issue_satisfied "$b")
+    BLOCKER_CACHE[$b]="$v"
+    printf '%s' "$v"
+  }
+
+  num=""; title=""; body=""; chosen_blockers=""
   while IFS= read -r row; do
     [[ -z "$row" ]] && continue
     decoded=$(echo "$row" | base64 --decode)
@@ -142,22 +180,25 @@ while true; do
     fi
 
     # Evaluate blockers — every #N referenced in the "## Blocked by" section
-    # must be CLOSED. Manually-closed (wontfix) issues count as satisfied.
+    # must be closed by a merged PR (same predicate the iteration uses for
+    # itself, so manually-closed wontfix/duplicate blockers don't unblock
+    # downstream slices whose code never landed).
     blockers=$(parse_blockers "$cand_body")
-    all_closed=1
+    all_satisfied=1
     for b in $blockers; do
-      if [[ "$(is_issue_closed "$b")" != "1" ]]; then
-        all_closed=0
+      if [[ "$(blocker_satisfied "$b")" != "1" ]]; then
+        all_satisfied=0
         break
       fi
     done
-    if [[ "$all_closed" -ne 1 ]]; then
+    if [[ "$all_satisfied" -ne 1 ]]; then
       continue
     fi
 
     num="$cand_num"
     title="$cand_title"
     body="$cand_body"
+    chosen_blockers="$blockers"
     break
   done <<<"$candidates"
 
@@ -179,14 +220,38 @@ while true; do
 
   ts="$(date +%Y%m%d-%H%M%S)"
   log_file="$LOG_DIR/iter-${ts}-w${WORKER_ID}-issue-${num}.log"
+  # Touch so dashboards pointing at logFile see a real (empty) file before
+  # the iteration body's tee starts writing.
+  : >"$log_file"
 
-  # Atomic claim: re-acquire lock, re-check (defensive — another worker may
-  # have grabbed this same issue in the gap), then claim.
+  # Atomic claim: re-acquire lock, re-check that nobody else grabbed this
+  # issue between selection and now, AND re-validate blockers (a blocker
+  # could have been reopened, or the issue itself could have been closed).
   state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
   state_reap_stale
   if state_claimed_issues | grep -qx "$num"; then
     state_unlock
     echo "↪️  Worker $WORKER_ID: #$num was claimed by another worker between selection and claim; retrying."
+    continue
+  fi
+  # Re-fetch this issue's state and re-check blockers under the lock. If
+  # anything changed, drop the candidate and re-poll.
+  current_state=$(gh issue view "$num" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")
+  if [[ "$current_state" != "OPEN" ]]; then
+    state_unlock
+    echo "↪️  Worker $WORKER_ID: #$num is no longer OPEN (state=$current_state); retrying."
+    continue
+  fi
+  blockers_still_satisfied=1
+  for b in $chosen_blockers; do
+    if [[ "$(is_issue_satisfied "$b")" != "1" ]]; then
+      blockers_still_satisfied=0
+      break
+    fi
+  done
+  if [[ "$blockers_still_satisfied" -ne 1 ]]; then
+    state_unlock
+    echo "↪️  Worker $WORKER_ID: #$num blocker became unsatisfied during selection; retrying."
     continue
   fi
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"

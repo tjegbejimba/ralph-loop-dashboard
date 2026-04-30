@@ -100,6 +100,36 @@ if [[ "${1:-}" == "--foreground" && "$PARALLELISM" -ne 1 ]]; then
   exit 1
 fi
 
+# Source the state-lock helpers so we can use the same PID-stamped lockdir
+# primitive for worker locks and the launcher setup mutex.
+LOG_DIR="$MAIN_REPO/.ralph/logs"
+mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
+# shellcheck source=lib/state.sh
+. "$MAIN_REPO/.ralph/lib/state.sh"
+
+# Helper: is worker $1 currently running? Reads its singleton lockdir's owner
+# PID and validates it. Used to skip setup of worktrees that an active worker
+# is using — the previous version unconditionally `git reset --hard origin/main`
+# in every worker worktree, which would clobber an in-flight copilot iteration.
+is_worker_running() {
+  local n="$1"
+  local lockdir="$MAIN_REPO/.ralph/lock/worker-$n"
+  [[ -d "$lockdir" ]] || return 1
+  local pid
+  pid=$(cat "$lockdir/owner" 2>/dev/null || echo "")
+  is_pid_alive_and_ralph "$pid"
+}
+
+# Launcher-level mutex — prevents two concurrent `launch.sh` invocations from
+# both running setup (which mutates .git/info/exclude, worktrees, and branch
+# state). Workers never need to touch this lock.
+SETUP_LOCK="$MAIN_REPO/.ralph/launch.lock"
+if ! acquire_lockdir "$SETUP_LOCK"; then
+  echo "❌ Another launch.sh is in flight (lock at $SETUP_LOCK). Aborting." >&2
+  exit 1
+fi
+trap 'release_lockdir "$SETUP_LOCK"' EXIT
+
 # Setup phase: create N worktrees and symlink .ralph in each.
 EXCLUDE_FILE="$MAIN_REPO/.git/info/exclude"
 if ! grep -qxF ".ralph" "$EXCLUDE_FILE" 2>/dev/null; then
@@ -110,6 +140,11 @@ fi
 for ((i = 1; i <= PARALLELISM; i++)); do
   loop_repo=$(worker_repo "$i")
   loop_branch=$(worker_branch "$i")
+
+  if is_worker_running "$i"; then
+    echo "ℹ️  Worker $i: already running — leaving its worktree at $loop_repo untouched."
+    continue
+  fi
 
   if [[ ! -d "$loop_repo" ]]; then
     echo "🌱 Worker $i: creating worktree at $loop_repo on branch $loop_branch"
@@ -137,11 +172,17 @@ LOG="$MAIN_REPO/.ralph/loop.out"
 
 if [[ "${1:-}" == "--foreground" ]]; then
   cd "$(worker_repo 1)"
+  release_lockdir "$SETUP_LOCK"
+  trap - EXIT
   RALPH_WORKER_ID=1 exec "$MAIN_REPO/.ralph/ralph.sh"
 fi
 
 echo "🚀 Launching $PARALLELISM worker(s) in background. Tail: tail -f $LOG"
 for ((i = 1; i <= PARALLELISM; i++)); do
+  if is_worker_running "$i"; then
+    echo "  worker $i: already running — skipping spawn."
+    continue
+  fi
   loop_repo=$(worker_repo "$i")
   cd "$loop_repo"
   worker_log="$MAIN_REPO/.ralph/logs/worker-${i}.out"
