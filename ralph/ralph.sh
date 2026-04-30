@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# TDD Ralph loop for alisterr.
-# Iterates lowest-numbered open "Slice N:" issue, runs Copilot CLI non-interactively
-# with RALPH.md as the prompt, and waits for the issue to close via merged PR.
+# TDD Ralph loop.
+# Iterates the lowest-numbered open issue matching $TITLE_REGEX whose declared
+# blockers are all closed, runs Copilot CLI non-interactively with RALPH.md as
+# the prompt, and waits for the issue to close via merged PR.
+#
+# Workers coordinate through .ralph/state.json so multiple copies of this script
+# (one per dedicated worktree) can run safely in parallel without claiming the
+# same issue. See .ralph/launch.sh for the parallel spawn entry point.
 #
 # Usage:
-#   .ralph/ralph.sh           # loop until no open Slice issues
+#   .ralph/ralph.sh           # loop until no eligible open issues remain
 #   .ralph/ralph.sh --once    # run a single iteration then exit
 #
 # Env:
 #   RALPH_MODEL          model passed to copilot (default: claude-sonnet-4.5)
 #   RALPH_TIMEOUT_SEC    per-iteration timeout in seconds (default: 7200)
+#   RALPH_WORKER_ID      this worker's identity (default: 1) — must be unique
+#                        across concurrent workers; controls lock + log naming
+#   RALPH_POLL_SEC       sleep between selection attempts when no work is
+#                        eligible (default: 30)
 
 set -euo pipefail
 
@@ -22,10 +31,12 @@ TITLE_REGEX="${RALPH_TITLE_REGEX:-^Slice [0-9]+:}"
 TITLE_NUM_RE="${RALPH_TITLE_NUM_REGEX:-^Slice (?<x>[0-9]+):}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 PROMPT_FILE="$SCRIPT_DIR/RALPH.md"
-LOCK_DIR="$SCRIPT_DIR/lock"
 LOG_DIR="$SCRIPT_DIR/logs"
+WORKER_ID="${RALPH_WORKER_ID:-1}"
+LOCK_DIR="$SCRIPT_DIR/lock/worker-${WORKER_ID}"
 MODEL="${RALPH_MODEL:-claude-sonnet-4.5}"
 TIMEOUT_SEC="${RALPH_TIMEOUT_SEC:-7200}"
+POLL_SEC="${RALPH_POLL_SEC:-30}"
 ONCE=0
 [[ "${1:-}" == "--once" ]] && ONCE=1
 
@@ -35,15 +46,37 @@ if [[ -z "$REPO" ]]; then
 fi
 
 cd "$(git rev-parse --show-toplevel)"
-mkdir -p "$LOG_DIR"
+mkdir -p "$LOG_DIR" "$SCRIPT_DIR/lock"
+
+# Coordination helpers (state.json, blocker parsing, claim management).
+# shellcheck source=lib/state.sh
+. "$SCRIPT_DIR/lib/state.sh"
+state_init
 
 # Sync the current branch to origin/main. Works both when run on `main` itself
 # (legacy single-checkout mode) and in a dedicated worktree on a non-main branch
 # (preferred — see .ralph/launch.sh, prevents collisions with local edits).
+#
+# Wraps git fetch in a retry loop because N concurrent workers share a single
+# .git/ and can race on refs/remotes/origin/main.lock. With set -euo pipefail,
+# a single ref-lock collision would kill the worker; nohup launches don't
+# respawn, silently degrading parallelism.
 sync_to_origin_main() {
-  local branch
+  local branch attempt rc
   branch=$(git rev-parse --abbrev-ref HEAD)
-  git fetch origin main >/dev/null
+  for attempt in 1 2 3 4 5; do
+    if git fetch origin main >/dev/null 2>&1; then
+      rc=0
+      break
+    fi
+    rc=$?
+    # Jittered backoff: 0.5–1.5s × attempt
+    sleep "$(awk -v a="$attempt" 'BEGIN{srand(); printf "%.2f", a*(0.5+rand())}')"
+  done
+  if [[ "${rc:-1}" -ne 0 ]]; then
+    echo "⚠️  git fetch origin main failed after 5 attempts (rc=$rc). Halting." >&2
+    return "$rc"
+  fi
   if [[ "$branch" == "main" ]]; then
     git checkout main >/dev/null
     git pull --ff-only origin main >/dev/null
@@ -53,12 +86,27 @@ sync_to_origin_main() {
   fi
 }
 
-# Single-runner lock
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  echo "⚠️  Another ralph loop is running (lock at $LOCK_DIR). Exiting." >&2
+# Per-worker singleton lock — prevents the same WORKER_ID from running twice.
+# Uses acquire_lockdir with the strict ralph-cmd predicate because this lock
+# can live for hours (an entire worker session), long enough for PID reuse
+# to be a real concern if a worker crashes ungracefully. The default
+# bare-liveness predicate would risk handing the lock to a recycled PID
+# inheriting some unrelated process.
+if ! acquire_lockdir "$LOCK_DIR" is_pid_alive_and_ralph; then
+  echo "⚠️  Worker $WORKER_ID already running (lock at $LOCK_DIR held by live ralph process). Exiting." >&2
   exit 1
 fi
-trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+# Release lock on exit. Also release any in-flight claim — see
+# CURRENT_CLAIM tracking below. (SIGKILL bypasses this trap; that's why
+# acquire_lockdir does stale-takeover on next launch.)
+CURRENT_CLAIM=""
+cleanup() {
+  if [[ -n "$CURRENT_CLAIM" ]]; then
+    state_lock && state_release "$CURRENT_CLAIM" && state_unlock || true
+  fi
+  release_lockdir "$LOCK_DIR"
+}
+trap cleanup EXIT
 
 # Portable timeout wrapper (macOS-safe)
 run_with_timeout() {
@@ -79,37 +127,148 @@ while true; do
   fi
   sync_to_origin_main
 
-  # Find lowest-numbered open issue matching $TITLE_REGEX
-  next=$(gh issue list --repo "$REPO" --state open --limit 50 \
-      --json number,title \
+  # Fetch open issues matching the title regex along with their bodies so we
+  # can evaluate "Blocked by" sections without an extra round-trip per issue.
+  open_json=$(gh issue list --repo "$REPO" --state open --limit 100 \
+    --json number,title,body)
+
+  # Sort eligible issues by slice number ascending; pick the first one whose
+  # blockers are all closed AND that no other worker has already claimed.
+  state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+  state_reap_stale
+  claimed_set="$(state_claimed_issues | sort -u)"
+  state_unlock
+
+  # Build a sorted list of (number, title, body) for matching issues.
+  candidates=$(echo "$open_json" \
     | TITLE_REGEX="$TITLE_REGEX" TITLE_NUM_RE="$TITLE_NUM_RE" jq -r '
         [ .[]
           | select(.title | test(env.TITLE_REGEX))
           | . + {n: (.title | capture(env.TITLE_NUM_RE).x | tonumber)} ]
         | sort_by(.n)
-        | .[0] // empty
-        | "\(.number)\t\(.title)"
+        | .[]
+        | @base64
       ')
 
-  if [[ -z "$next" ]]; then
-    echo "✅ No open issues match \"$TITLE_REGEX\". Done."
-    exit 0
+  # Memoize blocker satisfaction across this selection round so M candidates
+  # × K blockers don't translate into M×K `gh issue view`/`gh pr view` calls.
+  # Cache lives only until the next polling cycle to stay fresh.
+  declare -A BLOCKER_CACHE=()
+  blocker_satisfied() {
+    local b="$1"
+    if [[ -n "${BLOCKER_CACHE[$b]+x}" ]]; then
+      printf '%s' "${BLOCKER_CACHE[$b]}"
+      return
+    fi
+    local v
+    v=$(is_issue_satisfied "$b")
+    BLOCKER_CACHE[$b]="$v"
+    printf '%s' "$v"
+  }
+
+  num=""; title=""; body=""; chosen_blockers=""
+  while IFS= read -r row; do
+    [[ -z "$row" ]] && continue
+    decoded=$(echo "$row" | base64 --decode)
+    cand_num=$(echo "$decoded" | jq -r .number)
+    cand_title=$(echo "$decoded" | jq -r .title)
+    cand_body=$(echo "$decoded" | jq -r .body)
+
+    # Skip issues other workers have claimed.
+    if printf '%s\n' "$claimed_set" | grep -qx "$cand_num"; then
+      continue
+    fi
+
+    # Evaluate blockers — every #N referenced in the "## Blocked by" section
+    # must be closed by a merged PR (same predicate the iteration uses for
+    # itself, so manually-closed wontfix/duplicate blockers don't unblock
+    # downstream slices whose code never landed).
+    blockers=$(parse_blockers "$cand_body")
+    all_satisfied=1
+    for b in $blockers; do
+      if [[ "$(blocker_satisfied "$b")" != "1" ]]; then
+        all_satisfied=0
+        break
+      fi
+    done
+    if [[ "$all_satisfied" -ne 1 ]]; then
+      continue
+    fi
+
+    num="$cand_num"
+    title="$cand_title"
+    body="$cand_body"
+    chosen_blockers="$blockers"
+    break
+  done <<<"$candidates"
+
+  if [[ -z "$num" ]]; then
+    # Nothing actionable right now. If any issues are still open and not
+    # claimed, we're waiting on dependencies; sleep and retry. If everything
+    # is claimed by other workers, also sleep.
+    remaining=$(echo "$open_json" \
+      | TITLE_REGEX="$TITLE_REGEX" jq -r '
+          [.[] | select(.title | test(env.TITLE_REGEX))] | length')
+    if [[ "$remaining" -eq 0 ]]; then
+      echo "✅ Worker $WORKER_ID: no open issues match \"$TITLE_REGEX\". Done."
+      exit 0
+    fi
+    echo "⏸  Worker $WORKER_ID: no eligible issue (remaining=$remaining, claimed=$(echo "$claimed_set" | wc -l | tr -d ' ')); sleeping ${POLL_SEC}s."
+    sleep "$POLL_SEC"
+    continue
   fi
 
-  num="${next%%$'\t'*}"
-  title="${next#*$'\t'}"
   ts="$(date +%Y%m%d-%H%M%S)"
-  log_file="$LOG_DIR/iter-${ts}-issue-${num}.log"
+  log_file="$LOG_DIR/iter-${ts}-w${WORKER_ID}-issue-${num}.log"
+  # Touch so dashboards pointing at logFile see a real (empty) file before
+  # the iteration body's tee starts writing.
+  : >"$log_file"
+
+  # Atomic claim: re-acquire lock, re-check that nobody else grabbed this
+  # issue between selection and now, AND re-validate blockers (a blocker
+  # could have been reopened, or the issue itself could have been closed).
+  state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+  state_reap_stale
+  if state_claimed_issues | grep -qx "$num"; then
+    state_unlock
+    echo "↪️  Worker $WORKER_ID: #$num was claimed by another worker between selection and claim; retrying."
+    continue
+  fi
+  # Re-fetch this issue's state and re-check blockers under the lock. If
+  # anything changed, drop the candidate and re-poll.
+  current_state=$(gh issue view "$num" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")
+  if [[ "$current_state" != "OPEN" ]]; then
+    state_unlock
+    echo "↪️  Worker $WORKER_ID: #$num is no longer OPEN (state=$current_state); retrying."
+    continue
+  fi
+  blockers_still_satisfied=1
+  for b in $chosen_blockers; do
+    if [[ "$(is_issue_satisfied "$b")" != "1" ]]; then
+      blockers_still_satisfied=0
+      break
+    fi
+  done
+  if [[ "$blockers_still_satisfied" -ne 1 ]]; then
+    state_unlock
+    echo "↪️  Worker $WORKER_ID: #$num blocker became unsatisfied during selection; retrying."
+    continue
+  fi
+  state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
+  CURRENT_CLAIM="$num"
+  state_unlock
 
   echo ""
   echo "============================================================"
-  echo "▶️  $(date -u +%FT%TZ)  Working on #$num — $title"
+  echo "▶️  $(date -u +%FT%TZ)  Worker $WORKER_ID — #$num: $title"
   echo "    log: $log_file"
   echo "    model: $MODEL    timeout: ${TIMEOUT_SEC}s"
   echo "============================================================"
 
-  issue_json=$(gh issue view "$num" --repo "$REPO" --json title,body)
-  issue_text=$(echo "$issue_json" | jq -r '.title + "\n\n" + .body')
+  # Reuse the title+body we already fetched while evaluating candidates.
+  issue_text="${title}
+
+${body}"
 
   full_prompt="$(cat "$PROMPT_FILE")
 
@@ -195,6 +354,9 @@ ${issue_text}"
   fi
 
   echo "✅ #$num closed via merged PR."
+  # Release this issue's claim so other workers don't see it as in-flight.
+  state_lock && state_release "$num" && state_unlock || true
+  CURRENT_CLAIM=""
   sync_to_origin_main
 
   if [[ "$ONCE" -eq 1 ]]; then
