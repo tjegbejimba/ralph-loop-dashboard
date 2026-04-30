@@ -47,7 +47,7 @@ function renderPrCardHtml(pr) {
   return `
     <div class="pr-card">
       <div class="pr-card-head">
-        <a href="${escapeHtml(pr.url)}" target="_blank" class="pr-card-title">
+        <a href="${escapeHtml(pr.url)}" target="_blank" rel="noopener noreferrer" class="pr-card-title">
           <span class="pr-card-num">#${pr.number}</span>
           <span class="pr-card-text">${escapeHtml(pr.title)}</span>
         </a>
@@ -84,19 +84,30 @@ function renderWorkerCardHtml(it, isLive) {
     it.tokens != null
       ? `<span class="strip-item">tokens: ${it.tokens.toLocaleString()}</span>`
       : "";
+  const workerIdSafe =
+    it.workerId != null && Number.isFinite(Number(it.workerId))
+      ? Number(it.workerId)
+      : null;
   const workerLabel =
-    it.workerId != null
-      ? `<span class="worker-pill">worker ${it.workerId}</span>`
+    workerIdSafe != null
+      ? `<span class="worker-pill">worker ${workerIdSafe}</span>`
       : "";
+  // Slugify stage for CSS class — guards against future producers emitting
+  // arbitrary strings (e.g., "writing tests" -> "writing-tests").
+  const stageSlug = String(stage.stage || "unknown")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+  const issueSafe = Number.isFinite(Number(it.issue)) ? Number(it.issue) : "?";
   return `
     <div class="worker-card${it.stuck ? " stuck" : ""}">
       <div class="worker-card-head">
         ${workerLabel}
-        <span class="stage-badge stage-${stage.stage}">${stage.icon} ${stage.label}</span>
+        <span class="stage-badge stage-${stageSlug}">${escapeHtml(stage.icon)} ${escapeHtml(stage.label)}</span>
       </div>
       <div class="worker-card-body">
         <span class="field"><span class="label">status:</span><span class="val ${statusClass}">${statusLabel}</span></span>
-        <span class="field"><span class="label">issue:</span><span class="val">#${it.issue}</span></span>
+        <span class="field"><span class="label">issue:</span><span class="val">#${issueSafe}</span></span>
         <span class="field"><span class="label">started:</span><span class="val">${fmtTime(it.startedAt)}</span></span>
         <span class="field"><span class="label">elapsed:</span><span class="val">${elapsed}</span></span>
       </div>
@@ -105,7 +116,7 @@ function renderWorkerCardHtml(it, isLive) {
         <span class="strip-item${it.stuck ? " warn" : ""}" title="${escapeHtml(heartbeatTitle)}">
           last write: ${ageSec ? fmtDuration(ageSec * 1000) + " ago" : "—"}
         </span>
-        <span class="strip-item ${reviewClass}">${reviewLabel}</span>
+        <span class="strip-item ${reviewClass}">${escapeHtml(reviewLabel)}</span>
         ${tokensHtml}
       </div>
       ${renderPrCardHtml(it.currentPr)}
@@ -149,6 +160,11 @@ function maybeNotify(s) {
     } else if (!w.stuck) {
       notifyState.stuckIssues.delete(w.issue);
     }
+  }
+  // Prune stuck issues that no longer have a worker — otherwise the set
+  // grows unboundedly and a re-stuck same-issue would be silently suppressed.
+  for (const issue of notifyState.stuckIssues) {
+    if (!currentIssues.has(issue)) notifyState.stuckIssues.delete(issue);
   }
 
   // PR merged — same as before.
@@ -309,7 +325,7 @@ function renderHistory(h) {
       const dur = fmtDuration(it.durationMs);
       const cls = it.status === "open" ? "OPEN" : "MERGED";
       const label = it.status === "open" ? "···" : "✓";
-      const href = it.prUrl ? ` href="${escapeHtml(it.prUrl)}" target="_blank"` : "";
+      const href = it.prUrl ? ` href="${escapeHtml(it.prUrl)}" target="_blank" rel="noopener noreferrer"` : "";
       const titleAttr = `title="${escapeHtml(it.logFile)}"`;
       const workerTag =
         it.workerId != null
@@ -328,12 +344,20 @@ function renderHistory(h) {
     .join("");
 }
 
+// In-flight guard prevents the polling timer from fanning out N gh
+// subprocesses if a single getStatus() runs longer than REFRESH_MS
+// (realistic with N workers each doing a PR lookup).
+let _refreshInFlight = false;
 async function refresh() {
+  if (_refreshInFlight) return;
+  _refreshInFlight = true;
   try {
     const status = await copilot.getStatus();
     render(status);
   } catch (err) {
     $("last-updated").textContent = `error: ${err.message || err}`;
+  } finally {
+    _refreshInFlight = false;
   }
 }
 
@@ -438,7 +462,7 @@ function renderPrDetail(pr) {
       ${merged ? `<dt>Merged</dt><dd>${merged}</dd>` : ""}
       ${closed ? `<dt>Closed</dt><dd>${closed}</dd>` : ""}
     </dl>
-    <a class="detail-link" href="${escapeHtml(pr.url || "#")}" target="_blank">View on GitHub ↗</a>
+    <a class="detail-link" href="${escapeHtml(pr.url || "#")}" target="_blank" rel="noopener noreferrer">View on GitHub ↗</a>
     <h4>Description</h4>
     <div class="detail-body-md">${renderMarkdown(pr.body)}</div>
   `;
@@ -535,7 +559,7 @@ async function renderIssueDetail(li) {
             ${labels || ""}
             <span class="detail-meta-item">💬 ${data.comments?.length ?? 0}</span>
             <span class="detail-meta-item">created ${fmtDate(data.createdAt)}</span>
-            <a class="detail-link" href="${escapeHtml(url)}" target="_blank">open on github →</a>
+            <a class="detail-link" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">open on github →</a>
         </div>
         <div class="detail-body">${renderMarkdownLite(body)}</div>
     `;

@@ -125,21 +125,40 @@ function detectTokens(logBody) {
   return null;
 }
 
+// Caches the last successfully-parsed claim list so a transient mid-write
+// read doesn't collapse the dashboard from N workers to legacy-fallback mode.
+let _lastClaims = null;
+let _stateFilePresent = false;
+
+// Returns { claims, stateMissing } so callers can distinguish "no state.json"
+// (legacy install -> use most-recent-log fallback) from "state.json unreadable"
+// (transient parse failure -> reuse last good claims).
 function readClaims() {
-  if (!existsSync(STATE_FILE)) return [];
+  if (!existsSync(STATE_FILE)) {
+    _stateFilePresent = false;
+    _lastClaims = null;
+    return { claims: [], stateMissing: true };
+  }
+  _stateFilePresent = true;
   try {
     const raw = readFileSync(STATE_FILE, "utf8");
     const parsed = JSON.parse(raw);
-    const claims = parsed?.claims || {};
-    return Object.entries(claims).map(([issue, c]) => ({
+    const claimsObj = parsed?.claims || {};
+    const claims = Object.entries(claimsObj).map(([issue, c]) => ({
       issue: Number(issue),
-      workerId: c.workerId ?? null,
-      pid: c.pid ?? null,
-      startedAt: c.startedAt || null,
-      logFile: c.logFile || null,
+      // Coerce workerId to a finite number or null. Defends against any
+      // bad/malicious state.json injecting strings into the rendered HTML.
+      workerId: Number.isFinite(Number(c?.workerId)) ? Number(c.workerId) : null,
+      pid: Number.isFinite(Number(c?.pid)) ? Number(c.pid) : null,
+      startedAt: typeof c?.startedAt === "string" ? c.startedAt : null,
+      logFile: typeof c?.logFile === "string" ? c.logFile : null,
     }));
+    _lastClaims = claims;
+    return { claims, stateMissing: false };
   } catch {
-    return [];
+    // File present but unreadable/corrupt — keep prior tick rather than
+    // silently reverting to legacy-latest-log mode.
+    return { claims: _lastClaims || [], stateMissing: false };
   }
 }
 
@@ -181,13 +200,20 @@ function buildIteration(logFile) {
 // Falls back to "latest log file" mode when state.json doesn't exist (the
 // loop hasn't been upgraded yet, or this is a single-worker legacy install).
 function getCurrentIterations() {
-  const claims = readClaims();
+  const { claims, stateMissing } = readClaims();
   if (claims.length > 0) {
     return claims
       .map((c) => {
         const it = buildIteration(c.logFile);
         if (!it) {
           // state.json claim with no resolvable log — surface what we know.
+          // Compute ageSec from startedAt so a worker hung before its first
+          // log byte still trips the stuck threshold (>300s).
+          let ageSec = null;
+          if (c.startedAt) {
+            const t = Date.parse(c.startedAt);
+            if (!Number.isNaN(t)) ageSec = Math.floor((Date.now() - t) / 1000);
+          }
           return {
             issue: c.issue,
             workerId: c.workerId,
@@ -198,8 +224,8 @@ function getCurrentIterations() {
             reviewStats: null,
             tokens: null,
             lastWriteAt: null,
-            ageSec: null,
-            stuck: false,
+            ageSec,
+            stuck: ageSec !== null && ageSec > 300,
             pid: c.pid,
           };
         }
@@ -207,7 +233,10 @@ function getCurrentIterations() {
       })
       .sort((a, b) => (a.workerId ?? 0) - (b.workerId ?? 0));
   }
-  // Legacy fallback — pick the most recently-modified iter log.
+  // Legacy fallback — only when state.json is genuinely absent. If the file
+  // is present but yielded zero claims (parse failure with no prior cache),
+  // don't fabricate a worker from a stale log file.
+  if (!stateMissing) return [];
   if (!existsSync(LOGS_DIR)) return [];
   try {
     const files = readdirSync(LOGS_DIR)

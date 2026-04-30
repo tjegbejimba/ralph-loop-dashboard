@@ -225,3 +225,130 @@ test("history list shows worker pill (w1, w2) for parallel iterations", async ({
   await expect(items.nth(0).locator(".worker-pill")).toHaveText("w1");
   await expect(items.nth(1).locator(".worker-pill")).toHaveText("w2");
 });
+
+test("escapes hostile worker fields (XSS defense)", async ({ page }) => {
+  const hostile = {
+    ...makeWorker({
+      workerId: 1,
+      issue: 999,
+      logFile: "<script>alert(1)</script>.log",
+    }),
+    tail: '<img src=x onerror="alert(1)">',
+    stage: { stage: "writing tests", label: "<b>danger</b>", icon: "<i>x</i>" },
+  };
+  let dialogFired = false;
+  page.on("dialog", async (d) => {
+    dialogFired = true;
+    await d.dismiss();
+  });
+  await loadDashboard(page, {
+    ...baseStatus,
+    workers: [hostile],
+    currentIteration: hostile,
+  });
+  // No JS executed via injected payloads.
+  expect(dialogFired).toBe(false);
+  // No raw <script>/<img> nodes injected from the hostile fields.
+  const card = page.locator(".worker-card").first();
+  await expect(card.locator("script")).toHaveCount(0);
+  // Hostile log filename appears as text, not as markup.
+  await expect(card.locator(".worker-card-log-meta")).toContainText(
+    "<script>alert(1)</script>.log",
+  );
+  // Stage CSS class is slugified — "writing tests" -> "writing-tests".
+  await expect(card.locator(".stage-badge")).toHaveClass(/stage-writing-tests/);
+});
+
+test("renders PR card inside worker card with check pills", async ({
+  page,
+}) => {
+  const w = {
+    ...makeWorker({
+      workerId: 1,
+      issue: 125,
+      logFile: "iter-20260426-140000-w1-issue-125.log",
+    }),
+    currentPr: {
+      number: 42,
+      title: "Slice 38: fuzzy match",
+      url: "https://github.com/x/y/pull/42",
+      isDraft: false,
+      additions: 120,
+      deletions: 30,
+      changedFiles: 5,
+      commitCount: 3,
+      reviewDecision: "APPROVED",
+      checks: { total: 4, pass: 3, fail: 0, pending: 1 },
+    },
+  };
+  await loadDashboard(page, {
+    ...baseStatus,
+    workers: [w],
+    currentIteration: w,
+    currentPr: w.currentPr,
+  });
+  const card = page.locator(".worker-card");
+  await expect(card.locator(".pr-card-title")).toContainText("#42");
+  await expect(card.locator(".pr-card-title")).toContainText(
+    "Slice 38: fuzzy match",
+  );
+  await expect(card.locator(".pr-card-title")).toHaveAttribute(
+    "rel",
+    "noopener noreferrer",
+  );
+  await expect(card.locator(".check-pill.pending")).toContainText(
+    "3✓ 0✗ 1○",
+  );
+  await expect(card.locator(".check-pill.pass")).toContainText("approved");
+});
+
+test("renders worker card for claim with no log file yet (starting state)", async ({
+  page,
+}) => {
+  // 10 minutes ago — exceeds 300s stuck threshold.
+  const startedAt = new Date(Date.now() - 600_000).toISOString();
+  const claimNoLog = {
+    issue: 200,
+    workerId: 3,
+    startedAt,
+    logFile: "iter-pending-w3-issue-200.log",
+    tail: "",
+    stage: { stage: "starting", label: "starting", icon: "○" },
+    reviewStats: null,
+    tokens: null,
+    lastWriteAt: null,
+    ageSec: 600,
+    stuck: true,
+    currentPr: null,
+  };
+  await loadDashboard(page, {
+    ...baseStatus,
+    workers: [claimNoLog],
+    currentIteration: claimNoLog,
+  });
+  const card = page.locator(".worker-card");
+  await expect(card).toHaveClass(/stuck/);
+  await expect(card).toContainText("#200");
+  await expect(card.locator(".worker-pill")).toHaveText(/worker 3/);
+});
+
+test("legacy single-worker mode (no workerId) hides worker pill", async ({
+  page,
+}) => {
+  const legacy = {
+    ...makeWorker({
+      workerId: null,
+      issue: 50,
+      logFile: "iter-20260426-140000-issue-50.log",
+    }),
+  };
+  legacy.workerId = null;
+  await loadDashboard(page, {
+    ...baseStatus,
+    workers: [legacy],
+    currentIteration: legacy,
+  });
+  await expect(page.locator(".worker-card")).toHaveCount(1);
+  await expect(page.locator(".worker-card .worker-pill")).toHaveCount(0);
+  await expect(page.locator("#workers-container")).not.toHaveClass(/multi/);
+});
