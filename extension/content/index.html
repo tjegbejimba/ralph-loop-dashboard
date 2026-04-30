@@ -23,15 +23,13 @@
 
         <main>
             <section class="panel current">
-                <h2>Current iteration <span id="stage-badge" class="stage-badge" hidden></span></h2>
-                <div id="current-body" class="placeholder">loading…</div>
-                <div id="iteration-strip" class="iteration-strip" hidden>
-                    <span class="strip-item" id="strip-heartbeat" title="seconds since last log write">heartbeat: —</span>
-                    <span class="strip-item" id="strip-review">review: —</span>
-                    <span class="strip-item" id="strip-tokens" hidden>tokens: —</span>
+                <h2>
+                    Active workers
+                    <span id="workers-count" class="count">—</span>
+                </h2>
+                <div id="workers-container" class="workers-container">
+                    <div class="placeholder">loading…</div>
                 </div>
-                <div id="pr-card" class="pr-card" hidden></div>
-                <pre id="current-tail" class="log"></pre>
             </section>
 
             <section class="panel cumulative" id="cumulative-panel">

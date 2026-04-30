@@ -26,19 +26,11 @@ function escapeHtml(s) {
   );
 }
 
-function renderPrCard(pr) {
-  const card = $("pr-card");
-  if (!card) return;
-  if (!pr) {
-    card.hidden = true;
-    return;
-  }
+function renderPrCardHtml(pr) {
+  if (!pr) return "";
   if (pr.error) {
-    card.hidden = false;
-    card.innerHTML = `<div class="pr-card-error">PR lookup failed: ${escapeHtml(pr.error)}</div>`;
-    return;
+    return `<div class="pr-card"><div class="pr-card-error">PR lookup failed: ${escapeHtml(pr.error)}</div></div>`;
   }
-  card.hidden = false;
   const ck = pr.checks;
   const ckBadge =
     ck.total === 0
@@ -52,28 +44,79 @@ function renderPrCard(pr) {
        </span>`
     : "";
   const draft = pr.isDraft ? '<span class="check-pill pending">draft</span>' : "";
-  card.innerHTML = `
-    <div class="pr-card-head">
-      <a href="${escapeHtml(pr.url)}" target="_blank" class="pr-card-title">
-        <span class="pr-card-num">#${pr.number}</span>
-        <span class="pr-card-text">${escapeHtml(pr.title)}</span>
-      </a>
-      ${draft}
-      ${ckBadge}
-      ${review}
+  return `
+    <div class="pr-card">
+      <div class="pr-card-head">
+        <a href="${escapeHtml(pr.url)}" target="_blank" class="pr-card-title">
+          <span class="pr-card-num">#${pr.number}</span>
+          <span class="pr-card-text">${escapeHtml(pr.title)}</span>
+        </a>
+        ${draft}
+        ${ckBadge}
+        ${review}
+      </div>
+      <div class="pr-card-meta">
+        <span class="add">+${pr.additions.toLocaleString()}</span>
+        <span class="del">−${pr.deletions.toLocaleString()}</span>
+        · ${pr.changedFiles} file${pr.changedFiles === 1 ? "" : "s"}
+        · ${pr.commitCount} commit${pr.commitCount === 1 ? "" : "s"}
+      </div>
     </div>
-    <div class="pr-card-meta">
-      <span class="add">+${pr.additions.toLocaleString()}</span>
-      <span class="del">−${pr.deletions.toLocaleString()}</span>
-      · ${pr.changedFiles} file${pr.changedFiles === 1 ? "" : "s"}
-      · ${pr.commitCount} commit${pr.commitCount === 1 ? "" : "s"}
+  `;
+}
+
+function renderWorkerCardHtml(it, isLive) {
+  const elapsed = fmtDuration(Date.now() - new Date(it.startedAt).getTime());
+  const statusLabel = isLive ? "● running" : "○ last (loop stopped)";
+  const statusClass = isLive ? "accent" : "purple";
+  const stage = it.stage || { stage: "starting", label: "starting", icon: "○" };
+  const ageSec = it.ageSec ?? 0;
+  const heartbeatTitle = it.stuck
+    ? "Loop may be stuck — no log writes >5min"
+    : it.lastWriteAt
+      ? `last log write at ${fmtTime(it.lastWriteAt)}`
+      : "no writes yet";
+  const reviewLabel = it.reviewStats
+    ? `review: gpt ${it.reviewStats.gpt}× · opus ${it.reviewStats.opus}×`
+    : "review: not yet";
+  const reviewClass = it.reviewStats ? "ok" : "";
+  const tokensHtml =
+    it.tokens != null
+      ? `<span class="strip-item">tokens: ${it.tokens.toLocaleString()}</span>`
+      : "";
+  const workerLabel =
+    it.workerId != null
+      ? `<span class="worker-pill">worker ${it.workerId}</span>`
+      : "";
+  return `
+    <div class="worker-card${it.stuck ? " stuck" : ""}">
+      <div class="worker-card-head">
+        ${workerLabel}
+        <span class="stage-badge stage-${stage.stage}">${stage.icon} ${stage.label}</span>
+      </div>
+      <div class="worker-card-body">
+        <span class="field"><span class="label">status:</span><span class="val ${statusClass}">${statusLabel}</span></span>
+        <span class="field"><span class="label">issue:</span><span class="val">#${it.issue}</span></span>
+        <span class="field"><span class="label">started:</span><span class="val">${fmtTime(it.startedAt)}</span></span>
+        <span class="field"><span class="label">elapsed:</span><span class="val">${elapsed}</span></span>
+      </div>
+      <div class="worker-card-log-meta">${escapeHtml(it.logFile || "(no log)")}</div>
+      <div class="iteration-strip">
+        <span class="strip-item${it.stuck ? " warn" : ""}" title="${escapeHtml(heartbeatTitle)}">
+          last write: ${ageSec ? fmtDuration(ageSec * 1000) + " ago" : "—"}
+        </span>
+        <span class="strip-item ${reviewClass}">${reviewLabel}</span>
+        ${tokensHtml}
+      </div>
+      ${renderPrCardHtml(it.currentPr)}
+      <pre class="log">${escapeHtml(it.tail || "(no log content)")}</pre>
     </div>
   `;
 }
 
 // --- Desktop notifications on transitions ---
 
-const notifyState = { lastMergedNum: null, lastIssue: null, lastStuck: false };
+const notifyState = { lastMergedNum: null, lastIssues: null, stuckIssues: null };
 
 function notify(title, body) {
   if (typeof Notification === "undefined") return;
@@ -85,20 +128,30 @@ function notify(title, body) {
 }
 
 function maybeNotify(s) {
-  // 1. Iteration started on a new issue
-  const it = s.currentIteration;
-  if (it && notifyState.lastIssue !== null && it.issue !== notifyState.lastIssue) {
-    notify("Ralph: new iteration", `Working on #${it.issue}`);
+  const workers = Array.isArray(s.workers) ? s.workers : [];
+  // Track issues currently in flight; notify when a NEW one appears.
+  const currentIssues = new Set(workers.map((w) => w.issue));
+  if (notifyState.lastIssues) {
+    for (const issue of currentIssues) {
+      if (!notifyState.lastIssues.has(issue)) {
+        notify("Ralph: new iteration", `Working on #${issue}`);
+      }
+    }
   }
-  if (it) notifyState.lastIssue = it.issue;
+  notifyState.lastIssues = currentIssues;
 
-  // 2. Loop went stuck
-  if (it && it.stuck && !notifyState.lastStuck) {
-    notify("Ralph: loop may be stuck", `No log writes for ${fmtDuration(it.ageSec * 1000)}`);
+  // Stuck warning — fire once per (issue, stuck-edge).
+  if (!notifyState.stuckIssues) notifyState.stuckIssues = new Set();
+  for (const w of workers) {
+    if (w.stuck && !notifyState.stuckIssues.has(w.issue)) {
+      notifyState.stuckIssues.add(w.issue);
+      notify("Ralph: worker may be stuck", `#${w.issue} — no log writes for ${fmtDuration(w.ageSec * 1000)}`);
+    } else if (!w.stuck) {
+      notifyState.stuckIssues.delete(w.issue);
+    }
   }
-  notifyState.lastStuck = !!(it && it.stuck);
 
-  // 3. New PR merged today
+  // PR merged — same as before.
   const lastMerged = (s.recentPrs || []).find((p) => p.state === "MERGED");
   if (
     lastMerged &&
@@ -147,75 +200,24 @@ function render(s) {
 
   $("last-updated").textContent = `updated ${fmtTime(s.timestamp)}`;
 
-  // Current iteration
-  const currentBody = $("current-body");
-  if (s.currentIteration) {
-    const it = s.currentIteration;
-    const elapsed = fmtDuration(Date.now() - new Date(it.startedAt).getTime());
-    const isLive = s.loopRunning;
-    const statusLabel = isLive ? "● running" : "○ last (loop stopped)";
-    const statusClass = isLive ? "accent" : "purple";
-    currentBody.classList.remove("placeholder");
-    currentBody.innerHTML = `
-            <div>
-                <span class="field"><span class="label">status:</span><span class="val ${statusClass}">${statusLabel}</span></span>
-                <span class="field"><span class="label">issue:</span><span class="val">#${it.issue}</span></span>
-                <span class="field"><span class="label">started:</span><span class="val">${fmtTime(it.startedAt)}</span></span>
-                <span class="field"><span class="label">elapsed:</span><span class="val">${elapsed}</span></span>
-            </div>
-            <div style="margin-top:6px;color:var(--muted);font-size:11px;">${escapeHtml(it.logFile)}</div>
-        `;
-    $("current-tail").textContent = it.tail || "(no log content)";
-
-    // Stage badge
-    const badge = $("stage-badge");
-    if (badge && it.stage) {
-      badge.hidden = false;
-      badge.className = `stage-badge stage-${it.stage.stage}`;
-      badge.textContent = `${it.stage.icon} ${it.stage.label}`;
-    }
-
-    // Iteration strip (heartbeat, review, tokens)
-    const strip = $("iteration-strip");
-    if (strip) {
-      strip.hidden = false;
-      const hb = $("strip-heartbeat");
-      hb.textContent = `last write: ${fmtDuration(it.ageSec * 1000)} ago`;
-      hb.classList.toggle("warn", !!it.stuck);
-      hb.title = it.stuck
-        ? "Loop may be stuck — no log writes >5min"
-        : `last log write at ${fmtTime(it.lastWriteAt)}`;
-
-      const rv = $("strip-review");
-      if (it.reviewStats) {
-        rv.textContent = `review: gpt ${it.reviewStats.gpt}× · opus ${it.reviewStats.opus}×`;
-        rv.classList.add("ok");
-      } else {
-        rv.textContent = "review: not yet";
-        rv.classList.remove("ok");
-      }
-
-      const tk = $("strip-tokens");
-      if (it.tokens != null) {
-        tk.hidden = false;
-        tk.textContent = `tokens: ${it.tokens.toLocaleString()}`;
-      } else {
-        tk.hidden = true;
-      }
-    }
-
-    // PR card
-    renderPrCard(s.currentPr);
-
-    // Notification on transitions
-    maybeNotify(s);
-  } else {
-    currentBody.innerHTML = '<span class="placeholder">no iteration log found</span>';
-    $("current-tail").textContent = "";
-    $("stage-badge").hidden = true;
-    $("iteration-strip").hidden = true;
-    $("pr-card").hidden = true;
+  // Active workers — render one card per active iteration.
+  const workersContainer = $("workers-container");
+  const workers = Array.isArray(s.workers) ? s.workers : [];
+  const workersCount = $("workers-count");
+  if (workersCount) {
+    workersCount.textContent = workers.length === 0 ? "—" : `${workers.length} active`;
   }
+  if (workers.length === 0) {
+    workersContainer.classList.remove("multi");
+    workersContainer.innerHTML =
+      '<div class="placeholder">no active workers</div>';
+  } else {
+    workersContainer.classList.toggle("multi", workers.length > 1);
+    workersContainer.innerHTML = workers
+      .map((w) => renderWorkerCardHtml(w, s.loopRunning))
+      .join("");
+  }
+  maybeNotify(s);
 
   // Cumulative stats
   if (s.cumulative) {
@@ -309,10 +311,15 @@ function renderHistory(h) {
       const label = it.status === "open" ? "···" : "✓";
       const href = it.prUrl ? ` href="${escapeHtml(it.prUrl)}" target="_blank"` : "";
       const titleAttr = `title="${escapeHtml(it.logFile)}"`;
+      const workerTag =
+        it.workerId != null
+          ? `<span class="worker-pill small">w${it.workerId}</span>`
+          : "";
       return `
                 <li ${titleAttr}>
                     <span class="pr-state ${cls}">${label}</span>
                     <span class="slice-num">#${it.issue}</span>
+                    ${workerTag}
                     <span class="issue-title">${href ? `<a${href}>` : ""}${fmtTime(it.startedAt)}${href ? "</a>" : ""}</span>
                     <span class="issue-num" style="margin-left:auto">${dur}</span>
                 </li>
