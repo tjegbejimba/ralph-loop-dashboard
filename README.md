@@ -53,8 +53,24 @@ Each issue body should describe the slice's intent + acceptance criteria. The lo
 
 ```bash
 .ralph/launch.sh                     # background, logs to .ralph/loop.out
-.ralph/launch.sh --foreground        # attached
+.ralph/launch.sh --foreground        # attached (single-worker only)
+.ralph/launch.sh --status            # active workers + claims
+.ralph/launch.sh --stop              # SIGTERM all workers
 ```
+
+### Parallel workers
+
+Run multiple slices concurrently. Each worker gets its own git worktree
+(`<MAIN>-ralph-1`, `-2`, …) on its own branch (`ralph-loop-1`, …) and they
+coordinate via `.ralph/state.json` (file-locked).
+
+```bash
+RALPH_PARALLELISM=2 .ralph/launch.sh
+```
+
+A worker only claims an issue whose **Blocked by** issues are all CLOSED, so
+the dependency graph from your sliced issues is honored automatically. Stale
+claims (worker crashed) are auto-reaped on the next selection round.
 
 Or use the dashboard's "Start" button (after restarting Copilot CLI):
 
@@ -78,8 +94,11 @@ All optional. Set as environment variables:
 | `RALPH_MODEL` | `claude-sonnet-4.5` | Model passed to `copilot -p` |
 | `RALPH_TIMEOUT_SEC` | `7200` | Per-iteration timeout |
 | `RALPH_MAIN_REPO` | parent of `.ralph/` | Path to your main checkout |
-| `RALPH_LOOP_REPO` | `<MAIN>-ralph` | Path to the dedicated worktree |
-| `RALPH_LOOP_BRANCH` | `ralph-loop` | Branch name for the worktree |
+| `RALPH_LOOP_REPO` | `<MAIN>-ralph` | Base path for loop worktree(s); worker N gets `-N` suffix when parallelism>1 |
+| `RALPH_LOOP_BRANCH` | `ralph-loop` | Base branch name; worker N gets `-N` suffix when parallelism>1 |
+| `RALPH_PARALLELISM` | `1` | Number of concurrent workers |
+| `RALPH_WORKER_ID` | `1` | Set automatically by `launch.sh`; identifies a worker in `state.json` and log filenames |
+| `RALPH_POLL_SEC` | `30` | How long a worker sleeps when no eligible issue is available |
 | `RALPH_REPO_ROOT` | walks up from cwd | Override for the dashboard's project detection |
 
 To customize the title pattern (e.g., for "Task N:" instead of "Slice N:"):

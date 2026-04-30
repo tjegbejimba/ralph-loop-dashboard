@@ -45,9 +45,10 @@ install_scripts() {
   fi
 
   echo "📋 Copying loop scripts -> $ralph_dir"
-  mkdir -p "$ralph_dir"
+  mkdir -p "$ralph_dir/lib"
   cp "$REPO_DIR/ralph/ralph.sh" "$ralph_dir/ralph.sh"
   cp "$REPO_DIR/ralph/launch.sh" "$ralph_dir/launch.sh"
+  cp "$REPO_DIR/ralph/lib/state.sh" "$ralph_dir/lib/state.sh"
   chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
 
   # Render RALPH.md from template using detected target repo slug.
@@ -65,6 +66,8 @@ install_scripts() {
 loop.out
 logs/
 lock/
+state.json
+state.lock/
 EOF
 
   echo "✅ Loop scripts installed. Customize $ralph_dir/RALPH.md if needed."
