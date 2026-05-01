@@ -127,7 +127,12 @@ function renderWorkerCardHtml(it, isLive) {
 
 // --- Desktop notifications on transitions ---
 
-const notifyState = { lastMergedNum: null, lastIssues: null, stuckIssues: null };
+const notifyState = {
+  lastMergedNum: null,
+  lastIssues: null,
+  stuckIssues: null,
+  lastLoopRunning: null,
+};
 
 function notify(title, body) {
   if (typeof Notification === "undefined") return;
@@ -177,6 +182,27 @@ function maybeNotify(s) {
     notify("Ralph: PR merged 🎉", `#${lastMerged.number} ${lastMerged.title}`);
   }
   if (lastMerged) notifyState.lastMergedNum = lastMerged.number;
+
+  // Loop-done — fire when loopRunning flips true → false. Differentiate
+  // "queue cleared" (every slice merged, victory) from "loop halted with
+  // work remaining" (a worker died — bug, conflict, propagation lag, etc.).
+  // Skip the very first render so reopening the dashboard mid-stop doesn't
+  // re-fire a stale notification.
+  if (
+    notifyState.lastLoopRunning === true &&
+    s.loopRunning === false
+  ) {
+    const remaining = Array.isArray(s.openSlices) ? s.openSlices.length : 0;
+    if (remaining === 0) {
+      notify("Ralph: all workers done 🎉", "Queue is empty — every slice merged.");
+    } else {
+      notify(
+        "Ralph: loop stopped",
+        `${remaining} slice${remaining === 1 ? "" : "s"} still in queue. Check the dashboard.`,
+      );
+    }
+  }
+  notifyState.lastLoopRunning = s.loopRunning;
 }
 
 // Ask once on first user click anywhere on the page (browsers gate notifications behind a gesture)

@@ -352,3 +352,86 @@ test("legacy single-worker mode (no workerId) hides worker pill", async ({
   await expect(page.locator(".worker-card .worker-pill")).toHaveCount(0);
   await expect(page.locator("#workers-container")).not.toHaveClass(/multi/);
 });
+
+// Drives a loopRunning true → false transition through the stubbed
+// getStatus() and verifies the appropriate Notification fires.
+async function runLoopDoneTest(page, { remainingSlices, expectedTitle, expectedBodyMatch }) {
+  await page.addInitScript(() => {
+    // Stub Notification so the page treats permission as granted and we can
+    // observe constructor calls without provoking the real OS layer.
+    window.__notifications = [];
+    class FakeNotification {
+      constructor(title, opts) {
+        window.__notifications.push({ title, body: opts?.body || "" });
+      }
+      static permission = "granted";
+      static requestPermission() {
+        return Promise.resolve("granted");
+      }
+    }
+    window.Notification = FakeNotification;
+
+    // Mutable status: starts running, no slices remaining configured by test.
+    window.__status = {
+      timestamp: new Date().toISOString(),
+      loopRunning: true,
+      workers: [],
+      currentIteration: null,
+      currentPr: null,
+      recentPrs: [],
+      iterationHistory: { iterations: [], stats: null },
+      queue: [],
+      openSlices: [],
+      cumulative: null,
+    };
+    window.copilot = {
+      getStatus: () => Promise.resolve(window.__status),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  // First render saw loopRunning=true; flip to false and trigger another render.
+  await page.evaluate((slices) => {
+    window.__status = {
+      ...window.__status,
+      loopRunning: false,
+      openSlices: slices,
+      timestamp: new Date().toISOString(),
+    };
+  }, remainingSlices);
+  await page.locator("#refresh-btn").click();
+
+  await expect
+    .poll(async () => await page.evaluate(() => window.__notifications.length))
+    .toBeGreaterThan(0);
+  const notes = await page.evaluate(() => window.__notifications);
+  const found = notes.find((n) => n.title === expectedTitle);
+  expect(found, `expected notification title "${expectedTitle}", got ${JSON.stringify(notes)}`).toBeTruthy();
+  expect(found.body).toMatch(expectedBodyMatch);
+}
+
+test("notifies '🎉 all workers done' when loop finishes with empty queue", async ({ page }) => {
+  await runLoopDoneTest(page, {
+    remainingSlices: [],
+    expectedTitle: "Ralph: all workers done 🎉",
+    expectedBodyMatch: /every slice merged/i,
+  });
+});
+
+test("notifies 'loop stopped' when loop finishes with slices still in queue", async ({ page }) => {
+  await runLoopDoneTest(page, {
+    remainingSlices: [
+      { number: 200, title: "Slice 5: foo", url: "https://example/200" },
+      { number: 201, title: "Slice 6: bar", url: "https://example/201" },
+    ],
+    expectedTitle: "Ralph: loop stopped",
+    expectedBodyMatch: /2 slices still in queue/i,
+  });
+});
