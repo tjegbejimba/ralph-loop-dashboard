@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "playwright test",
+    "test": "node --test test/tokens.test.mjs && playwright test",
+    "test:unit": "node --test test/tokens.test.mjs",
     "test:ui": "playwright test --ui"
   },
   "devDependencies": {

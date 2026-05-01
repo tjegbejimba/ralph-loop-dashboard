@@ -462,3 +462,67 @@ test("notifies 'loop stopped' when loop finishes with slices still in queue", as
     expectedBodyMatch: /2 slices still in queue/i,
   });
 });
+
+test("renders 'tokens: running…' when in-flight worker has no Tokens line yet", async ({ page }) => {
+  const w = makeWorker({
+    workerId: 1,
+    issue: 125,
+    logFile: "iter-20260426-140000-w1-issue-125.log",
+  });
+  // tokens === null mirrors detectTokens() returning null pre-summary.
+  await loadDashboard(page, { ...baseStatus, workers: [w], currentIteration: w });
+  const card = page.locator(".worker-card");
+  await expect(card.locator(".strip-item", { hasText: /tokens:/ })).toContainText("running");
+});
+
+test("renders compact ↑input · ↓output token line when summary is present", async ({ page }) => {
+  const w = {
+    ...makeWorker({
+      workerId: 1,
+      issue: 125,
+      logFile: "iter-20260426-140000-w1-issue-125.log",
+    }),
+    tokens: { input: 8_900_000, output: 59_500, cached: 8_600_000, reasoning: null, total: 8_959_500 },
+  };
+  await loadDashboard(page, { ...baseStatus, workers: [w], currentIteration: w });
+  const strip = page.locator(".worker-card .strip-item", { hasText: /tokens:/ });
+  await expect(strip).toContainText(/↑\s*8\.9m/);
+  await expect(strip).toContainText(/↓\s*59\.5k/);
+});
+
+test("renders worker cumulative footer with total and iteration count", async ({ page }) => {
+  const w = {
+    ...makeWorker({
+      workerId: 2,
+      issue: 130,
+      logFile: "iter-20260426-140000-w2-issue-130.log",
+    }),
+    tokens: { input: 1_300_000, output: 4_900, cached: 1_200_000, reasoning: null, total: 1_304_900 },
+    cumulativeTokens: {
+      input: 25_000_000,
+      output: 150_000,
+      cached: 23_000_000,
+      reasoning: 2_500,
+      iterations: 4,
+      total: 25_150_000,
+    },
+  };
+  await loadDashboard(page, { ...baseStatus, workers: [w], currentIteration: w });
+  const cum = page.locator(".worker-card-cumulative");
+  await expect(cum).toBeVisible();
+  await expect(cum).toContainText(/worker total:\s*↑\s*25\.0m\s*·\s*↓\s*150\.0k/);
+  await expect(cum).toContainText(/4×\s*iter/);
+});
+
+test("hides cumulative footer when worker has zero completed iterations", async ({ page }) => {
+  const w = {
+    ...makeWorker({
+      workerId: 1,
+      issue: 125,
+      logFile: "iter-20260426-140000-w1-issue-125.log",
+    }),
+    cumulativeTokens: { input: 0, output: 0, cached: 0, reasoning: 0, iterations: 0, total: 0 },
+  };
+  await loadDashboard(page, { ...baseStatus, workers: [w], currentIteration: w });
+  await expect(page.locator(".worker-card-cumulative")).toHaveCount(0);
+});
