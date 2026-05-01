@@ -277,6 +277,10 @@ ISSUE #${num}
 ---
 ${issue_text}"
 
+  # Capture timestamp before the agent runs so the fallback can reject historical
+  # merges (e.g., a previously-closed issue that was reopened for regression).
+  iter_start_ts=$(date -u +%FT%TZ)
+
   set +e
   run_with_timeout "$TIMEOUT_SEC" \
     copilot -p "$full_prompt" \
@@ -321,16 +325,25 @@ ${issue_text}"
     fi
   done
 
-  # Fallback: if still no merged PR via the issue link, scan the 10 most recently
-  # merged PRs for one whose body or commit closes this issue. Handles the case
-  # where GitHub closed the issue via "Closes #N" in a merge commit but never
-  # populated closedByPullRequestsReferences.
-  if [[ "$state" == "CLOSED" && "$merged_count" -lt 1 ]]; then
-    echo "ℹ️  Issue #$num closure link still empty after retries; checking recent merged PRs for 'Closes #$num'..." >&2
-    fallback_pr=$(gh pr list --repo "$REPO" --state merged --limit 10 \
+  # Fallback: scan recent merged PRs for one whose body closes this issue.
+  # Runs whenever the issue link still shows zero merged PRs — including the
+  # case where the issue is still OPEN because state propagation is slow but
+  # the squash-merge has already landed. We only halt if no merged PR exists;
+  # the issue state itself is eventually consistent and not load-bearing here.
+  #
+  # Two guards prevent false positives:
+  #  - mergedAt > iter_start_ts: rejects historical merges (e.g., a regression
+  #    on a reopened issue would otherwise match the original closing PR).
+  #  - baseRefName == default branch: GitHub only auto-closes via "Closes #N"
+  #    when the PR merged into the default branch, so non-default merges
+  #    couldn't have closed the issue and must not be credited here.
+  if [[ "$merged_count" -lt 1 ]]; then
+    default_branch=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+    echo "ℹ️  Issue #$num closure link empty after retries (state=$state); checking recent merged PRs for 'Closes #$num' on $default_branch since $iter_start_ts..." >&2
+    fallback_pr=$(gh pr list --repo "$REPO" --state merged --limit 20 --base "$default_branch" \
       --search "in:body \"#$num\"" \
-      --json number,body \
-      --jq ".[] | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | .number" \
+      --json number,body,mergedAt,baseRefName \
+      --jq ".[] | select(.mergedAt > \"$iter_start_ts\") | select(.baseRefName == \"$default_branch\") | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | .number" \
       | head -1)
     if [[ -n "$fallback_pr" ]]; then
       echo "✅ Found merged PR #$fallback_pr referencing 'Closes #$num' — accepting." >&2
@@ -338,7 +351,7 @@ ${issue_text}"
     fi
   fi
 
-  if [[ "$state" != "CLOSED" || "$merged_count" -lt 1 ]]; then
+  if [[ "$merged_count" -lt 1 ]]; then
     echo "⚠️  Issue #$num not closed by a merged PR (state=$state, merged_prs=$merged_count). Halting." >&2
     exit 1
   fi
