@@ -28,10 +28,13 @@ ralph-loop-dashboard/
 git clone https://github.com/tjegbejimba/ralph-loop-dashboard.git
 cd ralph-loop-dashboard
 ./install.sh /path/to/your/project
+# or choose a repo profile explicitly
+./install.sh /path/to/your/project --profile python
 ```
 
 This:
 - Copies `ralph/*` → `<your-project>/.ralph/`, with `RALPH.md` rendered from the template using your repo slug
+- Creates `<your-project>/.ralph/config.json` from a profile (`generic`, `bun`, or `python`)
 - Symlinks `extension/` → `~/.copilot/extensions/ralph-dashboard/` (user-level, available in all Copilot CLI sessions)
 
 Restart Copilot CLI afterwards (or `/restart`) so the extension is picked up.
@@ -83,14 +86,55 @@ The loop iterates until no open matching issues remain, then exits cleanly.
 
 ## Configuration
 
-All optional. Set as environment variables:
+Project-specific config lives at `.ralph/config.json`. Built-in profiles live in
+`ralph/profiles/` and can be selected during install:
+
+```bash
+./install.sh /path/to/project --profile generic
+./install.sh /path/to/project --profile bun
+./install.sh /path/to/project --profile python
+```
+
+The installer never overwrites an existing `.ralph/config.json` unless
+`--force-config` is passed.
+
+Config is intentionally small:
+
+```json
+{
+  "profile": "python",
+  "issue": {
+    "titleRegex": "^Slice [0-9]+:",
+    "titleNumRegex": "^Slice (?<x>[0-9]+):",
+    "issueSearch": "Slice in:title"
+  },
+  "validation": {
+    "commands": [
+      { "name": "Compile", "command": "python3 -m py_compile <changed python files>" },
+      { "name": "Unit tests", "command": "python3 -m unittest discover" }
+    ]
+  },
+  "stages": [
+    {
+      "id": "testing",
+      "label": "running tests",
+      "icon": "🧪",
+      "patterns": ["\\bpytest\\b", "python3? -m unittest"]
+    }
+  ]
+}
+```
+
+The config informs the prompt and dashboard. The worker agent still runs validation commands; the dashboard does not execute them.
+
+Environment variables still override config:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
 | `RALPH_REPO` | auto-detected from `git remote origin` | `owner/repo` for `gh` calls |
-| `RALPH_TITLE_REGEX` | `^Slice [0-9]+:` | Matches issues to work on (extension + script) |
-| `RALPH_TITLE_NUM_REGEX` | `^Slice (?<x>[0-9]+):` | jq-compatible capture for the number |
-| `RALPH_ISSUE_SEARCH` | `Slice in:title` | `gh issue list --search` query (extension) |
+| `RALPH_TITLE_REGEX` | config or `^Slice [0-9]+:` | Matches issues to work on (extension + script) |
+| `RALPH_TITLE_NUM_REGEX` | config or `^Slice (?<x>[0-9]+):` | jq-compatible capture for the number |
+| `RALPH_ISSUE_SEARCH` | config or `Slice in:title` | `gh issue list --search` query (extension) |
 | `RALPH_MODEL` | `claude-sonnet-4.5` | Model passed to `copilot -p` |
 | `RALPH_TIMEOUT_SEC` | `7200` | Per-iteration timeout |
 | `RALPH_MAIN_REPO` | parent of `.ralph/` | Path to your main checkout |

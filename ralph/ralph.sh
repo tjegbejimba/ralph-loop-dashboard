@@ -26,10 +26,29 @@ set -euo pipefail
 # minimal-PATH contexts (nohup, launchd, dashboard, etc.)
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-REPO="${RALPH_REPO:-$(git -C "$(git rev-parse --show-toplevel)" config --get remote.origin.url 2>/dev/null | sed -E 's#(git@github.com:|https://github.com/)##; s/\.git$//')}"
-TITLE_REGEX="${RALPH_TITLE_REGEX:-^Slice [0-9]+:}"
-TITLE_NUM_RE="${RALPH_TITLE_NUM_REGEX:-^Slice (?<x>[0-9]+):}"
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+CONFIG_FILE="$SCRIPT_DIR/config.json"
+
+config_get() {
+  local jq_path="$1"
+  if [[ -f "$CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+    jq -r "${jq_path} // empty" "$CONFIG_FILE" 2>/dev/null || true
+  fi
+}
+
+REPO="${RALPH_REPO:-$(git -C "$(git rev-parse --show-toplevel)" config --get remote.origin.url 2>/dev/null | sed -E 's#(git@github.com:|https://github.com/)##; s/\.git$//')}"
+TITLE_REGEX="${RALPH_TITLE_REGEX:-$(config_get '.issue.titleRegex')}"
+TITLE_REGEX="${TITLE_REGEX:-^Slice [0-9]+:}"
+TITLE_NUM_RE="${RALPH_TITLE_NUM_REGEX:-$(config_get '.issue.titleNumRegex')}"
+TITLE_NUM_RE="${TITLE_NUM_RE:-^Slice (?<x>[0-9]+):}"
+if ! jq -nr --arg re "$TITLE_REGEX" '"" | test($re)' >/dev/null 2>&1; then
+  echo "⚠️  Invalid issue.titleRegex \"$TITLE_REGEX\"; using default Slice pattern." >&2
+  TITLE_REGEX="^Slice [0-9]+:"
+fi
+if ! jq -nr --arg re "$TITLE_NUM_RE" '"Slice 1:" | capture($re)' >/dev/null 2>&1; then
+  echo "⚠️  Invalid issue.titleNumRegex \"$TITLE_NUM_RE\"; using default Slice number pattern." >&2
+  TITLE_NUM_RE="^Slice (?<x>[0-9]+):"
+fi
 PROMPT_FILE="$SCRIPT_DIR/RALPH.md"
 LOG_DIR="$SCRIPT_DIR/logs"
 WORKER_ID="${RALPH_WORKER_ID:-1}"

@@ -1,0 +1,71 @@
+{
+  "profile": "python",
+  "issue": {
+    "titleRegex": "^Slice [0-9]+:",
+    "titleNumRegex": "^Slice (?<x>[0-9]+):",
+    "issueSearch": "Slice in:title"
+  },
+  "validation": {
+    "commands": [
+      {
+        "name": "Compile",
+        "command": "python3 -m py_compile <changed python files>"
+      },
+      {
+        "name": "Unit tests",
+        "command": "python3 -m unittest discover"
+      }
+    ]
+  },
+  "stages": [
+    {
+      "id": "merging",
+      "label": "merging",
+      "icon": "✓",
+      "patterns": ["gh pr merge\\b"]
+    },
+    {
+      "id": "ci-wait",
+      "label": "waiting on CI",
+      "icon": "⏱",
+      "patterns": ["gh pr checks\\b"]
+    },
+    {
+      "id": "review",
+      "label": "code review",
+      "icon": "🔍",
+      "patterns": ["Code-review\\("]
+    },
+    {
+      "id": "pr-open",
+      "label": "PR opened",
+      "icon": "↑",
+      "patterns": ["gh pr create\\b"]
+    },
+    {
+      "id": "planning",
+      "label": "planning critique",
+      "icon": "🦆",
+      "patterns": ["Rubber-duck\\("]
+    },
+    {
+      "id": "testing",
+      "label": "running tests",
+      "icon": "🧪",
+      "patterns": ["\\bpytest\\b", "python3? -m unittest", "python3? -m py_compile"]
+    },
+    {
+      "id": "building",
+      "label": "checking compose",
+      "icon": "🏗",
+      "patterns": ["docker compose (config|build)"]
+    },
+    {
+      "id": "implementing",
+      "label": "committing",
+      "icon": "✎",
+      "patterns": ["\\bgit (commit|push)\\b"]
+    }
+  ]
+}
+

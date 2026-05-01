@@ -42,19 +42,121 @@ const REPO_ROOT = resolveRepoRoot();
 const LOOP_LOG = join(REPO_ROOT, ".ralph", "loop.out");
 const LOGS_DIR = join(REPO_ROOT, ".ralph", "logs");
 const STATE_FILE = join(REPO_ROOT, ".ralph", "state.json");
+const CONFIG_FILE = join(REPO_ROOT, ".ralph", "config.json");
 
 // Iteration log filenames may include an optional worker-id segment:
 //   iter-{YYYYMMDD}-{HHMMSS}-w{id}-issue-{N}.log   (parallel workers)
 //   iter-{YYYYMMDD}-{HHMMSS}-issue-{N}.log         (legacy single worker)
 const ITER_LOG_REGEX = /^iter-(\d{8})-(\d{6})(?:-w(\d+))?-issue-(\d+)\.log$/;
 
-// Issue title pattern. Default matches "Slice N:" but can be overridden so
-// other workflows (e.g., "Task N:" or "Step N:") work without code changes.
-const TITLE_REGEX_SOURCE = process.env.RALPH_TITLE_REGEX || "^Slice [0-9]+:";
-const TITLE_REGEX = new RegExp(TITLE_REGEX_SOURCE);
-const TITLE_NUM_RE = new RegExp(process.env.RALPH_TITLE_NUM_REGEX || "^Slice ([0-9]+):");
+const DEFAULT_CONFIG = {
+  profile: "generic",
+  issue: {
+    titleRegex: "^Slice [0-9]+:",
+    titleNumRegex: "^Slice ([0-9]+):",
+    issueSearch: "Slice in:title",
+  },
+  validation: {
+    commands: [{ name: "Project checks", command: "Run the relevant checks documented by this repo." }],
+  },
+  stages: [
+    { id: "merging", label: "merging", icon: "✓", patterns: ["gh pr merge\\b"] },
+    { id: "ci-wait", label: "waiting on CI", icon: "⏱", patterns: ["gh pr checks\\b"] },
+    { id: "review", label: "code review", icon: "🔍", patterns: ["Code-review\\("] },
+    { id: "pr-open", label: "PR opened", icon: "↑", patterns: ["gh pr create\\b"] },
+    { id: "planning", label: "planning critique", icon: "🦆", patterns: ["Rubber-duck\\("] },
+    { id: "testing", label: "running tests", icon: "🧪", patterns: ["\\bbun test\\b"] },
+    { id: "implementing", label: "committing", icon: "✎", patterns: ["\\bgit (commit|push)\\b"] },
+  ],
+};
+
+function readRalphConfig() {
+  const warnings = [];
+  let userConfig = {};
+  if (existsSync(CONFIG_FILE)) {
+    try {
+      userConfig = JSON.parse(readFileSync(CONFIG_FILE, "utf8"));
+    } catch (err) {
+      warnings.push(`Could not parse .ralph/config.json: ${err.message || err}`);
+    }
+  }
+  const config = {
+    ...DEFAULT_CONFIG,
+    ...userConfig,
+    issue: { ...DEFAULT_CONFIG.issue, ...(userConfig.issue || {}) },
+    validation: { ...DEFAULT_CONFIG.validation, ...(userConfig.validation || {}) },
+    stages: Array.isArray(userConfig.stages) ? userConfig.stages : DEFAULT_CONFIG.stages,
+  };
+  if (!Array.isArray(config.validation.commands)) {
+    warnings.push("Invalid validation.commands; using an empty command list.");
+    config.validation.commands = [];
+  }
+  if (userConfig.stages !== undefined && !Array.isArray(userConfig.stages)) {
+    warnings.push("Invalid stages; using default stage patterns.");
+    config.stages = DEFAULT_CONFIG.stages;
+  }
+  return { config, warnings };
+}
+
+function compileRegex(source, fallback, warnings, label, flags = "") {
+  const chosen = source || fallback;
+  try {
+    return { source: chosen, regex: new RegExp(chosen, flags) };
+  } catch {
+    warnings.push(`Invalid ${label} regex "${chosen}"; using "${fallback}".`);
+    return { source: fallback, regex: new RegExp(fallback, flags) };
+  }
+}
+
+function compileStages(config, warnings) {
+  const compiled = [];
+  for (const stage of config.stages) {
+    if (!stage || typeof stage !== "object") continue;
+    const regexes = [];
+    for (const pattern of Array.isArray(stage.patterns) ? stage.patterns : []) {
+      try {
+        regexes.push(new RegExp(pattern, "i"));
+      } catch {
+        warnings.push(`Invalid stage regex "${pattern}" for stage "${stage.id || "unknown"}"; ignoring.`);
+      }
+    }
+    if (regexes.length === 0) continue;
+    compiled.push({
+      stage: String(stage.id || "working"),
+      label: String(stage.label || stage.id || "working"),
+      icon: String(stage.icon || "○"),
+      regexes,
+    });
+  }
+  if (compiled.length > 0) return compiled;
+  return DEFAULT_CONFIG.stages.map((stage) => ({
+    stage: stage.id,
+    label: stage.label,
+    icon: stage.icon,
+    regexes: stage.patterns.map((pattern) => new RegExp(pattern, "i")),
+  }));
+}
+
+const { config: RALPH_CONFIG, warnings: CONFIG_WARNINGS } = readRalphConfig();
+const titleRegex = compileRegex(
+  process.env.RALPH_TITLE_REGEX || RALPH_CONFIG.issue.titleRegex,
+  DEFAULT_CONFIG.issue.titleRegex,
+  CONFIG_WARNINGS,
+  "issue.titleRegex",
+);
+const titleNumRegex = compileRegex(
+  process.env.RALPH_TITLE_NUM_REGEX || RALPH_CONFIG.issue.titleNumRegex,
+  DEFAULT_CONFIG.issue.titleNumRegex,
+  CONFIG_WARNINGS,
+  "issue.titleNumRegex",
+);
+const TITLE_REGEX_SOURCE = titleRegex.source;
+const TITLE_REGEX = titleRegex.regex;
+const TITLE_NUM_RE = titleNumRegex.regex;
 // gh search query — see https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests
-const ISSUE_SEARCH = process.env.RALPH_ISSUE_SEARCH || "Slice in:title";
+const ISSUE_SEARCH =
+  process.env.RALPH_ISSUE_SEARCH || RALPH_CONFIG.issue.issueSearch || DEFAULT_CONFIG.issue.issueSearch;
+const STAGE_MATCHERS = compileStages(RALPH_CONFIG, CONFIG_WARNINGS);
 
 async function getLoopProcess() {
   try {
@@ -87,15 +189,11 @@ function detectStage(logBody) {
   // walk backwards — last marker wins
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i];
-    if (/gh pr merge\b/.test(l)) return { stage: "merging", label: "merging", icon: "✓" };
-    if (/gh pr checks\b/.test(l)) return { stage: "ci-wait", label: "waiting on CI", icon: "⏱" };
-    if (/Code-review\(/i.test(l)) return { stage: "review", label: "code review", icon: "🔍" };
-    if (/gh pr create\b/.test(l)) return { stage: "pr-open", label: "PR opened", icon: "↑" };
-    if (/Rubber-duck\(/i.test(l))
-      return { stage: "planning", label: "planning critique", icon: "🦆" };
-    if (/\bbun test\b/.test(l)) return { stage: "testing", label: "running tests", icon: "🧪" };
-    if (/\bgit (commit|push)\b/.test(l))
-      return { stage: "implementing", label: "committing", icon: "✎" };
+    for (const stage of STAGE_MATCHERS) {
+      if (stage.regexes.some((re) => re.test(l))) {
+        return { stage: stage.stage, label: stage.label, icon: stage.icon };
+      }
+    }
   }
   return { stage: "working", label: "working", icon: "⚙" };
 }
@@ -342,7 +440,7 @@ async function getOpenSlices() {
   return data
     .map((i) => {
       const m = i.title.match(TITLE_NUM_RE);
-      return { ...i, slice: m ? Number(m[1]) : 999 };
+      return { ...i, slice: m ? Number(m.groups?.x ?? m[1]) : 999 };
     })
     .filter((i) => TITLE_REGEX.test(i.title))
     .sort((a, b) => a.slice - b.slice);
@@ -468,6 +566,26 @@ function getCumulativeStats(prs) {
   };
 }
 
+function getConfigSummary() {
+  return {
+    profile: RALPH_CONFIG.profile || "generic",
+    issue: {
+      titleRegex: TITLE_REGEX_SOURCE,
+      titleNumRegex: titleNumRegex.source,
+      issueSearch: ISSUE_SEARCH,
+    },
+    validation: {
+      commands: RALPH_CONFIG.validation.commands
+        .filter((cmd) => cmd && typeof cmd === "object")
+        .map((cmd) => ({
+          name: String(cmd.name || "Check"),
+          command: String(cmd.command || ""),
+        })),
+    },
+    warnings: CONFIG_WARNINGS,
+  };
+}
+
 async function getStatus() {
   const [procs, slices, prs] = await Promise.all([
     getLoopProcess(),
@@ -512,6 +630,7 @@ async function getStatus() {
     iterationHistory: { iterations, stats: history.stats },
     openSlices: slices,
     recentPrs: prs,
+    config: getConfigSummary(),
   };
 }
 

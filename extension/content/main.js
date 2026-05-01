@@ -220,9 +220,38 @@ function setupNotifications() {
 }
 setupNotifications();
 
-function sliceNumFromTitle(title) {
-  const m = title.match(/^Slice (\d+):/);
+function sliceNumFromIssue(issue) {
+  if (Number.isFinite(Number(issue?.slice)) && Number(issue.slice) !== 999) {
+    return Number(issue.slice);
+  }
+  const m = String(issue?.title || "").match(/^Slice (\d+):/);
   return m ? Number(m[1]) : null;
+}
+
+function cleanIssueTitle(title) {
+  return String(title || "").replace(/^[^:]+:\s*/, "");
+}
+
+function renderConfigSummary(config) {
+  const profile = config?.profile || "generic";
+  const commands = config?.validation?.commands || [];
+  const warnings = config?.warnings || [];
+  $("config-profile").textContent = profile;
+  const commandHtml =
+    commands.length === 0
+      ? '<span class="placeholder">no validation commands configured</span>'
+      : commands
+          .map(
+            (cmd) =>
+              `<span class="config-pill" title="${escapeHtml(cmd.command || "")}">${escapeHtml(cmd.name || "Check")}</span>`,
+          )
+          .join("");
+  const warningHtml =
+    warnings.length === 0
+      ? ""
+      : `<div class="config-warnings">${warnings.map((w) => escapeHtml(w)).join("<br>")}</div>`;
+  $("config-summary").classList.remove("placeholder");
+  $("config-summary").innerHTML = `${commandHtml}${warningHtml}`;
 }
 
 function render(s) {
@@ -270,6 +299,8 @@ function render(s) {
         : `${c.mergedToday} PR${c.mergedToday === 1 ? "" : "s"} · +${c.additions.toLocaleString()} / −${c.deletions.toLocaleString()} · ${c.changedFiles} file${c.changedFiles === 1 ? "" : "s"}`;
   }
 
+  renderConfigSummary(s.config);
+
   // Queue
   const queue = $("queue-list");
   queue.classList.remove("placeholder");
@@ -279,8 +310,8 @@ function render(s) {
   } else {
     queue.innerHTML = s.openSlices
       .map((i, idx) => {
-        const slice = sliceNumFromTitle(i.title);
-        const cleanTitle = i.title.replace(/^Slice \d+:\s*/, "");
+        const slice = sliceNumFromIssue(i);
+        const cleanTitle = cleanIssueTitle(i.title);
         return `
                     <li class="${idx === 0 ? "first-up issue-row" : "issue-row"}" data-issue="${i.number}" data-url="${escapeHtml(i.url)}">
                         <div class="issue-head">

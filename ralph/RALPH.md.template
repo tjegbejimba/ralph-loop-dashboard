@@ -19,8 +19,9 @@ You are running headless inside an automation loop with **no human at the keyboa
 
 1. Run `git status --porcelain`. If non-empty, abort: the loop expects a clean tree.
 2. Run `git checkout main && git pull --ff-only origin main`.
-3. Read `UBIQUITOUS_LANGUAGE.md` and the parent {{PRD_REFERENCE}} (`gh issue view 1 --repo {{REPO}}`) for vocabulary. Use those exact terms.
-4. Check whether an open PR already references this issue:
+3. Read `.ralph/config.json` for this repo's profile, issue-matching metadata, validation commands, and dashboard stage hints.
+4. Read `UBIQUITOUS_LANGUAGE.md` if present and the parent {{PRD_REFERENCE}} (`gh issue view 1 --repo {{REPO}}`) for vocabulary. Use those exact terms.
+5. Check whether an open PR already references this issue:
    `gh pr list --repo {{REPO}} --state open --search "Closes #<N>"`.
    If one exists, **resume it** — check out its branch, do not open a duplicate.
 
@@ -33,12 +34,8 @@ You MUST use the `tdd` skill (red-green-refactor). Invoke it explicitly via the 
 3. **Green**: Implement the minimum code to make those tests pass. Nothing more.
 4. **Refactor**: Improve structure with tests staying green.
 5. **Local checks (all must pass)**:
-   - `bun run lint`
-   - `bun run typecheck` (or `bunx tsc --noEmit`)
-   - `bun test`
-   - `bun run test:e2e`
-   - `bun run build`
-   If any command does not exist yet (early slices), create it as part of Slice 1.
+{{VALIDATION_COMMANDS}}
+   If a configured command does not exist yet (early slices), create it as part of the relevant bootstrap slice or document why it is not available in the PR body's `Validation` section.
 6. **Commit** with conventional-commits style (`feat:`, `fix:`, `chore:`, `test:`). Include the trailer:
    ```
    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>

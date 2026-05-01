@@ -9,18 +9,47 @@
 #
 # Usage (from inside this repo):
 #   ./install.sh /path/to/your/project
+#   ./install.sh /path/to/your/project --profile python
 #   ./install.sh /path/to/your/project --extension-only
-#   ./install.sh /path/to/your/project --scripts-only
+#   ./install.sh /path/to/your/project --scripts-only --profile bun
 
 set -euo pipefail
 
 TARGET="${1:-}"
-MODE="${2:---both}"
+MODE="--both"
+PROFILE=""
+FORCE_CONFIG=0
 
 if [[ -z "$TARGET" ]]; then
-  echo "Usage: $0 <target-repo-dir> [--both | --extension-only | --scripts-only]" >&2
+  echo "Usage: $0 <target-repo-dir> [--both | --extension-only | --scripts-only] [--profile bun|python|generic] [--force-config]" >&2
   exit 1
 fi
+shift || true
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --both|--extension-only|--scripts-only)
+      MODE="$1"
+      shift
+      ;;
+    --profile)
+      PROFILE="${2:-}"
+      if [[ -z "$PROFILE" ]]; then
+        echo "❌ --profile requires a value" >&2
+        exit 1
+      fi
+      shift 2
+      ;;
+    --force-config)
+      FORCE_CONFIG=1
+      shift
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      exit 1
+      ;;
+  esac
+done
 
 if [[ ! -d "$TARGET" ]]; then
   echo "❌ Target repo not found: $TARGET" >&2
@@ -34,13 +63,69 @@ fi
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
+detect_profile() {
+  local target="$1"
+  if [[ -n "$PROFILE" ]]; then
+    echo "$PROFILE"
+    return
+  fi
+  if [[ -f "$target/package.json" ]] && grep -q '"bun' "$target/package.json" 2>/dev/null; then
+    echo "bun"
+    return
+  fi
+  echo "generic"
+}
+
+install_config() {
+  local target="$1"
+  local ralph_dir="$target/.ralph"
+  local profile
+  profile="$(detect_profile "$target")"
+  local profile_file="$REPO_DIR/ralph/profiles/${profile}.json"
+
+  if [[ ! -f "$profile_file" ]]; then
+    echo "❌ Unknown Ralph profile: $profile" >&2
+    echo "   Available profiles:" >&2
+    find "$REPO_DIR/ralph/profiles" -maxdepth 1 -name '*.json' -exec basename {} .json \; | sort >&2
+    exit 1
+  fi
+
+  mkdir -p "$ralph_dir"
+  if [[ -f "$ralph_dir/config.json" && "$FORCE_CONFIG" -ne 1 ]]; then
+    echo "⚠️  $ralph_dir/config.json already exists — leaving untouched."
+    echo "   Re-run with --force-config to replace it from profile '$profile'."
+    return 0
+  fi
+
+  cp "$profile_file" "$ralph_dir/config.json"
+  echo "✅ Config installed: $ralph_dir/config.json (profile: $profile)"
+}
+
+render_validation_commands() {
+  local config_file="$1"
+  if ! command -v jq >/dev/null 2>&1 || [[ ! -f "$config_file" ]]; then
+    echo "   - Run the relevant checks documented by this repo."
+    return
+  fi
+  jq -r '
+    (.validation.commands // []) as $commands
+    | if ($commands | length) == 0 then
+        "   - Run the relevant checks documented by this repo."
+      else
+        $commands[]
+        | "   - " + (.name // "Check") + ": `" + (.command // "") + "`"
+      end
+  ' "$config_file"
+}
+
 install_scripts() {
   local target="$1"
   local ralph_dir="$target/.ralph"
 
   if [[ -d "$ralph_dir" ]]; then
     echo "⚠️  $ralph_dir already exists — leaving untouched."
-    echo "   Delete or rename it first if you want to re-bootstrap."
+    install_config "$target"
+    echo "   Delete or rename it first if you want to re-bootstrap scripts."
     return 0
   fi
 
@@ -49,7 +134,9 @@ install_scripts() {
   cp "$REPO_DIR/ralph/ralph.sh" "$ralph_dir/ralph.sh"
   cp "$REPO_DIR/ralph/launch.sh" "$ralph_dir/launch.sh"
   cp "$REPO_DIR/ralph/lib/state.sh" "$ralph_dir/lib/state.sh"
+  cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
   chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
+  install_config "$target"
 
   # Render RALPH.md from template using detected target repo slug.
   local repo_slug
@@ -57,9 +144,15 @@ install_scripts() {
     | sed -E 's#(git@github.com:|https://github.com/)##; s/\.git$//' \
     || echo "OWNER/REPO")"
   local prd_ref="${RALPH_PRD_REFERENCE:-the parent PRD}"
+  local validation_commands
+  validation_commands="$(render_validation_commands "$ralph_dir/config.json")"
 
-  sed -e "s|{{REPO}}|$repo_slug|g" -e "s|{{PRD_REFERENCE}}|$prd_ref|g" \
-    "$REPO_DIR/ralph/RALPH.md.template" > "$ralph_dir/RALPH.md"
+  REPO_SLUG="$repo_slug" PRD_REF="$prd_ref" VALIDATION_COMMANDS="$validation_commands" \
+    perl -0pe '
+      s/\{\{REPO\}\}/$ENV{REPO_SLUG}/g;
+      s/\{\{PRD_REFERENCE\}\}/$ENV{PRD_REF}/g;
+      s/\{\{VALIDATION_COMMANDS\}\}/$ENV{VALIDATION_COMMANDS}/g;
+    ' "$REPO_DIR/ralph/RALPH.md.template" > "$ralph_dir/RALPH.md"
 
   cat > "$ralph_dir/.gitignore" <<'EOF'
 # Per-iteration logs and runtime state — never commit.

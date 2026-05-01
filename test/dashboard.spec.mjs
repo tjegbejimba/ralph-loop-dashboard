@@ -103,6 +103,13 @@ const baseStatus = {
   iterationHistory: { iterations: [], stats: null },
   queue: [],
   cumulative: null,
+  config: {
+    profile: "generic",
+    validation: {
+      commands: [{ name: "Project checks", command: "Run relevant checks" }],
+    },
+    warnings: [],
+  },
 };
 
 test("renders 'no active workers' placeholder when workers[] is empty", async ({
@@ -135,6 +142,26 @@ test("renders one worker card in single-worker mode", async ({ page }) => {
   );
   // Single-worker mode should NOT switch to grid layout.
   await expect(page.locator("#workers-container")).not.toHaveClass(/multi/);
+});
+
+test("renders Ralph profile and validation command summary", async ({ page }) => {
+  await loadDashboard(page, {
+    ...baseStatus,
+    config: {
+      profile: "python",
+      validation: {
+        commands: [
+          { name: "Compile", command: "python3 -m py_compile bin/agentctl" },
+          { name: "Unit tests", command: "python3 -m unittest discover" },
+        ],
+      },
+      warnings: ["Invalid stage regex ignored"],
+    },
+  });
+  await expect(page.locator("#config-profile")).toHaveText("python");
+  await expect(page.locator("#config-summary")).toContainText("Compile");
+  await expect(page.locator("#config-summary")).toContainText("Unit tests");
+  await expect(page.locator("#config-summary")).toContainText("Invalid stage regex ignored");
 });
 
 test("renders two worker cards in parallel mode and uses grid layout", async ({
