@@ -785,6 +785,20 @@ li:hover {
   gap: 8px;
   font-size: 11px;
 }
+.worker-card-cumulative {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #8ecae6;
+  padding: 6px 8px;
+  background: #0e1f2a;
+  border-radius: 4px;
+  border-left: 2px solid #1f3a4a;
+  cursor: help;
+}
+.worker-card-cumulative .cumulative-meta {
+  color: var(--muted);
+  font-weight: normal;
+}
 .worker-card .log {
   max-height: 220px;
   overflow: auto;

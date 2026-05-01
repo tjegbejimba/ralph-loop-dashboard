@@ -26,6 +26,15 @@ function escapeHtml(s) {
   );
 }
 
+// Format a raw token count compactly: 8_900_000 → "8.9m", 59_500 → "59.5k".
+// Mirrors Copilot CLI's own "Tokens" line so per-card numbers feel native.
+function fmtTokens(n) {
+  if (!Number.isFinite(n)) return "—";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}m`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(n);
+}
+
 function renderPrCardHtml(pr) {
   if (!pr) return "";
   if (pr.error) {
@@ -80,10 +89,46 @@ function renderWorkerCardHtml(it, isLive) {
     ? `review: gpt ${it.reviewStats.gpt}× · opus ${it.reviewStats.opus}×`
     : "review: not yet";
   const reviewClass = it.reviewStats ? "ok" : "";
-  const tokensHtml =
-    it.tokens != null
-      ? `<span class="strip-item">tokens: ${it.tokens.toLocaleString()}</span>`
-      : "";
+  // Per-issue token line. Copilot only emits the "Tokens" summary at the
+  // very end of an iteration, so for an in-flight issue we show "running".
+  // Once the line lands we display ↑in · ↓out, matching the CLI's syntax.
+  let tokensHtml;
+  if (it.tokens && Number.isFinite(it.tokens.input)) {
+    const t = it.tokens;
+    const tooltip = [
+      `input:  ${t.input.toLocaleString()}`,
+      `output: ${t.output.toLocaleString()}`,
+      t.cached != null ? `cached: ${t.cached.toLocaleString()}` : null,
+      t.reasoning != null ? `reasoning: ${t.reasoning.toLocaleString()}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    tokensHtml = `<span class="strip-item ok" title="${escapeHtml(tooltip)}">tokens: ↑${fmtTokens(t.input)} · ↓${fmtTokens(t.output)}</span>`;
+  } else {
+    tokensHtml = `<span class="strip-item" title="copilot prints tokens at end of iteration">tokens: running…</span>`;
+  }
+
+  // Cumulative for this worker across all completed iterations. Surfaces
+  // even when current iteration has no Tokens line yet, so the card always
+  // tells you something useful about loop spend.
+  let cumulativeFooterHtml = "";
+  if (it.cumulativeTokens && it.cumulativeTokens.iterations > 0) {
+    const c = it.cumulativeTokens;
+    const tooltip = [
+      `worker ${it.workerId ?? "?"} totals across ${c.iterations} iteration${c.iterations === 1 ? "" : "s"}:`,
+      `input:     ${c.input.toLocaleString()}`,
+      `output:    ${c.output.toLocaleString()}`,
+      `cached:    ${c.cached.toLocaleString()}`,
+      c.reasoning ? `reasoning: ${c.reasoning.toLocaleString()}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    cumulativeFooterHtml = `
+      <div class="worker-card-cumulative" title="${escapeHtml(tooltip)}">
+        worker total: ↑${fmtTokens(c.input)} · ↓${fmtTokens(c.output)}
+        <span class="cumulative-meta">· ${fmtTokens(c.cached)} cached · ${c.iterations}× iter</span>
+      </div>`;
+  }
   const workerIdSafe =
     it.workerId != null && Number.isFinite(Number(it.workerId))
       ? Number(it.workerId)
@@ -119,6 +164,7 @@ function renderWorkerCardHtml(it, isLive) {
         <span class="strip-item ${reviewClass}">${escapeHtml(reviewLabel)}</span>
         ${tokensHtml}
       </div>
+      ${cumulativeFooterHtml}
       ${renderPrCardHtml(it.currentPr)}
       <pre class="log">${escapeHtml(it.tail || "(no log content)")}</pre>
     </div>

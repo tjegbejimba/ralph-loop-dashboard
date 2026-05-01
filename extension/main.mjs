@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { joinSession } from "@github/copilot-sdk/extension";
 import { CopilotWebview } from "./lib/copilot-webview.js";
+import { detectTokens, parseTokenUnit } from "./lib/tokens.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -207,20 +208,67 @@ function detectReviewStats(logBody) {
   return { gpt, opus, total: gpt + opus };
 }
 
-// Best-effort token usage parser. Copilot CLI doesn't currently print usage
-// to stdout but if/when it does, regexes below catch common formats.
-function detectTokens(logBody) {
-  if (!logBody) return null;
-  const patterns = [
-    /total tokens?:\s*([\d,]+)/i,
-    /tokens used:\s*([\d,]+)/i,
-    /usage:\s*([\d,]+)\s*tokens?/i,
-  ];
-  for (const re of patterns) {
-    const m = logBody.match(re);
-    if (m) return Number(m[1].replace(/,/g, ""));
+// Parse Copilot CLI's compact token unit: "8.9m" → 8_900_000, "59.5k" → 59_500,
+// "934" → 934. Returns null on garbage input. Case-insensitive on the suffix
+// because the renderer displays them in lower-case but other producers may
+// uppercase.
+// (parseTokenUnit + detectTokens live in ./lib/tokens.mjs — pure helpers,
+// imported above so they can be unit-tested without joinSession side effects.)
+
+// Per-worker cumulative token totals — sum of every completed iteration log
+// for that worker. Cached by (file, mtime) so a tick doesn't re-read N
+// gigabytes of logs every refresh.
+const _cumulativeCache = new Map(); // logFile -> { mtimeMs, tokens }
+function tokensForLogFile(name) {
+  const fullPath = join(LOGS_DIR, name);
+  let mtimeMs;
+  try {
+    mtimeMs = statSync(fullPath).mtimeMs;
+  } catch {
+    return null;
   }
-  return null;
+  const cached = _cumulativeCache.get(name);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.tokens;
+  let body;
+  try {
+    body = readFileSync(fullPath, "utf8");
+  } catch {
+    return null;
+  }
+  const tokens = detectTokens(body);
+  _cumulativeCache.set(name, { mtimeMs, tokens });
+  return tokens;
+}
+
+// Sum tokens across every iter-*-w<workerId>-issue-*.log for a worker.
+// Includes the in-flight log if it already has a Tokens summary (rare but
+// possible when copilot prints early). Returns a structured object even
+// when no logs have any tokens yet (counts will be 0).
+function getWorkerCumulativeTokens(workerId) {
+  if (workerId == null || !existsSync(LOGS_DIR)) return null;
+  const total = { input: 0, output: 0, cached: 0, reasoning: 0, iterations: 0 };
+  let any = false;
+  let files;
+  try {
+    files = readdirSync(LOGS_DIR);
+  } catch {
+    return null;
+  }
+  for (const f of files) {
+    const m = f.match(ITER_LOG_REGEX);
+    if (!m) continue;
+    if (Number(m[3]) !== Number(workerId)) continue;
+    const t = tokensForLogFile(f);
+    if (!t) continue;
+    any = true;
+    total.input += t.input || 0;
+    total.output += t.output || 0;
+    total.cached += t.cached || 0;
+    total.reasoning += t.reasoning || 0;
+    total.iterations += 1;
+  }
+  if (!any) return { ...total, total: 0 };
+  return { ...total, total: total.input + total.output };
 }
 
 // Caches the last successfully-parsed claim list so a transient mid-write
@@ -613,6 +661,7 @@ async function getStatus() {
   const workerPanels = await Promise.all(
     currentIterations.map(async (it) => ({
       ...it,
+      cumulativeTokens: getWorkerCumulativeTokens(it.workerId),
       currentPr: it.issue ? await getCurrentPr(it.issue) : null,
     })),
   );
