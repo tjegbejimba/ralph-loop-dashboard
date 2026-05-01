@@ -321,13 +321,14 @@ ${issue_text}"
     fi
   done
 
-  # Fallback: if still no merged PR via the issue link, scan the 10 most recently
-  # merged PRs for one whose body or commit closes this issue. Handles the case
-  # where GitHub closed the issue via "Closes #N" in a merge commit but never
-  # populated closedByPullRequestsReferences.
-  if [[ "$state" == "CLOSED" && "$merged_count" -lt 1 ]]; then
-    echo "ℹ️  Issue #$num closure link still empty after retries; checking recent merged PRs for 'Closes #$num'..." >&2
-    fallback_pr=$(gh pr list --repo "$REPO" --state merged --limit 10 \
+  # Fallback: scan recent merged PRs for one whose body closes this issue.
+  # Runs whenever the issue link still shows zero merged PRs — including the
+  # case where the issue is still OPEN because state propagation is slow but
+  # the squash-merge has already landed. We only halt if no merged PR exists;
+  # the issue state itself is eventually consistent and not load-bearing here.
+  if [[ "$merged_count" -lt 1 ]]; then
+    echo "ℹ️  Issue #$num closure link empty after retries (state=$state); checking recent merged PRs for 'Closes #$num'..." >&2
+    fallback_pr=$(gh pr list --repo "$REPO" --state merged --limit 20 \
       --search "in:body \"#$num\"" \
       --json number,body \
       --jq ".[] | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | .number" \
@@ -338,7 +339,7 @@ ${issue_text}"
     fi
   fi
 
-  if [[ "$state" != "CLOSED" || "$merged_count" -lt 1 ]]; then
+  if [[ "$merged_count" -lt 1 ]]; then
     echo "⚠️  Issue #$num not closed by a merged PR (state=$state, merged_prs=$merged_count). Halting." >&2
     exit 1
   fi
