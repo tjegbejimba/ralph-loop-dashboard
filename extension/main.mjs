@@ -670,7 +670,7 @@ async function getStatus() {
 }
 
 // Spawn .ralph/launch.sh detached so the loop survives this extension/session.
-async function startLoop() {
+async function startLoop({ runOptions } = {}) {
   const procs = await getLoopProcess();
   if (procs.some((p) => p.cmd.includes("ralph.sh"))) {
     return { ok: false, error: "Loop is already running.", processes: procs };
@@ -683,14 +683,30 @@ async function startLoop() {
     // Append stdout/stderr to loop.out and fully detach so the process
     // survives the extension lifecycle.
     const out = openSync(LOOP_LOG, "a");
-    const child = spawn("bash", [launcher], {
+    
+    // Build environment with run options
+    const env = {
+      ...process.env,
+      PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`,
+    };
+    if (runOptions?.parallelism) {
+      env.RALPH_PARALLELISM = String(runOptions.parallelism);
+    }
+    if (runOptions?.model) {
+      env.RALPH_MODEL = runOptions.model;
+    }
+    
+    // Build args - add --once flag for one-pass mode
+    const args = [launcher];
+    if (runOptions?.runMode === "one-pass") {
+      args.push("--once");
+    }
+    
+    const child = spawn("bash", args, {
       cwd: REPO_ROOT,
       detached: true,
       stdio: ["ignore", out, out],
-      env: {
-        ...process.env,
-        PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`,
-      },
+      env,
     });
     child.unref();
     return { ok: true, pid: child.pid };

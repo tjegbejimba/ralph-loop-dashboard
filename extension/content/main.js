@@ -738,10 +738,14 @@ $("refresh-btn").addEventListener("click", refresh);
 
 function getRunOptions() {
   const runMode = document.querySelector('input[name="run-mode"]:checked')?.value || "one-pass";
-  const parallelism = Number($("parallelism-input")?.value) || 1;
+  const parallelism = parseInt($("parallelism-input")?.value, 10) || 1;
   const model = $("model-input")?.value?.trim() || "claude-sonnet-4.5";
   
-  return { runMode, parallelism, model };
+  // Basic validation (HTML constraints provide primary validation)
+  // Ensure parallelism is within bounds
+  const validParallelism = Math.max(1, Math.min(10, parallelism));
+  
+  return { runMode, parallelism: validParallelism, model };
 }
 
 function renderPreflightChecks(checks) {
