@@ -734,14 +734,90 @@ async function refresh() {
 
 $("refresh-btn").addEventListener("click", refresh);
 
+// --- Run Options and Preflight ---
+
+function getRunOptions() {
+  const runMode = document.querySelector('input[name="run-mode"]:checked')?.value || "one-pass";
+  const parallelism = Number($("parallelism-input")?.value) || 1;
+  const model = $("model-input")?.value?.trim() || "claude-sonnet-4.5";
+  
+  return { runMode, parallelism, model };
+}
+
+function renderPreflightChecks(checks) {
+  const container = $("preflight-checks");
+  
+  if (!checks || checks.length === 0) {
+    container.innerHTML = '<div class="placeholder">No checks run yet</div>';
+    return;
+  }
+  
+  const html = `
+    <div class="preflight-checks-list">
+      ${checks.map(check => {
+        const icon = check.status === "pass" ? "✓" : check.status === "fail" ? "✗" : "⚠";
+        return `
+          <div class="preflight-check ${check.status}">
+            <span class="preflight-check-icon">${icon}</span>
+            <div class="preflight-check-content">
+              <div class="preflight-check-label">${escapeHtml(check.label)}</div>
+              <div class="preflight-check-message">${escapeHtml(check.message)}</div>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+  
+  container.innerHTML = html;
+  container.classList.remove("placeholder");
+}
+
+async function runPreflightChecks() {
+  const queueBuilderState = getQueueBuilder();
+  const queue = queueBuilderState.getQueue();
+  const runOptions = getRunOptions();
+  
+  try {
+    const result = await copilot.runPreflight({ queue, runOptions });
+    renderPreflightChecks(result.checks);
+    return result;
+  } catch (err) {
+    const errorCheck = [{
+      id: "preflight-error",
+      label: "Preflight Error",
+      status: "fail",
+      message: `Failed to run preflight: ${err.message || err}`,
+      blocking: true,
+    }];
+    renderPreflightChecks(errorCheck);
+    return { passed: false, checks: errorCheck };
+  }
+}
+
 // --- Loop start/stop controls ---
 
 async function handleStart() {
   const btn = $("start-btn");
   btn.disabled = true;
-  btn.textContent = "starting…";
+  btn.textContent = "checking…";
+  
   try {
-    const res = await copilot.startLoop();
+    // Run preflight first
+    const preflight = await runPreflightChecks();
+    
+    if (!preflight.passed) {
+      $("last-updated").textContent = "preflight failed — fix errors to start";
+      btn.disabled = false;
+      btn.textContent = "▶ Start loop";
+      return;
+    }
+    
+    // Preflight passed, start the loop
+    btn.textContent = "starting…";
+    const runOptions = getRunOptions();
+    const res = await copilot.startLoop({ runOptions });
+    
     if (!res?.ok) {
       $("last-updated").textContent = `start failed: ${res?.error || "unknown"}`;
     }
@@ -776,6 +852,22 @@ async function handleStop() {
 $("start-btn")?.addEventListener("click", handleStart);
 $("stop-btn")?.addEventListener("click", handleStop);
 
+// Load user config defaults into form
+async function loadUserConfigDefaults() {
+  try {
+    const config = await copilot.getUserConfig();
+    if (config.defaultModel) {
+      $("model-input").value = config.defaultModel;
+    }
+    if (config.defaultParallelism) {
+      $("parallelism-input").value = config.defaultParallelism;
+    }
+  } catch (err) {
+    console.error("Failed to load user config:", err);
+  }
+}
+
+loadUserConfigDefaults();
 refresh();
 setInterval(refresh, REFRESH_MS);
 

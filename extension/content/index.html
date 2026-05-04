@@ -51,6 +51,38 @@
                 <div id="queue-builder-container" class="placeholder">No issues selected</div>
             </section>
 
+            <section class="panel run-options" id="run-options-panel">
+                <h2>Run Options</h2>
+                <div class="run-options-form">
+                    <div class="form-group">
+                        <label>Run Mode:</label>
+                        <div class="radio-group">
+                            <label>
+                                <input type="radio" name="run-mode" value="one-pass" checked />
+                                One-pass (test run)
+                            </label>
+                            <label>
+                                <input type="radio" name="run-mode" value="until-empty" />
+                                Until queue empty
+                            </label>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="parallelism-input">Parallelism:</label>
+                        <input type="number" id="parallelism-input" min="1" max="10" value="1" />
+                    </div>
+                    <div class="form-group">
+                        <label for="model-input">Model:</label>
+                        <input type="text" id="model-input" value="claude-sonnet-4.5" />
+                    </div>
+                </div>
+            </section>
+
+            <section class="panel preflight" id="preflight-panel">
+                <h2>Preflight Checks</h2>
+                <div id="preflight-checks" class="placeholder">Click Start to run preflight checks</div>
+            </section>
+
             <section class="panel queue">
                 <h2>Queue <span id="queue-count" class="count">—</span></h2>
                 <ul id="queue-list" class="placeholder">loading…</ul>

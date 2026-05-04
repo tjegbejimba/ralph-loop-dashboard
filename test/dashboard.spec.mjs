@@ -635,3 +635,155 @@ test("queue builder - manual reorder", async ({ page }) => {
   await expect(queueItems.nth(2)).toContainText("#3");
 });
 
+test("run options form displays with default values", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        config: { profile: "generic", warnings: [] },
+      }),
+      getUserConfig: () => Promise.resolve({}),
+    };
+  });
+  await page.goto(baseUrl);
+  
+  // Check run options panel exists
+  const runOptionsPanel = page.locator("#run-options-panel");
+  await expect(runOptionsPanel).toBeVisible();
+  
+  // Check default values
+  await expect(page.locator('input[name="run-mode"][value="one-pass"]')).toBeChecked();
+  await expect(page.locator("#parallelism-input")).toHaveValue("1");
+  await expect(page.locator("#model-input")).toHaveValue("claude-sonnet-4.5");
+});
+
+test("run options form loads user config defaults", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        config: { profile: "generic", warnings: [] },
+      }),
+      getUserConfig: () => Promise.resolve({
+        defaultModel: "gpt-5.4",
+        defaultParallelism: 3,
+      }),
+    };
+  });
+  await page.goto(baseUrl);
+  
+  // Wait for config to load
+  await page.waitForTimeout(100);
+  
+  // Check loaded values
+  await expect(page.locator("#parallelism-input")).toHaveValue("3");
+  await expect(page.locator("#model-input")).toHaveValue("gpt-5.4");
+});
+
+test("preflight panel shows placeholder initially", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        config: { profile: "generic", warnings: [] },
+      }),
+      getUserConfig: () => Promise.resolve({}),
+    };
+  });
+  await page.goto(baseUrl);
+  
+  const preflightPanel = page.locator("#preflight-panel");
+  await expect(preflightPanel).toBeVisible();
+  await expect(page.locator("#preflight-checks")).toContainText("Click Start");
+});
+
+test("start button runs preflight and shows results", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        config: { profile: "generic", warnings: [] },
+      }),
+      getUserConfig: () => Promise.resolve({}),
+      runPreflight: () => Promise.resolve({
+        passed: true,
+        checks: [
+          { id: "queue-not-empty", label: "Queue has issues", status: "pass", message: "Queue contains 1 issue", blocking: true },
+          { id: "ralph-md-exists", label: "Prompt file exists", status: "pass", message: ".ralph/RALPH.md found", blocking: true },
+        ],
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+    };
+    
+    // Stub QueueBuilder with one issue
+    window.queueBuilder = {
+      queue: [{ number: 1, title: "Test issue" }],
+      getQueue: function() { return this.queue; },
+    };
+  });
+  await page.goto(baseUrl);
+  
+  const startBtn = page.locator("#start-btn");
+  await startBtn.click();
+  
+  // Wait for preflight to run
+  await page.waitForTimeout(200);
+  
+  // Check preflight results displayed
+  const checks = page.locator(".preflight-check");
+  await expect(checks).toHaveCount(2);
+  await expect(checks.first()).toHaveClass(/pass/);
+  await expect(checks.first()).toContainText("Queue has issues");
+});
+
+test("start button blocked when preflight fails", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        config: { profile: "generic", warnings: [] },
+      }),
+      getUserConfig: () => Promise.resolve({}),
+      runPreflight: () => Promise.resolve({
+        passed: false,
+        checks: [
+          { id: "queue-not-empty", label: "Queue has issues", status: "fail", message: "Queue is empty", blocking: true },
+        ],
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+    };
+    
+    // Stub empty queue
+    window.queueBuilder = {
+      queue: [],
+      getQueue: function() { return this.queue; },
+    };
+  });
+  await page.goto(baseUrl);
+  
+  const startBtn = page.locator("#start-btn");
+  await startBtn.click();
+  
+  // Wait for preflight to run
+  await page.waitForTimeout(200);
+  
+  // Check failure displayed
+  const checks = page.locator(".preflight-check");
+  await expect(checks.first()).toHaveClass(/fail/);
+  await expect(checks.first()).toContainText("Queue is empty");
+  
+  // Start button should be back to enabled state after failed preflight
+  await expect(startBtn).toHaveText("▶ Start loop");
+  await expect(startBtn).toBeEnabled();
+});
+

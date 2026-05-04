@@ -7,6 +7,7 @@ import { CopilotWebview } from "./lib/copilot-webview.js";
 import { detectTokens, parseTokenUnit } from "./lib/tokens.mjs";
 import { resolveRepoState } from "./lib/repo-resolver.mjs";
 import { initializeRalph } from "./lib/ralph-init.mjs";
+import { loadUserConfig } from "./lib/user-config.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -749,6 +750,26 @@ async function initRalph() {
   }
 }
 
+// Run preflight checks
+async function runPreflight({ queue, runOptions }) {
+  // Import the preflight module
+  const { runPreflight: runPreflightChecks } = await import("./lib/preflight.mjs");
+  
+  const result = await runPreflightChecks({
+    repoRoot: REPO_ROOT,
+    queue,
+    runOptions,
+  });
+  
+  return result;
+}
+
+// Get user config with defaults
+async function getUserConfig() {
+  const { config } = loadUserConfig();
+  return config;
+}
+
 const webview = new CopilotWebview({
   extensionName: "ralph_dashboard",
   contentDir: join(import.meta.dirname, "content"),
@@ -762,6 +783,8 @@ const webview = new CopilotWebview({
     startLoop,
     stopLoop,
     initRalph,
+    runPreflight,
+    getUserConfig,
     log: (msg, opts) => session.log(msg, opts),
   },
 });
