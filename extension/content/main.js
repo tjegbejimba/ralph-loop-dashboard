@@ -2,6 +2,41 @@ const REFRESH_MS = 8000;
 
 const $ = (id) => document.getElementById(id);
 
+// Queue Builder - singleton instance
+let queueBuilder = null;
+
+// Import would go here in a module context, but since main.js is loaded as a script tag,
+// we inline a minimal QueueBuilder implementation that matches the tested module
+function getQueueBuilder() {
+  if (!queueBuilder) {
+    queueBuilder = {
+      queue: [],
+      selectIssue(issue) {
+        if (this.queue.some(i => i.number === issue.number)) return;
+        this.queue.push(structuredClone(issue));
+        this.queue.sort((a, b) => a.number - b.number);
+      },
+      deselectIssue(issueNumber) {
+        this.queue = this.queue.filter(i => i.number !== issueNumber);
+      },
+      reorderIssue(issueNumber, newIndex) {
+        const idx = this.queue.findIndex(i => i.number === issueNumber);
+        if (idx === -1) return;
+        if (newIndex < 0 || newIndex >= this.queue.length) return;
+        const [issue] = this.queue.splice(idx, 1);
+        this.queue.splice(newIndex, 0, issue);
+      },
+      getQueue() {
+        return this.queue.map(i => structuredClone(i));
+      },
+      isSelected(issueNumber) {
+        return this.queue.some(i => i.number === issueNumber);
+      }
+    };
+  }
+  return queueBuilder;
+}
+
 function fmtDuration(ms) {
   if (ms < 0) return "0s";
   const s = Math.floor(ms / 1000);
@@ -471,6 +506,10 @@ function render(s) {
     });
   }
 
+  // Issue Preview and Queue Builder
+  renderIssuePreview(s.issuePreview);
+  renderQueueBuilder();
+
   // PRs
   const prs = $("prs-list");
   prs.classList.remove("placeholder");
@@ -496,6 +535,146 @@ function render(s) {
   }
 
   renderHistory(s.iterationHistory);
+}
+
+function renderIssuePreview(preview) {
+  const container = $("issue-preview-container");
+  const countEl = $("issue-preview-count");
+  
+  if (!preview || !preview.issues || preview.issues.length === 0) {
+    container.innerHTML = '<div class="placeholder">No issues to preview</div>';
+    countEl.textContent = "—";
+    return;
+  }
+  
+  const qb = getQueueBuilder();
+  countEl.textContent = preview.issues.length.toString();
+  container.classList.remove("placeholder");
+  
+  const warningsByIssue = new Map();
+  (preview.warnings || []).forEach(w => {
+    if (!warningsByIssue.has(w.issueNumber)) {
+      warningsByIssue.set(w.issueNumber, []);
+    }
+    warningsByIssue.get(w.issueNumber).push(w);
+  });
+  
+  const rows = preview.issues.map(issue => {
+    // Validate issue.number is actually a number for security
+    if (typeof issue.number !== 'number') {
+      console.error('Invalid issue.number:', issue.number);
+      return '';
+    }
+    
+    const checked = qb.isSelected(issue.number) ? 'checked' : '';
+    const labels = (issue.labels || []).map(l => 
+      `<span class="label">${escapeHtml(l)}</span>`
+    ).join(' ');
+    const milestone = issue.milestone ? 
+      `<span class="milestone">${escapeHtml(issue.milestone)}</span>` : '';
+    const warnings = warningsByIssue.get(issue.number) || [];
+    const warningHtml = warnings.map(w => 
+      `<div class="warning"><span class="warning-icon">⚠</span> ${escapeHtml(w.message)}</div>`
+    ).join('');
+    
+    return `
+      <div class="issue-preview-row" data-issue-number="${issue.number}">
+        <input type="checkbox" class="issue-select-checkbox" ${checked} />
+        <a href="${escapeHtml(issue.url)}" target="_blank" rel="noopener noreferrer" class="issue-link">
+          <span class="issue-num">#${issue.number}</span>
+        </a>
+        <span class="issue-title">${escapeHtml(issue.title)}</span>
+        ${labels}
+        ${milestone}
+        ${warningHtml}
+      </div>
+    `;
+  }).filter(Boolean).join('');
+  
+  container.innerHTML = rows;
+  
+  // Wire up checkbox event handlers
+  container.querySelectorAll('.issue-select-checkbox').forEach(checkbox => {
+    checkbox.addEventListener('change', (e) => {
+      const row = e.target.closest('.issue-preview-row');
+      const issueNumber = Number(row.dataset.issueNumber);
+      const issue = preview.issues.find(i => i.number === issueNumber);
+      
+      if (e.target.checked) {
+        qb.selectIssue(issue);
+      } else {
+        qb.deselectIssue(issueNumber);
+      }
+      
+      renderQueueBuilder();
+    });
+  });
+}
+
+function renderQueueBuilder() {
+  const container = $("queue-builder-container");
+  const countEl = $("queue-builder-count");
+  const qb = getQueueBuilder();
+  const queue = qb.getQueue();
+  
+  if (queue.length === 0) {
+    container.innerHTML = '<div class="placeholder">No issues selected</div>';
+    countEl.textContent = "—";
+    return;
+  }
+  
+  countEl.textContent = queue.length.toString();
+  container.classList.remove("placeholder");
+  
+  const items = queue.map((issue, index) => {
+    // Validate issue.number is a number for security
+    if (typeof issue.number !== 'number') {
+      console.error('Invalid issue.number in queue:', issue.number);
+      return '';
+    }
+    
+    const upDisabled = index === 0 ? 'disabled' : '';
+    const downDisabled = index === queue.length - 1 ? 'disabled' : '';
+    
+    return `
+      <div class="queue-item" data-issue-number="${issue.number}">
+        <span class="queue-order">${index + 1}</span>
+        <span class="issue-num">#${issue.number}</span>
+        <span class="issue-title">${escapeHtml(issue.title)}</span>
+        <div class="queue-controls">
+          <button class="queue-move-up" ${upDisabled}>↑</button>
+          <button class="queue-move-down" ${downDisabled}>↓</button>
+        </div>
+      </div>
+    `;
+  }).filter(Boolean).join('');
+  
+  container.innerHTML = items;
+  
+  // Wire up reorder button handlers
+  container.querySelectorAll('.queue-move-up').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const item = e.target.closest('.queue-item');
+      const issueNumber = Number(item.dataset.issueNumber);
+      const currentIndex = queue.findIndex(i => i.number === issueNumber);
+      if (currentIndex > 0) {
+        qb.reorderIssue(issueNumber, currentIndex - 1);
+        renderQueueBuilder();
+      }
+    });
+  });
+  
+  container.querySelectorAll('.queue-move-down').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const item = e.target.closest('.queue-item');
+      const issueNumber = Number(item.dataset.issueNumber);
+      const currentIndex = queue.findIndex(i => i.number === issueNumber);
+      if (currentIndex !== -1 && currentIndex < queue.length - 1) {
+        qb.reorderIssue(issueNumber, currentIndex + 1);
+        renderQueueBuilder();
+      }
+    });
+  });
 }
 
 function renderHistory(h) {
