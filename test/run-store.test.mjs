@@ -126,6 +126,9 @@ test("createRun validates required parameters", () => {
     assert.throws(() => createRun({ repoRoot: tmpRepo, queue: [], runOptions: null }), TypeError, "Should reject null runOptions");
     assert.throws(() => createRun({ repoRoot: tmpRepo, queue: [], runOptions: {} }), TypeError, "Should reject runOptions missing required fields");
     assert.throws(() => createRun({ repoRoot: tmpRepo, queue: [], runOptions: { runMode: "one-pass", model: "claude-sonnet-4.5" } }), TypeError, "Should reject runOptions missing parallelism");
+    assert.throws(() => createRun({ repoRoot: tmpRepo, queue: [], runOptions: { runMode: "one-pass", model: "claude-sonnet-4.5", parallelism: NaN } }), TypeError, "Should reject NaN parallelism");
+    assert.throws(() => createRun({ repoRoot: tmpRepo, queue: [], runOptions: { runMode: "one-pass", model: "claude-sonnet-4.5", parallelism: Infinity } }), TypeError, "Should reject Infinity parallelism");
+    assert.throws(() => createRun({ repoRoot: tmpRepo, queue: [], runOptions: { runMode: "one-pass", model: "claude-sonnet-4.5", parallelism: 1.5 } }), TypeError, "Should reject float parallelism");
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
@@ -155,7 +158,20 @@ test("getActiveRuns validates metadata schema", () => {
     mkdirSync(incompleteRunDir, { recursive: true });
     writeFileSync(join(incompleteRunDir, "queue.json"), "[]", "utf-8");
     writeFileSync(join(incompleteRunDir, "metadata.json"), JSON.stringify({
-      model: "claude-sonnet-4.5", // missing repoRoot, runMode, createdAt
+      model: "claude-sonnet-4.5", // missing repoRoot, runMode, createdAt, parallelism
+    }), "utf-8");
+    
+    // Create run with corrupted parallelism (null from NaN serialization)
+    const corruptedRunId = "corrupted-run";
+    const corruptedRunDir = join(runsDir, corruptedRunId);
+    mkdirSync(corruptedRunDir, { recursive: true });
+    writeFileSync(join(corruptedRunDir, "queue.json"), "[]", "utf-8");
+    writeFileSync(join(corruptedRunDir, "metadata.json"), JSON.stringify({
+      repoRoot: tmpRepo,
+      runMode: "one-pass",
+      model: "claude-sonnet-4.5",
+      parallelism: null, // corrupted
+      createdAt: new Date().toISOString(),
     }), "utf-8");
     
     // Create run missing queue.json
@@ -165,6 +181,8 @@ test("getActiveRuns validates metadata schema", () => {
     writeFileSync(join(noQueueRunDir, "metadata.json"), JSON.stringify({
       repoRoot: tmpRepo,
       runMode: "one-pass",
+      model: "claude-sonnet-4.5",
+      parallelism: 1,
       createdAt: new Date().toISOString(),
     }), "utf-8");
     
@@ -175,4 +193,10 @@ test("getActiveRuns validates metadata schema", () => {
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
+});
+
+test("getActiveRuns validates repoRoot parameter", () => {
+  assert.throws(() => getActiveRuns(null), TypeError, "Should reject null repoRoot");
+  assert.throws(() => getActiveRuns(undefined), TypeError, "Should reject undefined repoRoot");
+  assert.throws(() => getActiveRuns(123), TypeError, "Should reject numeric repoRoot");
 });

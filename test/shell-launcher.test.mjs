@@ -125,3 +125,18 @@ test("launchRun reports error when script not found", async () => {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
 });
+
+test("launchRun validates required parameters", async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-"));
+  const mockScript = join(tmpRepo, "mock.sh");
+  writeFileSync(mockScript, "#!/usr/bin/env bash\nexit 0\n", "utf-8");
+  
+  try {
+    await assert.rejects(() => launchRun({}), TypeError, "Should reject missing parameters");
+    await assert.rejects(() => launchRun({ runId: "test", runDir: "/tmp", repoRoot: tmpRepo, runOptions: {} }), TypeError, "Should reject empty runOptions");
+    await assert.rejects(() => launchRun({ runId: "test", runDir: "/tmp", repoRoot: tmpRepo, runOptions: { model: "test", parallelism: NaN, runMode: "one-pass" } }), TypeError, "Should reject NaN parallelism");
+    await assert.rejects(() => launchRun({ runId: "test", runDir: "/tmp", repoRoot: tmpRepo, runOptions: { model: "test", parallelism: 1.5, runMode: "one-pass" } }), TypeError, "Should reject float parallelism");
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});

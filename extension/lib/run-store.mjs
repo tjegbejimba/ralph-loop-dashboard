@@ -46,8 +46,10 @@ export function createRun({ repoRoot, queue, runOptions }) {
   if (!runOptions.model || typeof runOptions.model !== "string") {
     throw new TypeError("runOptions.model is required and must be a string");
   }
-  if (typeof runOptions.parallelism !== "number" || runOptions.parallelism < 1) {
-    throw new TypeError("runOptions.parallelism must be a positive number");
+  if (!Number.isFinite(runOptions.parallelism) || 
+      !Number.isInteger(runOptions.parallelism) || 
+      runOptions.parallelism < 1) {
+    throw new TypeError("runOptions.parallelism must be a positive integer");
   }
   
   const runId = generateRunId();
@@ -91,6 +93,11 @@ export function createRun({ repoRoot, queue, runOptions }) {
  * @returns {string} [].queuePath - Queue file path
  */
 export function getActiveRuns(repoRoot) {
+  // Validate required parameters
+  if (!repoRoot || typeof repoRoot !== "string") {
+    throw new TypeError("repoRoot is required and must be a string");
+  }
+  
   const runsDir = join(repoRoot, ".ralph", "runs");
   
   if (!existsSync(runsDir)) {
@@ -118,8 +125,13 @@ export function getActiveRuns(repoRoot) {
     try {
       const metadata = JSON.parse(readFileSync(metadataPath, "utf-8"));
       
-      // Validate metadata has required fields
-      if (!metadata.repoRoot || !metadata.runMode || !metadata.createdAt) {
+      // Validate metadata has all required fields with correct types
+      if (!metadata.repoRoot || 
+          !metadata.runMode || 
+          !metadata.createdAt ||
+          !metadata.model ||
+          !Number.isFinite(metadata.parallelism) ||
+          !Number.isInteger(metadata.parallelism)) {
         continue;
       }
       

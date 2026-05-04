@@ -28,6 +28,30 @@ export async function launchRun({
   runOptions,
   shellScript,
 }) {
+  // Validate required parameters
+  if (!runId || typeof runId !== "string") {
+    throw new TypeError("runId is required and must be a string");
+  }
+  if (!runDir || typeof runDir !== "string") {
+    throw new TypeError("runDir is required and must be a string");
+  }
+  if (!repoRoot || typeof repoRoot !== "string") {
+    throw new TypeError("repoRoot is required and must be a string");
+  }
+  if (!runOptions || typeof runOptions !== "object") {
+    throw new TypeError("runOptions is required and must be an object");
+  }
+  if (!runOptions.model || typeof runOptions.model !== "string") {
+    throw new TypeError("runOptions.model is required and must be a string");
+  }
+  if (!Number.isFinite(runOptions.parallelism) || 
+      !Number.isInteger(runOptions.parallelism)) {
+    throw new TypeError("runOptions.parallelism must be a finite integer");
+  }
+  if (!runOptions.runMode || typeof runOptions.runMode !== "string") {
+    throw new TypeError("runOptions.runMode is required and must be a string");
+  }
+  
   // Default to ralph/launch.sh if not overridden
   const scriptPath = shellScript || join(repoRoot, "ralph", "launch.sh");
   
