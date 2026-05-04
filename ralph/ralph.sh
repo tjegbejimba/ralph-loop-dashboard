@@ -19,6 +19,9 @@
 #                        across concurrent workers; controls lock + log naming
 #   RALPH_POLL_SEC       sleep between selection attempts when no work is
 #                        eligible (default: 30)
+#   RALPH_RUN_ID         run identifier for queue-based mode (optional)
+#                        When set, worker consumes .ralph/runs/<RUN_ID>/queue.json
+#                        instead of searching GitHub with TITLE_REGEX
 
 set -euo pipefail
 
@@ -56,8 +59,31 @@ LOCK_DIR="$SCRIPT_DIR/lock/worker-${WORKER_ID}"
 MODEL="${RALPH_MODEL:-claude-sonnet-4.5}"
 TIMEOUT_SEC="${RALPH_TIMEOUT_SEC:-7200}"
 POLL_SEC="${RALPH_POLL_SEC:-30}"
+RUN_ID="${RALPH_RUN_ID:-}"
 ONCE=0
-[[ "${1:-}" == "--once" ]] && ONCE=1
+
+# Parse --run-id flag (overrides RALPH_RUN_ID env var)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --once)
+      ONCE=1
+      shift
+      ;;
+    --run-id)
+      if [[ -z "${2:-}" ]]; then
+        echo "⚠️  --run-id requires an argument" >&2
+        exit 1
+      fi
+      RUN_ID="$2"
+      shift 2
+      ;;
+    *)
+      echo "⚠️  Unknown flag: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+export RUN_ID
 
 if [[ -z "$REPO" ]]; then
   echo "⚠️  Could not determine target repo. Set RALPH_REPO=owner/repo." >&2
@@ -71,6 +97,13 @@ mkdir -p "$LOG_DIR" "$SCRIPT_DIR/lock"
 # shellcheck source=lib/state.sh
 . "$SCRIPT_DIR/lib/state.sh"
 state_init
+
+# Per-run status tracking (status.json). Only needed in run-aware mode.
+# shellcheck source=lib/status.sh
+. "$SCRIPT_DIR/lib/status.sh"
+if [[ -n "$RUN_ID" ]]; then
+  status_init
+fi
 
 # Sync the current branch to origin/main. Works both when run on `main` itself
 # (legacy single-checkout mode) and in a dedicated worktree on a non-main branch
@@ -146,96 +179,164 @@ while true; do
   fi
   sync_to_origin_main
 
-  # Fetch open issues matching the title regex along with their bodies so we
-  # can evaluate "Blocked by" sections without an extra round-trip per issue.
-  open_json=$(gh issue list --repo "$REPO" --state open --limit 100 \
-    --json number,title,body)
-
-  # Sort eligible issues by slice number ascending; pick the first one whose
-  # blockers are all closed AND that no other worker has already claimed.
-  state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
-  state_reap_stale
-  claimed_set="$(state_claimed_issues | sort -u)"
-  state_unlock
-
-  # Build a sorted list of (number, title, body) for matching issues.
-  candidates=$(echo "$open_json" \
-    | TITLE_REGEX="$TITLE_REGEX" TITLE_NUM_RE="$TITLE_NUM_RE" jq -r '
-        [ .[]
-          | select(.title | test(env.TITLE_REGEX))
-          | . + {n: (.title | capture(env.TITLE_NUM_RE).x | tonumber)} ]
-        | sort_by(.n)
-        | .[]
-        | @base64
-      ')
-
-  # Memoize blocker satisfaction across this selection round so M candidates
-  # × K blockers don't translate into M×K `gh issue view`/`gh pr view` calls.
-  # Cache lives only until the next polling cycle to stay fresh.
-  declare -A BLOCKER_CACHE=()
-  blocker_satisfied() {
-    local b="$1"
-    if [[ -n "${BLOCKER_CACHE[$b]+x}" ]]; then
-      printf '%s' "${BLOCKER_CACHE[$b]}"
-      return
+  # Run-aware mode: consume queue.json instead of searching GitHub
+  if [[ -n "$RUN_ID" ]]; then
+    queue_file="$SCRIPT_DIR/runs/$RUN_ID/queue.json"
+    if [[ ! -f "$queue_file" ]]; then
+      echo "❌ Worker $WORKER_ID: run $RUN_ID queue file not found: $queue_file" >&2
+      exit 1
     fi
-    local v
-    v=$(is_issue_satisfied "$b")
-    BLOCKER_CACHE[$b]="$v"
-    printf '%s' "$v"
-  }
-
-  num=""; title=""; body=""; chosen_blockers=""
-  while IFS= read -r row; do
-    [[ -z "$row" ]] && continue
-    decoded=$(echo "$row" | base64 --decode)
-    cand_num=$(echo "$decoded" | jq -r .number)
-    cand_title=$(echo "$decoded" | jq -r .title)
-    cand_body=$(echo "$decoded" | jq -r .body)
-
-    # Skip issues other workers have claimed.
-    if printf '%s\n' "$claimed_set" | grep -qx "$cand_num"; then
-      continue
-    fi
-
-    # Evaluate blockers — every #N referenced in the "## Blocked by" section
-    # must be closed by a merged PR (same predicate the iteration uses for
-    # itself, so manually-closed wontfix/duplicate blockers don't unblock
-    # downstream slices whose code never landed).
-    blockers=$(parse_blockers "$cand_body")
-    all_satisfied=1
-    for b in $blockers; do
-      if [[ "$(blocker_satisfied "$b")" != "1" ]]; then
-        all_satisfied=0
-        break
+    
+    state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+    state_reap_stale
+    status_reap_stale
+    claimed_set="$(state_claimed_issues | sort -u)"
+    state_unlock
+    
+    # Find next unclaimed issue from queue
+    queue_json=$(cat "$queue_file")
+    num=""; title=""; body=""
+    
+    for row in $(echo "$queue_json" | jq -r '.[] | @base64'); do
+      decoded=$(echo "$row" | base64 --decode)
+      cand_num=$(echo "$decoded" | jq -r .number)
+      cand_title=$(echo "$decoded" | jq -r .title)
+      
+      # Skip if already claimed in state.json
+      if printf '%s\n' "$claimed_set" | grep -qx "$cand_num"; then
+        continue
       fi
+      
+      # Skip if in terminal state in status.json
+      if status_is_terminal "$cand_num"; then
+        continue
+      fi
+      
+      # Check if issue is already CLOSED on GitHub before claiming
+      current_state=$(gh issue view "$cand_num" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")
+      if [[ "$current_state" != "OPEN" ]]; then
+        # Mark as skipped and continue to next
+        state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+        status_mark_skipped "$cand_num"
+        state_unlock
+        echo "ℹ️  Worker $WORKER_ID: #$cand_num already closed (state=$current_state); marked as skipped."
+        continue
+      fi
+      
+      # Fetch issue body for prompt construction
+      cand_body=$(gh issue view "$cand_num" --repo "$REPO" --json body -q .body 2>/dev/null || echo "")
+      
+      num="$cand_num"
+      title="$cand_title"
+      body="$cand_body"
+      break
     done
-    if [[ "$all_satisfied" -ne 1 ]]; then
+    
+    if [[ -z "$num" ]]; then
+      # No unclaimed issues remain — check if any are still running
+      remaining=$(echo "$queue_json" | jq -r 'length')
+      if [[ "$remaining" -eq 0 ]]; then
+        echo "✅ Worker $WORKER_ID: run $RUN_ID queue is empty. Done."
+        exit 0
+      fi
+      echo "⏸  Worker $WORKER_ID: no unclaimed issues in run $RUN_ID queue (total=$remaining); sleeping ${POLL_SEC}s."
+      sleep "$POLL_SEC"
       continue
     fi
+  else
+    # Legacy mode: search GitHub for issues matching TITLE_REGEX
+    # Fetch open issues matching the title regex along with their bodies so we
+    # can evaluate "Blocked by" sections without an extra round-trip per issue.
+    open_json=$(gh issue list --repo "$REPO" --state open --limit 100 \
+      --json number,title,body)
 
-    num="$cand_num"
-    title="$cand_title"
-    body="$cand_body"
-    chosen_blockers="$blockers"
-    break
-  done <<<"$candidates"
+    # Sort eligible issues by slice number ascending; pick the first one whose
+    # blockers are all closed AND that no other worker has already claimed.
+    state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+    state_reap_stale
+    claimed_set="$(state_claimed_issues | sort -u)"
+    state_unlock
 
-  if [[ -z "$num" ]]; then
-    # Nothing actionable right now. If any issues are still open and not
-    # claimed, we're waiting on dependencies; sleep and retry. If everything
-    # is claimed by other workers, also sleep.
-    remaining=$(echo "$open_json" \
-      | TITLE_REGEX="$TITLE_REGEX" jq -r '
-          [.[] | select(.title | test(env.TITLE_REGEX))] | length')
-    if [[ "$remaining" -eq 0 ]]; then
-      echo "✅ Worker $WORKER_ID: no open issues match \"$TITLE_REGEX\". Done."
-      exit 0
+    # Build a sorted list of (number, title, body) for matching issues.
+    candidates=$(echo "$open_json" \
+      | TITLE_REGEX="$TITLE_REGEX" TITLE_NUM_RE="$TITLE_NUM_RE" jq -r '
+          [ .[]
+            | select(.title | test(env.TITLE_REGEX))
+            | . + {n: (.title | capture(env.TITLE_NUM_RE).x | tonumber)} ]
+          | sort_by(.n)
+          | .[]
+          | @base64
+        ')
+
+    # Memoize blocker satisfaction across this selection round so M candidates
+    # × K blockers don't translate into M×K `gh issue view`/`gh pr view` calls.
+    # Cache lives only until the next polling cycle to stay fresh.
+    declare -A BLOCKER_CACHE=()
+    blocker_satisfied() {
+      local b="$1"
+      if [[ -n "${BLOCKER_CACHE[$b]+x}" ]]; then
+        printf '%s' "${BLOCKER_CACHE[$b]}"
+        return
+      fi
+      local v
+      v=$(is_issue_satisfied "$b")
+      BLOCKER_CACHE[$b]="$v"
+      printf '%s' "$v"
+    }
+
+    num=""; title=""; body=""; chosen_blockers=""
+    while IFS= read -r row; do
+      [[ -z "$row" ]] && continue
+      decoded=$(echo "$row" | base64 --decode)
+      cand_num=$(echo "$decoded" | jq -r .number)
+      cand_title=$(echo "$decoded" | jq -r .title)
+      cand_body=$(echo "$decoded" | jq -r .body)
+
+      # Skip issues other workers have claimed.
+      if printf '%s\n' "$claimed_set" | grep -qx "$cand_num"; then
+        continue
+      fi
+
+      # Evaluate blockers — every #N referenced in the "## Blocked by" section
+      # must be closed by a merged PR (same predicate the iteration uses for
+      # itself, so manually-closed wontfix/duplicate blockers don't unblock
+      # downstream slices whose code never landed).
+      blockers=$(parse_blockers "$cand_body")
+      all_satisfied=1
+      for b in $blockers; do
+        if [[ "$(blocker_satisfied "$b")" != "1" ]]; then
+          all_satisfied=0
+          break
+        fi
+      done
+      if [[ "$all_satisfied" -ne 1 ]]; then
+        continue
+      fi
+
+      num="$cand_num"
+      title="$cand_title"
+      body="$cand_body"
+      chosen_blockers="$blockers"
+      break
+    done <<<"$candidates"
+
+    if [[ -z "$num" ]]; then
+      # Nothing actionable right now. If any issues are still open and not
+      # claimed, we're waiting on dependencies; sleep and retry. If everything
+      # is claimed by other workers, also sleep.
+      remaining=$(echo "$open_json" \
+        | TITLE_REGEX="$TITLE_REGEX" jq -r '
+            [.[] | select(.title | test(env.TITLE_REGEX))] | length')
+      if [[ "$remaining" -eq 0 ]]; then
+        echo "✅ Worker $WORKER_ID: no open issues match \"$TITLE_REGEX\". Done."
+        exit 0
+      fi
+      echo "⏸  Worker $WORKER_ID: no eligible issue (remaining=$remaining, claimed=$(echo "$claimed_set" | wc -l | tr -d ' ')); sleeping ${POLL_SEC}s."
+      sleep "$POLL_SEC"
+      continue
     fi
-    echo "⏸  Worker $WORKER_ID: no eligible issue (remaining=$remaining, claimed=$(echo "$claimed_set" | wc -l | tr -d ' ')); sleeping ${POLL_SEC}s."
-    sleep "$POLL_SEC"
-    continue
   fi
+  # End of legacy/run-aware mode branching — both paths set num, title, body
 
   ts="$(date +%Y%m%d-%H%M%S)"
   log_file="$LOG_DIR/iter-${ts}-w${WORKER_ID}-issue-${num}.log"
@@ -275,6 +376,10 @@ while true; do
   fi
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
   CURRENT_CLAIM="$num"
+  # In run-aware mode, also update status.json atomically under same lock
+  if [[ -n "$RUN_ID" ]]; then
+    status_update_item "$num" "claimed" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+  fi
   state_unlock
 
   echo ""
@@ -300,6 +405,13 @@ ${issue_text}"
   # merges (e.g., a previously-closed issue that was reopened for regression).
   iter_start_ts=$(date -u +%FT%TZ)
 
+  # Update status to "running" before calling copilot (run-aware mode only)
+  if [[ -n "$RUN_ID" ]]; then
+    state_lock || { echo "⚠️  Couldn't acquire state lock before copilot" >&2; exit 1; }
+    status_update_item "$num" "running" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+    state_unlock
+  fi
+
   set +e
   run_with_timeout "$TIMEOUT_SEC" \
     copilot -p "$full_prompt" \
@@ -310,6 +422,12 @@ ${issue_text}"
   set -e
 
   if [[ "$rc" -ne 0 ]]; then
+    # Mark as failed in status.json (run-aware mode only)
+    if [[ -n "$RUN_ID" ]]; then
+      state_lock || true
+      status_mark_failed "$num" "Copilot exited with code $rc"
+      state_unlock || true
+    fi
     echo "⚠️  copilot exited $rc on #$num. See $log_file. Halting." >&2
     exit 1
   fi
@@ -371,8 +489,21 @@ ${issue_text}"
   fi
 
   if [[ "$merged_count" -lt 1 ]]; then
+    # Mark as failed in status.json (run-aware mode only)
+    if [[ -n "$RUN_ID" ]]; then
+      state_lock || true
+      status_mark_failed "$num" "No merged PR found after copilot completed"
+      state_unlock || true
+    fi
     echo "⚠️  Issue #$num not closed by a merged PR (state=$state, merged_prs=$merged_count). Halting." >&2
     exit 1
+  fi
+
+  # Success! Update status to merged (run-aware mode only)
+  if [[ -n "$RUN_ID" ]]; then
+    state_lock || true
+    status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+    state_unlock || true
   fi
 
   # Optional Slice 1 postcondition (alisterr-specific guard) — skipped when
