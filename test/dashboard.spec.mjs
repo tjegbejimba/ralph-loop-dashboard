@@ -526,3 +526,112 @@ test("hides cumulative footer when worker has zero completed iterations", async 
   await loadDashboard(page, { ...baseStatus, workers: [w], currentIteration: w });
   await expect(page.locator(".worker-card-cumulative")).toHaveCount(0);
 });
+
+// Queue Builder Tests
+test("queue builder - select and deselect issues", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        loopRunning: false,
+        openSlices: [],
+        workers: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 5, title: "Add auth", labels: [], milestone: null, url: "https://github.com/test/repo/issues/5" },
+            { number: 3, title: "Fix bug", labels: [], milestone: null, url: "https://github.com/test/repo/issues/3" },
+            { number: 10, title: "Docs", labels: [], milestone: null, url: "https://github.com/test/repo/issues/10" },
+          ],
+          warnings: [],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  // Select issue 5
+  await page.locator('[data-issue-number="5"] .issue-select-checkbox').click();
+  
+  // Select issue 3
+  await page.locator('[data-issue-number="3"] .issue-select-checkbox').click();
+
+  // Queue should show 2 issues in ascending order (3, 5)
+  const queueItems = page.locator(".queue-item");
+  await expect(queueItems).toHaveCount(2);
+  await expect(queueItems.nth(0)).toContainText("#3");
+  await expect(queueItems.nth(1)).toContainText("#5");
+
+  // Deselect issue 3
+  await page.locator('[data-issue-number="3"] .issue-select-checkbox').click();
+
+  // Queue should show only 1 issue
+  await expect(queueItems).toHaveCount(1);
+  await expect(queueItems.nth(0)).toContainText("#5");
+});
+
+test("queue builder - manual reorder", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        loopRunning: false,
+        openSlices: [],
+        workers: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 3, title: "First", labels: [], milestone: null, url: "https://github.com/test/repo/issues/3" },
+            { number: 7, title: "Second", labels: [], milestone: null, url: "https://github.com/test/repo/issues/7" },
+            { number: 10, title: "Third", labels: [], milestone: null, url: "https://github.com/test/repo/issues/10" },
+          ],
+          warnings: [],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  // Select all issues
+  await page.locator('[data-issue-number="3"] .issue-select-checkbox').click();
+  await page.locator('[data-issue-number="7"] .issue-select-checkbox').click();
+  await page.locator('[data-issue-number="10"] .issue-select-checkbox').click();
+
+  // Verify initial order (3, 7, 10)
+  const queueItems = page.locator(".queue-item");
+  await expect(queueItems.nth(0)).toContainText("#3");
+  await expect(queueItems.nth(1)).toContainText("#7");
+  await expect(queueItems.nth(2)).toContainText("#10");
+
+  // Move issue 3 to last position using move-down button twice
+  await queueItems.nth(0).locator(".queue-move-down").click();
+  await queueItems.nth(1).locator(".queue-move-down").click();
+
+  // Order should now be (7, 10, 3)
+  await expect(queueItems.nth(0)).toContainText("#7");
+  await expect(queueItems.nth(1)).toContainText("#10");
+  await expect(queueItems.nth(2)).toContainText("#3");
+});
+
