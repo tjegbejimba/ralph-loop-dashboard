@@ -303,6 +303,51 @@ function renderConfigSummary(config) {
 function render(s) {
   const dot = $("status-dot");
   dot.classList.remove("green", "red", "yellow");
+  
+  // Check repo state first — show appropriate guidance if unresolved or missing setup
+  const repoState = s.config?.repoState;
+  if (repoState?.state === "unresolved") {
+    dot.classList.add("red");
+    $("last-updated").textContent = "repo unresolved";
+    $("workers-container").innerHTML = `
+      <div class="placeholder error-state">
+        <h3>⚠️ No repository root found</h3>
+        <p>Ralph could not find a repository to work with.</p>
+        <p>To resolve this:</p>
+        <ul style="text-align: left; margin: 1em auto; max-width: 500px;">
+          <li>Set <code>RALPH_REPO_ROOT=/path/to/repo</code> environment variable, or</li>
+          <li>Run from within a git repository, or</li>
+          <li>Create a <code>.ralph/</code> directory in your project root</li>
+        </ul>
+      </div>
+    `;
+    $("start-btn")?.setAttribute("hidden", "");
+    $("stop-btn")?.setAttribute("hidden", "");
+    return;
+  }
+  
+  if (repoState && !repoState.hasRalph) {
+    dot.classList.add("yellow");
+    $("last-updated").textContent = `repo: ${repoState.repoRoot}`;
+    $("workers-container").innerHTML = `
+      <div class="placeholder warn-state">
+        <h3>⚙️ Repository not initialized</h3>
+        <p>Repository root: <code>${escapeHtml(repoState.repoRoot)}</code></p>
+        <p>The <code>.ralph/</code> directory is missing. Ralph needs to be initialized before starting a loop.</p>
+        <p>To initialize Ralph in this repository:</p>
+        <ul style="text-align: left; margin: 1em auto; max-width: 500px;">
+          <li>Create a <code>.ralph/</code> directory</li>
+          <li>Add <code>launch.sh</code> and <code>ralph.sh</code> scripts</li>
+          <li>Configure <code>config.json</code> (optional)</li>
+        </ul>
+        <p><em>Initialization flow will be added in a future slice.</em></p>
+      </div>
+    `;
+    $("start-btn")?.setAttribute("hidden", "");
+    $("stop-btn")?.setAttribute("hidden", "");
+    return;
+  }
+  
   if (s.loopRunning) dot.classList.add("green");
   else if (s.openSlices && s.openSlices.length === 0) dot.classList.add("yellow");
   else dot.classList.add("red");

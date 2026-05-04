@@ -825,3 +825,32 @@ li:hover {
   font-size: 9px;
   margin-left: 4px;
 }
+
+/* Repo state warnings */
+.error-state,
+.warn-state {
+  padding: 2em;
+  text-align: center;
+  max-width: 700px;
+  margin: 2em auto;
+}
+.error-state {
+  border: 1px solid var(--red);
+  background: rgba(248, 81, 73, 0.1);
+}
+.warn-state {
+  border: 1px solid var(--yellow);
+  background: rgba(210, 153, 34, 0.1);
+}
+.error-state h3,
+.warn-state h3 {
+  margin: 0 0 1em 0;
+  font-size: 16px;
+}
+.error-state code,
+.warn-state code {
+  background: var(--panel-2);
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 12px;
+}
