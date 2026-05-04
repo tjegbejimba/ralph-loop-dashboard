@@ -20,7 +20,8 @@ export class QueueBuilder {
       return;
     }
     
-    this.queue.push({ ...issue });
+    // Deep copy to prevent external mutations affecting internal state
+    this.queue.push(structuredClone(issue));
     this.queue.sort((a, b) => a.number - b.number);
   }
 
@@ -41,16 +42,20 @@ export class QueueBuilder {
     const currentIndex = this.queue.findIndex(issue => issue.number === issueNumber);
     if (currentIndex === -1) return;
     
+    // Validate newIndex is within bounds
+    if (newIndex < 0 || newIndex >= this.queue.length) return;
+    
     const [issue] = this.queue.splice(currentIndex, 1);
     this.queue.splice(newIndex, 0, issue);
   }
 
   /**
    * Get the current queue.
+   * Returns a deep copy to prevent external mutations.
    * @returns {Array<Object>} Ordered array of selected issues
    */
   getQueue() {
-    return this.queue;
+    return this.queue.map(issue => structuredClone(issue));
   }
 
   /**

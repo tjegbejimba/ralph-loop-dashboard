@@ -138,4 +138,93 @@ describe("QueueBuilder", () => {
       assert.equal(issue.url, "https://github.com/test/repo/issues/5");
     });
   });
+
+  describe("edge cases and mutation safety", () => {
+    it("prevents external mutation of selected issue", () => {
+      const qb = new QueueBuilder();
+      const issue = { number: 5, title: "Test", labels: ["bug"] };
+      
+      qb.selectIssue(issue);
+      
+      // Mutate original issue
+      issue.title = "MUTATED";
+      issue.labels.push("INJECTED");
+      
+      // Queue should not be affected
+      const queue = qb.getQueue();
+      assert.equal(queue[0].title, "Test");
+      assert.deepEqual(queue[0].labels, ["bug"]);
+    });
+    
+    it("prevents external mutation via getQueue() return value", () => {
+      const qb = new QueueBuilder();
+      qb.selectIssue({ number: 5, title: "Test" });
+      
+      const queue1 = qb.getQueue();
+      queue1.push({ number: 999, title: "Injected" });
+      queue1[0].title = "MUTATED";
+      
+      // Internal queue should not be affected
+      const queue2 = qb.getQueue();
+      assert.equal(queue2.length, 1);
+      assert.equal(queue2[0].number, 5);
+      assert.equal(queue2[0].title, "Test");
+    });
+    
+    it("rejects negative index in reorderIssue", () => {
+      const qb = new QueueBuilder();
+      qb.selectIssue({ number: 1, title: "A" });
+      qb.selectIssue({ number: 2, title: "B" });
+      qb.selectIssue({ number: 3, title: "C" });
+      
+      qb.reorderIssue(3, -1);
+      const queue = qb.getQueue();
+      
+      // Order should be unchanged
+      assert.equal(queue[0].number, 1);
+      assert.equal(queue[1].number, 2);
+      assert.equal(queue[2].number, 3);
+    });
+    
+    it("rejects out-of-bounds index in reorderIssue", () => {
+      const qb = new QueueBuilder();
+      qb.selectIssue({ number: 1, title: "A" });
+      qb.selectIssue({ number: 2, title: "B" });
+      qb.selectIssue({ number: 3, title: "C" });
+      
+      qb.reorderIssue(1, 10);
+      const queue = qb.getQueue();
+      
+      // Order should be unchanged
+      assert.equal(queue[0].number, 1);
+      assert.equal(queue[1].number, 2);
+      assert.equal(queue[2].number, 3);
+    });
+    
+    it("handles reorderIssue for non-existent issue", () => {
+      const qb = new QueueBuilder();
+      qb.selectIssue({ number: 1, title: "A" });
+      qb.selectIssue({ number: 2, title: "B" });
+      
+      qb.reorderIssue(999, 0);
+      const queue = qb.getQueue();
+      
+      // Should be no-op
+      assert.equal(queue.length, 2);
+      assert.equal(queue[0].number, 1);
+      assert.equal(queue[1].number, 2);
+    });
+    
+    it("handles deselectIssue for non-existent issue", () => {
+      const qb = new QueueBuilder();
+      qb.selectIssue({ number: 5, title: "Test" });
+      
+      qb.deselectIssue(999);
+      const queue = qb.getQueue();
+      
+      // Should be no-op
+      assert.equal(queue.length, 1);
+      assert.equal(queue[0].number, 5);
+    });
+  });
 });

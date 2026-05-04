@@ -2,29 +2,37 @@ const REFRESH_MS = 8000;
 
 const $ = (id) => document.getElementById(id);
 
-// Queue Builder - manages issue selection and ordering
+// Queue Builder - singleton instance
 let queueBuilder = null;
 
-// Initialize queue builder factory (lazily creates instance)
+// Import would go here in a module context, but since main.js is loaded as a script tag,
+// we inline a minimal QueueBuilder implementation that matches the tested module
 function getQueueBuilder() {
   if (!queueBuilder) {
-    // Dynamically import QueueBuilder class
-    queueBuilder = { queue: [], selectIssue(issue) {
-      if (this.queue.some(i => i.number === issue.number)) return;
-      this.queue.push({...issue});
-      this.queue.sort((a, b) => a.number - b.number);
-    }, deselectIssue(issueNumber) {
-      this.queue = this.queue.filter(i => i.number !== issueNumber);
-    }, reorderIssue(issueNumber, newIndex) {
-      const idx = this.queue.findIndex(i => i.number === issueNumber);
-      if (idx === -1) return;
-      const [issue] = this.queue.splice(idx, 1);
-      this.queue.splice(newIndex, 0, issue);
-    }, getQueue() {
-      return this.queue;
-    }, isSelected(issueNumber) {
-      return this.queue.some(i => i.number === issueNumber);
-    } };
+    queueBuilder = {
+      queue: [],
+      selectIssue(issue) {
+        if (this.queue.some(i => i.number === issue.number)) return;
+        this.queue.push(structuredClone(issue));
+        this.queue.sort((a, b) => a.number - b.number);
+      },
+      deselectIssue(issueNumber) {
+        this.queue = this.queue.filter(i => i.number !== issueNumber);
+      },
+      reorderIssue(issueNumber, newIndex) {
+        const idx = this.queue.findIndex(i => i.number === issueNumber);
+        if (idx === -1) return;
+        if (newIndex < 0 || newIndex >= this.queue.length) return;
+        const [issue] = this.queue.splice(idx, 1);
+        this.queue.splice(newIndex, 0, issue);
+      },
+      getQueue() {
+        return this.queue.map(i => structuredClone(i));
+      },
+      isSelected(issueNumber) {
+        return this.queue.some(i => i.number === issueNumber);
+      }
+    };
   }
   return queueBuilder;
 }
@@ -552,6 +560,12 @@ function renderIssuePreview(preview) {
   });
   
   const rows = preview.issues.map(issue => {
+    // Validate issue.number is actually a number for security
+    if (typeof issue.number !== 'number') {
+      console.error('Invalid issue.number:', issue.number);
+      return '';
+    }
+    
     const checked = qb.isSelected(issue.number) ? 'checked' : '';
     const labels = (issue.labels || []).map(l => 
       `<span class="label">${escapeHtml(l)}</span>`
@@ -575,7 +589,7 @@ function renderIssuePreview(preview) {
         ${warningHtml}
       </div>
     `;
-  }).join('');
+  }).filter(Boolean).join('');
   
   container.innerHTML = rows;
   
@@ -613,6 +627,12 @@ function renderQueueBuilder() {
   container.classList.remove("placeholder");
   
   const items = queue.map((issue, index) => {
+    // Validate issue.number is a number for security
+    if (typeof issue.number !== 'number') {
+      console.error('Invalid issue.number in queue:', issue.number);
+      return '';
+    }
+    
     const upDisabled = index === 0 ? 'disabled' : '';
     const downDisabled = index === queue.length - 1 ? 'disabled' : '';
     
@@ -627,7 +647,7 @@ function renderQueueBuilder() {
         </div>
       </div>
     `;
-  }).join('');
+  }).filter(Boolean).join('');
   
   container.innerHTML = items;
   
@@ -649,7 +669,7 @@ function renderQueueBuilder() {
       const item = e.target.closest('.queue-item');
       const issueNumber = Number(item.dataset.issueNumber);
       const currentIndex = queue.findIndex(i => i.number === issueNumber);
-      if (currentIndex < queue.length - 1) {
+      if (currentIndex !== -1 && currentIndex < queue.length - 1) {
         qb.reorderIssue(issueNumber, currentIndex + 1);
         renderQueueBuilder();
       }
