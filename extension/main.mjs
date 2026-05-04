@@ -1,45 +1,23 @@
 import { execFile, spawn } from "node:child_process";
 import { existsSync, openSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { joinSession } from "@github/copilot-sdk/extension";
 import { CopilotWebview } from "./lib/copilot-webview.js";
 import { detectTokens, parseTokenUnit } from "./lib/tokens.mjs";
+import { resolveRepoState } from "./lib/repo-resolver.mjs";
 
 const execFileAsync = promisify(execFile);
 
-// Walk up from `start` looking for a directory containing any of `markers`.
-// Returns the first match, or null. Used to resolve the project repo root
-// when the extension is installed at the user level (~/.copilot/extensions/).
-function findUpward(start, markers) {
-  let dir = resolve(start);
-  while (true) {
-    for (const marker of markers) {
-      if (existsSync(join(dir, marker))) return dir;
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
+// Resolve repo state at extension load time
+const REPO_STATE = resolveRepoState({
+  env: process.env,
+  cwd: process.cwd(),
+  searchStart: import.meta.dirname,
+});
 
-// Resolve the target project root. Precedence:
-//   1. RALPH_REPO_ROOT env var (explicit override)
-//   2. Walk up from process.cwd() to a directory containing .ralph/
-//   3. Walk up from process.cwd() to a directory containing .git/
-//   4. Walk up from this file (legacy in-repo install at .github/extensions/...)
-//   5. process.cwd() (last resort)
-function resolveRepoRoot() {
-  if (process.env.RALPH_REPO_ROOT) return resolve(process.env.RALPH_REPO_ROOT);
-  return (
-    findUpward(process.cwd(), [".ralph"]) ||
-    findUpward(process.cwd(), [".git"]) ||
-    findUpward(import.meta.dirname, [".ralph"]) ||
-    process.cwd()
-  );
-}
-
-const REPO_ROOT = resolveRepoRoot();
+// For backward compatibility, export REPO_ROOT (or fallback to cwd if unresolved)
+const REPO_ROOT = REPO_STATE.repoRoot || process.cwd();
 const LOOP_LOG = join(REPO_ROOT, ".ralph", "loop.out");
 const LOGS_DIR = join(REPO_ROOT, ".ralph", "logs");
 const STATE_FILE = join(REPO_ROOT, ".ralph", "state.json");
@@ -631,6 +609,12 @@ function getConfigSummary() {
         })),
     },
     warnings: CONFIG_WARNINGS,
+    repoState: {
+      state: REPO_STATE.state,
+      repoRoot: REPO_STATE.repoRoot,
+      hasRalph: REPO_STATE.hasRalph,
+      source: REPO_STATE.source,
+    },
   };
 }
 
