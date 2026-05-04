@@ -1,6 +1,6 @@
 // User config persistence module — loads and saves dashboard defaults outside project repos.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
@@ -44,12 +44,37 @@ export function loadUserConfig({ configDir } = {}) {
     const config = { ...DEFAULTS };
     for (const [key, value] of Object.entries(loaded)) {
       if (ALLOWED_FIELDS.has(key)) {
-        config[key] = value;
+        // Special validation for recentQueries: must be array of strings
+        if (key === "recentQueries") {
+          if (!Array.isArray(value)) {
+            warnings.push({
+              field: key,
+              message: `Field 'recentQueries' must be an array, got ${typeof value}. Using default empty array.`,
+              value: "[redacted]",
+            });
+            continue; // Skip, use default
+          }
+          // Filter out non-string items
+          const validQueries = value.filter(item => {
+            if (typeof item !== "string") {
+              warnings.push({
+                field: key,
+                message: `Invalid recentQueries item (must be string): ${typeof item}`,
+                value: "[redacted]",
+              });
+              return false;
+            }
+            return true;
+          });
+          config[key] = validQueries;
+        } else {
+          config[key] = value;
+        }
       } else {
         warnings.push({
           field: key,
           message: `Unknown field '${key}' ignored (only allowed: ${Array.from(ALLOWED_FIELDS).join(", ")})`,
-          value,
+          value: "[redacted]", // Don't expose potential secrets
         });
       }
     }
@@ -90,7 +115,7 @@ export function saveUserConfig(config, { configDir } = {}) {
       warnings.push({
         field: key,
         message: `Unknown field '${key}' not saved (only allowed: ${Array.from(ALLOWED_FIELDS).join(", ")})`,
-        value,
+        value: "[redacted]", // Don't expose potential secrets
       });
     }
   }
@@ -126,6 +151,11 @@ export function saveUserConfig(config, { configDir } = {}) {
  * @returns {Object} Result with config and warnings
  */
 export function addRecentQuery(query, { configDir, maxRecent = 10 } = {}) {
+  // Validate query is a string
+  if (typeof query !== "string") {
+    throw new TypeError(`Query must be a string, got ${typeof query}`);
+  }
+  
   const { config, warnings: loadWarnings } = loadUserConfig({ configDir });
   
   // Dedupe: remove existing occurrence of this query (case-sensitive)

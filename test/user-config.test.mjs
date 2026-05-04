@@ -305,3 +305,115 @@ test("getPresets — truncates long query labels", () => {
     rmSync(tempDir, { recursive: true, force: true });
   }
 });
+
+test("loadUserConfig — handles non-array recentQueries gracefully", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+  
+  // Test with string value
+  writeFileSync(configPath, JSON.stringify({ recentQueries: "not an array" }), "utf8");
+  
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+    
+    // Should fall back to default empty array
+    assert.deepEqual(result.config.recentQueries, []);
+    
+    // Should have warning
+    assert.equal(result.warnings.length, 1);
+    assert.ok(result.warnings[0].message.includes("must be an array"));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig — handles null recentQueries", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+  
+  writeFileSync(configPath, JSON.stringify({ recentQueries: null }), "utf8");
+  
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+    
+    // Should fall back to default empty array
+    assert.deepEqual(result.config.recentQueries, []);
+    
+    // Should have warning
+    assert.equal(result.warnings.length, 1);
+    assert.ok(result.warnings[0].message.includes("must be an array"));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig — filters out non-string items in recentQueries", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+  
+  const mixedConfig = {
+    recentQueries: [123, { obj: "value" }, null, "valid query", "another valid"],
+  };
+  
+  writeFileSync(configPath, JSON.stringify(mixedConfig), "utf8");
+  
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+    
+    // Should only keep string items
+    assert.deepEqual(result.config.recentQueries, ["valid query", "another valid"]);
+    
+    // Should have warnings for invalid items
+    assert.ok(result.warnings.length >= 3);
+    assert.ok(result.warnings.some(w => w.message.includes("must be string")));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("addRecentQuery — validates query parameter is a string", () => {
+  const tempDir = makeTempDir();
+  
+  try {
+    // Should throw for non-string values
+    assert.throws(() => {
+      addRecentQuery(123, { configDir: tempDir });
+    }, TypeError);
+    
+    assert.throws(() => {
+      addRecentQuery(null, { configDir: tempDir });
+    }, TypeError);
+    
+    assert.throws(() => {
+      addRecentQuery({ obj: "value" }, { configDir: tempDir });
+    }, TypeError);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig — redacts sensitive values in warnings", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+  
+  const configWithSecret = {
+    defaultModel: "gpt-5.4",
+    apiKey: "sk-verysecrettoken12345678901234567890",
+  };
+  
+  writeFileSync(configPath, JSON.stringify(configWithSecret), "utf8");
+  
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+    
+    // Warning should exist for unknown field
+    const warning = result.warnings.find(w => w.field === "apiKey");
+    assert.ok(warning);
+    
+    // But value should be redacted, not exposed
+    assert.equal(warning.value, "[redacted]");
+    assert.ok(!warning.message.includes("sk-verysecret"));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
