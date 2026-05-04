@@ -157,3 +157,72 @@ test("resolveRepoState — invalid env override falls through to CWD search", ()
     rmSync(tempRoot, { recursive: true, force: true });
   }
 });
+
+test("resolveRepoState — RALPH_REPO_ROOT pointing to a file falls through", () => {
+  const tempRoot = makeTempDir();
+  const tempFile = join(tempRoot, "somefile.txt");
+  writeFileSync(tempFile, "not a directory");
+  mkdirSync(join(tempRoot, ".ralph"));
+  
+  try {
+    const result = resolveRepoState({
+      env: { RALPH_REPO_ROOT: tempFile },
+      cwd: tempRoot,
+      searchStart: tempRoot,
+    });
+    
+    // Should fall through to cwd search, not treat file as repo root
+    assert.equal(result.state, "resolved");
+    assert.equal(result.repoRoot, tempRoot);
+    assert.equal(result.source, "cwd-ralph");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("resolveRepoState — .ralph as file (not directory) is ignored", () => {
+  const tempRoot = makeTempDir();
+  const nested = join(tempRoot, "src");
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(tempRoot, ".ralph"), "not a directory");
+  mkdirSync(join(tempRoot, ".git"));
+  
+  try {
+    const result = resolveRepoState({
+      env: {},
+      cwd: nested,
+      searchStart: nested,
+    });
+    
+    // Should skip file .ralph and find .git instead
+    assert.equal(result.state, "resolved");
+    assert.equal(result.repoRoot, tempRoot);
+    assert.equal(result.hasRalph, false);
+    assert.equal(result.source, "cwd-git");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("resolveRepoState — .git as file (not directory) is ignored", () => {
+  const tempRoot = makeTempDir();
+  const nested = join(tempRoot, "workspace");
+  mkdirSync(nested, { recursive: true });
+  writeFileSync(join(tempRoot, ".git"), "gitdir: ../main/.git/worktrees/workspace");
+  
+  try {
+    const result = resolveRepoState({
+      env: {},
+      cwd: nested,
+      searchStart: nested,
+    });
+    
+    // Should skip file .git and show unresolved
+    assert.equal(result.state, "unresolved");
+    assert.equal(result.repoRoot, null);
+    assert.equal(result.hasRalph, false);
+    assert.equal(result.source, "none");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});

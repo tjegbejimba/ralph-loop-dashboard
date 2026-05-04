@@ -1,16 +1,26 @@
 // Repo resolution module — resolves target repo root from environment,
 // current working directory, and active loop detection.
 
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
+// Check if path exists and is a directory
+function isDirectory(path) {
+  try {
+    return existsSync(path) && statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 // Walk up from `start` looking for a directory containing any of `markers`.
-// Returns the first match, or null.
+// Returns the first match, or null. Markers must be directories, not files.
 function findUpward(start, markers) {
   let dir = resolve(start);
   while (true) {
     for (const marker of markers) {
-      if (existsSync(join(dir, marker))) return dir;
+      const markerPath = join(dir, marker);
+      if (isDirectory(markerPath)) return dir;
     }
     const parent = dirname(dir);
     if (parent === dir) return null;
@@ -35,11 +45,11 @@ export function resolveRepoState({ env, cwd, searchStart }) {
   // Precedence 1: RALPH_REPO_ROOT env var (explicit override)
   if (env.RALPH_REPO_ROOT) {
     const envRoot = resolve(env.RALPH_REPO_ROOT);
-    if (existsSync(envRoot)) {
-      const hasRalph = existsSync(join(envRoot, ".ralph"));
+    if (isDirectory(envRoot)) {
+      const hasRalph = isDirectory(join(envRoot, ".ralph"));
       return { state: "resolved", repoRoot: envRoot, hasRalph, source: "env" };
     }
-    // Invalid env override — fall through to other methods
+    // Invalid env override (not a directory) — fall through to other methods
   }
 
   // Precedence 2: Walk up from cwd to find .ralph/
@@ -51,7 +61,7 @@ export function resolveRepoState({ env, cwd, searchStart }) {
   // Precedence 3: Walk up from cwd to find .git/
   const cwdGit = findUpward(cwd, [".git"]);
   if (cwdGit) {
-    const hasRalph = existsSync(join(cwdGit, ".ralph"));
+    const hasRalph = isDirectory(join(cwdGit, ".ralph"));
     return { state: "resolved", repoRoot: cwdGit, hasRalph, source: "cwd-git" };
   }
 
