@@ -350,7 +350,7 @@ function render(s) {
         const resultDiv = $("init-result");
         
         try {
-          const result = await window.parent.postMessage({ type: "initRalph" }, "*");
+          const result = await copilot.initRalph();
           
           if (result.ok) {
             resultDiv.innerHTML = `
@@ -365,7 +365,7 @@ function render(s) {
               </div>
             `;
             // Trigger refresh after a short delay
-            setTimeout(() => fetchStatus(), 1500);
+            setTimeout(() => refresh(), 1500);
           } else {
             resultDiv.innerHTML = `
               <div style="color: #d73a49; padding: 1em; border: 1px solid #d73a49; border-radius: 6px; background: rgba(215, 58, 73, 0.1);">
