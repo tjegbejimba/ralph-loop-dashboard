@@ -9,5 +9,8 @@ test-results/
 playwright-report/
 playwright/.cache/
 
+# Ralph runtime state
+.ralph/runs/
+
 # OS junk
 .DS_Store
