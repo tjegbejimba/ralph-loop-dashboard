@@ -334,17 +334,61 @@ function render(s) {
         <h3>⚙️ Repository not initialized</h3>
         <p>Repository root: <code>${escapeHtml(repoState.repoRoot)}</code></p>
         <p>The <code>.ralph/</code> directory is missing. Ralph needs to be initialized before starting a loop.</p>
-        <p>To initialize Ralph in this repository:</p>
-        <ul style="text-align: left; margin: 1em auto; max-width: 500px;">
-          <li>Create a <code>.ralph/</code> directory</li>
-          <li>Add <code>launch.sh</code> and <code>ralph.sh</code> scripts</li>
-          <li>Configure <code>config.json</code> (optional)</li>
-        </ul>
-        <p><em>Initialization flow will be added in a future slice.</em></p>
+        <button id="init-ralph-btn" type="button" class="loop-btn start">Initialize Ralph</button>
+        <div id="init-result" style="margin-top: 1em;"></div>
       </div>
     `;
     $("start-btn")?.setAttribute("hidden", "");
     $("stop-btn")?.setAttribute("hidden", "");
+    
+    // Wire up initialization button
+    const initBtn = $("init-ralph-btn");
+    if (initBtn) {
+      initBtn.addEventListener("click", async () => {
+        initBtn.disabled = true;
+        initBtn.textContent = "Initializing...";
+        const resultDiv = $("init-result");
+        
+        try {
+          const result = await window.parent.postMessage({ type: "initRalph" }, "*");
+          
+          if (result.ok) {
+            resultDiv.innerHTML = `
+              <div style="color: #2ea043; padding: 1em; border: 1px solid #2ea043; border-radius: 6px; background: rgba(46, 160, 67, 0.1);">
+                <strong>✓ Initialization successful!</strong>
+                <p>Created ${result.created.length} file(s):</p>
+                <ul style="text-align: left; margin: 0.5em auto; max-width: 500px;">
+                  ${result.created.map(f => `<li><code>${escapeHtml(f)}</code></li>`).join("")}
+                </ul>
+                ${result.skipped.length > 0 ? `<p>Skipped ${result.skipped.length} existing file(s)</p>` : ""}
+                <p style="margin-top: 1em;">Refresh the dashboard to start using Ralph.</p>
+              </div>
+            `;
+            // Trigger refresh after a short delay
+            setTimeout(() => fetchStatus(), 1500);
+          } else {
+            resultDiv.innerHTML = `
+              <div style="color: #d73a49; padding: 1em; border: 1px solid #d73a49; border-radius: 6px; background: rgba(215, 58, 73, 0.1);">
+                <strong>✗ Initialization failed</strong>
+                <p>${escapeHtml(result.error || "Unknown error")}</p>
+              </div>
+            `;
+            initBtn.disabled = false;
+            initBtn.textContent = "Retry Initialization";
+          }
+        } catch (err) {
+          resultDiv.innerHTML = `
+            <div style="color: #d73a49; padding: 1em; border: 1px solid #d73a49; border-radius: 6px; background: rgba(215, 58, 73, 0.1);">
+              <strong>✗ Error</strong>
+              <p>${escapeHtml(err.message || err)}</p>
+            </div>
+          `;
+          initBtn.disabled = false;
+          initBtn.textContent = "Retry Initialization";
+        }
+      });
+    }
+    
     return;
   }
   

@@ -6,6 +6,7 @@ import { joinSession } from "@github/copilot-sdk/extension";
 import { CopilotWebview } from "./lib/copilot-webview.js";
 import { detectTokens, parseTokenUnit } from "./lib/tokens.mjs";
 import { resolveRepoState } from "./lib/repo-resolver.mjs";
+import { initializeRalph } from "./lib/ralph-init.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -716,6 +717,38 @@ async function stopLoop() {
   return { ok: killed.length > 0, killed, failed };
 }
 
+// Initialize Ralph in the resolved repository root.
+async function initRalph() {
+  if (REPO_STATE.state === "unresolved") {
+    return { ok: false, error: "No repository root resolved. Cannot initialize." };
+  }
+  if (!REPO_STATE.repoRoot) {
+    return { ok: false, error: "Repository root is null. Cannot initialize." };
+  }
+  if (REPO_STATE.hasRalph) {
+    return { ok: false, error: ".ralph/ already exists. Initialization not needed." };
+  }
+  
+  const result = initializeRalph(REPO_STATE.repoRoot);
+  
+  if (result.success) {
+    return {
+      ok: true,
+      message: "Ralph initialized successfully.",
+      created: result.created,
+      skipped: result.skipped,
+      repoRoot: REPO_STATE.repoRoot,
+    };
+  } else {
+    return {
+      ok: false,
+      error: result.error || "Initialization failed.",
+      created: result.created,
+      skipped: result.skipped,
+    };
+  }
+}
+
 const webview = new CopilotWebview({
   extensionName: "ralph_dashboard",
   contentDir: join(import.meta.dirname, "content"),
@@ -728,6 +761,7 @@ const webview = new CopilotWebview({
     getIssueDetail,
     startLoop,
     stopLoop,
+    initRalph,
     log: (msg, opts) => session.log(msg, opts),
   },
 });
