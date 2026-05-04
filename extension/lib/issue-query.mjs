@@ -1,6 +1,6 @@
 // Issue query module — runs GitHub issue searches and generates preview warnings.
 
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 
 /**
  * Query GitHub issues and return metadata with warnings.
@@ -18,11 +18,36 @@ import { execSync } from "node:child_process";
  */
 export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, claimedIssues = [] }) {
   try {
+    // Validate claimedIssues is an array
+    if (!Array.isArray(claimedIssues)) {
+      return {
+        issues: null,
+        warnings: [],
+        error: {
+          type: "invalid_input",
+          message: "claimedIssues must be an array",
+        },
+      };
+    }
+    
     // Execute gh CLI to search issues (or use test mock)
-    const output = execCommand ? execCommand() : execSync(
-      `gh issue list --repo ${repoOwner}/${repoName} --search "${searchQuery}" --json number,title,body,labels,milestone,url,closingPullRequestsReferences --limit 1000`,
-      { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }
-    );
+    const output = execCommand ? execCommand() : (() => {
+      const result = spawnSync("gh", [
+        "issue", "list",
+        "--repo", `${repoOwner}/${repoName}`,
+        "--search", searchQuery,
+        "--json", "number,title,body,labels,milestone,url,closingPullRequestsReferences",
+        "--limit", "1000",
+      ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+      
+      if (result.error) {
+        throw result.error;
+      }
+      if (result.status !== 0) {
+        throw new Error(result.stderr || "gh command failed");
+      }
+      return result.stdout;
+    })();
     
     // Parse JSON output
     const rawIssues = JSON.parse(output);
@@ -42,10 +67,12 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
       }
       
       // Check for linked open PR
-      const openPRs = (issue.closingPullRequestsReferences || []).filter(
-        pr => pr.state === "OPEN"
-      );
-      if (openPRs.length > 0) {
+      const prRefs = Array.isArray(issue.closingPullRequestsReferences) 
+        ? issue.closingPullRequestsReferences 
+        : [];
+      const openPRs = prRefs.filter(pr => pr && pr.state === "OPEN");
+      
+      if (openPRs.length > 0 && openPRs[0].url) {
         warnings.push({
           issueNumber: issue.number,
           type: "linked_pr",
@@ -67,7 +94,7 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
         number: issue.number,
         title: issue.title,
         body: issue.body,
-        labels: issue.labels ? issue.labels.map(l => l.name) : [],
+        labels: Array.isArray(issue.labels) ? issue.labels.map(l => l.name) : [],
         milestone: issue.milestone ? issue.milestone.title : null,
         url: issue.url,
       };
@@ -79,12 +106,19 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
       error: null,
     };
   } catch (err) {
+    // Sanitize error message to avoid exposing sensitive data
+    let message = err.message;
+    if (message && message.includes("--search")) {
+      // Strip command details that might contain user input
+      message = message.split("\n")[0] || "GitHub CLI command failed";
+    }
+    
     return {
       issues: null,
       warnings: [],
       error: {
         type: "query_failed",
-        message: err.message,
+        message,
       },
     };
   }

@@ -237,3 +237,72 @@ test("queryIssues — claimed issue generates warning", () => {
   assert.equal(result.warnings[0].type, "already_claimed");
   assert.match(result.warnings[0].message, /already claimed/i);
 });
+
+// Test type validation
+test("queryIssues — validates claimedIssues is an array", () => {
+  const result = queryIssues({
+    repoOwner: "owner",
+    repoName: "repo",
+    searchQuery: "is:open",
+    execCommand: () => "[]",
+    claimedIssues: "not-an-array", // Invalid type
+  });
+
+  assert.equal(result.issues, null);
+  assert.notEqual(result.error, null);
+  assert.equal(result.error.type, "invalid_input");
+});
+
+test("queryIssues — handles malformed labels array gracefully", () => {
+  const mockOutput = JSON.stringify([
+    {
+      number: 80,
+      title: "Task with malformed labels",
+      body: "Content",
+      labels: "not-an-array",
+      milestone: null,
+      url: "https://github.com/owner/repo/issues/80",
+      closingPullRequestsReferences: [],
+    },
+  ]);
+
+  const mockExec = () => mockOutput;
+
+  const result = queryIssues({
+    repoOwner: "owner",
+    repoName: "repo",
+    searchQuery: "is:open",
+    execCommand: mockExec,
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.issues.length, 1);
+  assert.deepEqual(result.issues[0].labels, []); // Falls back to empty array
+});
+
+test("queryIssues — handles malformed PR references gracefully", () => {
+  const mockOutput = JSON.stringify([
+    {
+      number: 81,
+      title: "Task with malformed PR refs",
+      body: "Content",
+      labels: [],
+      milestone: null,
+      url: "https://github.com/owner/repo/issues/81",
+      closingPullRequestsReferences: "not-an-array",
+    },
+  ]);
+
+  const mockExec = () => mockOutput;
+
+  const result = queryIssues({
+    repoOwner: "owner",
+    repoName: "repo",
+    searchQuery: "is:open",
+    execCommand: mockExec,
+  });
+
+  assert.equal(result.error, null);
+  assert.equal(result.issues.length, 1);
+  assert.equal(result.warnings.length, 0); // No warnings for malformed data
+});
