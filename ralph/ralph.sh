@@ -101,6 +101,9 @@ state_init
 # Per-run status tracking (status.json). Only needed in run-aware mode.
 # shellcheck source=lib/status.sh
 . "$SCRIPT_DIR/lib/status.sh"
+# PR merge fallback helpers.
+# shellcheck source=lib/pr-merge.sh
+. "$SCRIPT_DIR/lib/pr-merge.sh"
 if [[ -n "$RUN_ID" ]]; then
   status_init
 fi
@@ -170,6 +173,33 @@ run_with_timeout() {
   fi
 }
 
+wait_for_issue_closed_by_merged_pr() {
+  local issue="$1"
+  local context="$2"
+  local closure state pr_numbers merged_count pr merged_at attempt
+  for attempt in 1 2 3 4 5 6; do
+    closure=$(gh issue view "$issue" --repo "$REPO" \
+      --json state,closedByPullRequestsReferences)
+    state=$(echo "$closure" | jq -r .state)
+    pr_numbers=$(echo "$closure" | jq -r '(.closedByPullRequestsReferences // [])[].number')
+    merged_count=0
+    for pr in $pr_numbers; do
+      merged_at=$(gh pr view "$pr" --repo "$REPO" --json mergedAt -q .mergedAt 2>/dev/null || echo "")
+      if [[ -n "$merged_at" && "$merged_at" != "null" ]]; then
+        merged_count=$((merged_count + 1))
+      fi
+    done
+    if [[ "$state" == "CLOSED" && "$merged_count" -ge 1 ]]; then
+      return 0
+    fi
+    if [[ "$attempt" -lt 6 ]]; then
+      echo "ℹ️  Issue #$issue closure metadata not yet propagated $context (state=$state, merged_prs=$merged_count); retry $attempt/5 in 5s..." >&2
+      sleep 5
+    fi
+  done
+  return 1
+}
+
 while true; do
   # Preflight: clean tree, on main, up to date
   if [[ -n "$(git status --porcelain)" ]]; then
@@ -195,7 +225,7 @@ while true; do
     
     # Find next unclaimed issue from queue
     queue_json=$(cat "$queue_file")
-    num=""; title=""; body=""
+    num=""; title=""; body=""; chosen_blockers=""
     
     for row in $(echo "$queue_json" | jq -r '.[] | @base64'); do
       decoded=$(echo "$row" | base64 --decode)
@@ -337,6 +367,7 @@ while true; do
     fi
   fi
   # End of legacy/run-aware mode branching — both paths set num, title, body
+  iter_start_ts=$(date -u +%FT%TZ)
 
   ts="$(date +%Y%m%d-%H%M%S)"
   log_file="$LOG_DIR/iter-${ts}-w${WORKER_ID}-issue-${num}.log"
@@ -382,6 +413,26 @@ while true; do
   fi
   state_unlock
 
+  default_branch=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
+  if ralph_merge_ready_open_pr_for_issue "$num" "$default_branch"; then
+    if wait_for_issue_closed_by_merged_pr "$num" "after pre-claim fallback merge"; then
+      if [[ -n "$RUN_ID" ]]; then
+        state_lock || true
+        status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+        state_unlock || true
+      fi
+      echo "✅ Worker $WORKER_ID: merged ready PR for #$num before launching Copilot."
+      state_lock && state_release "$num" && state_unlock || true
+      CURRENT_CLAIM=""
+      sync_to_origin_main
+      if [[ "$ONCE" -eq 1 ]]; then
+        echo "🛑 --once: exiting after one iteration."
+        exit 0
+      fi
+      continue
+    fi
+  fi
+
   echo ""
   echo "============================================================"
   echo "▶️  $(date -u +%FT%TZ)  Worker $WORKER_ID — #$num: $title"
@@ -400,10 +451,6 @@ ${body}"
 ISSUE #${num}
 ---
 ${issue_text}"
-
-  # Capture timestamp before the agent runs so the fallback can reject historical
-  # merges (e.g., a previously-closed issue that was reopened for regression).
-  iter_start_ts=$(date -u +%FT%TZ)
 
   # Update status to "running" before calling copilot (run-aware mode only)
   if [[ -n "$RUN_ID" ]]; then
@@ -475,16 +522,23 @@ ${issue_text}"
   #    when the PR merged into the default branch, so non-default merges
   #    couldn't have closed the issue and must not be credited here.
   if [[ "$merged_count" -lt 1 ]]; then
-    default_branch=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
-    echo "ℹ️  Issue #$num closure link empty after retries (state=$state); checking recent merged PRs for 'Closes #$num' on $default_branch since $iter_start_ts..." >&2
-    fallback_pr=$(gh pr list --repo "$REPO" --state merged --limit 20 --base "$default_branch" \
-      --search "in:body \"#$num\"" \
-      --json number,body,mergedAt,baseRefName \
-      --jq ".[] | select(.mergedAt > \"$iter_start_ts\") | select(.baseRefName == \"$default_branch\") | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | .number" \
-      | head -1)
-    if [[ -n "$fallback_pr" ]]; then
-      echo "✅ Found merged PR #$fallback_pr referencing 'Closes #$num' — accepting." >&2
-      merged_count=1
+    if [[ "$state" != "CLOSED" ]] && ralph_merge_ready_open_pr_for_issue "$num" "$default_branch"; then
+      if wait_for_issue_closed_by_merged_pr "$num" "after fallback merge"; then
+        merged_count=1
+      fi
+    fi
+
+    if [[ "$merged_count" -lt 1 ]]; then
+      echo "ℹ️  Issue #$num closure link empty after retries (state=$state); checking recent merged PRs for 'Closes #$num' on $default_branch since $iter_start_ts..." >&2
+      fallback_pr=$(gh pr list --repo "$REPO" --state merged --limit 20 --base "$default_branch" \
+        --search "in:body \"#$num\"" \
+        --json number,body,mergedAt,baseRefName \
+        --jq ".[] | select(.mergedAt > \"$iter_start_ts\") | select(.baseRefName == \"$default_branch\") | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | .number" \
+        | head -1)
+      if [[ -n "$fallback_pr" ]]; then
+        echo "✅ Found merged PR #$fallback_pr referencing 'Closes #$num' — accepting." >&2
+        merged_count=1
+      fi
     fi
   fi
 

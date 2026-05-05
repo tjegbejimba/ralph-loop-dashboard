@@ -12,5 +12,8 @@ playwright/.cache/
 # Ralph runtime state
 .ralph/runs/
 
+# Ralph worker scratch files
+.ralph-pr-body-*.md
+
 # OS junk
 .DS_Store

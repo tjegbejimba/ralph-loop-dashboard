@@ -10,6 +10,7 @@
 #   .ralph/launch.sh --foreground # attached (only valid for parallelism=1)
 #   .ralph/launch.sh --status     # show running workers + claims
 #   .ralph/launch.sh --stop       # SIGTERM all workers
+#   .ralph/launch.sh --cleanup    # stop workers and remove clean loop worktrees
 #
 # Configuration (env vars, all optional):
 #   RALPH_PARALLELISM  Number of concurrent workers (default: 1)
@@ -33,6 +34,7 @@ MAIN_REPO="${RALPH_MAIN_REPO:-$DEFAULT_MAIN}"
 LOOP_REPO_BASE="${RALPH_LOOP_REPO:-${MAIN_REPO}-ralph}"
 LOOP_BRANCH_BASE="${RALPH_LOOP_BRANCH:-ralph-loop}"
 PARALLELISM="${RALPH_PARALLELISM:-1}"
+RALPH_SCRIPT="$(cd "$MAIN_REPO/.ralph" && pwd -P)/ralph.sh"
 
 # Validate parallelism
 if ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
@@ -59,13 +61,65 @@ worker_branch() {
   fi
 }
 
+# Source the state-lock helpers so we can use the same PID-stamped lockdir
+# primitive for worker locks and the launcher setup mutex.
+LOG_DIR="$MAIN_REPO/.ralph/logs"
+mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
+# shellcheck source=lib/state.sh
+. "$MAIN_REPO/.ralph/lib/state.sh"
+
+scoped_ralph_processes() {
+  ps -axww -o pid=,ppid=,command= | awk -v script="$RALPH_SCRIPT" '
+    {
+      pid=$1
+      ppid=$2
+      cmd=""
+      for (i=3; i<=NF; i++) cmd = cmd (i==3 ? "" : " ") $i
+      pids[++n]=pid
+      parent[pid]=ppid
+      command[pid]=cmd
+      script_pos=index(cmd, script)
+      if (script_pos > 0) {
+        prefix=substr(cmd, 1, script_pos - 1)
+        gsub(/[ \t]+$/, "", prefix)
+        if (prefix == "" || prefix ~ /(bash|sh|zsh|nohup|timeout)$/) scoped[pid]=1
+      }
+    }
+    END {
+      changed=1
+      while (changed) {
+        changed=0
+        for (i=1; i<=n; i++) {
+          pid=pids[i]
+          if (!scoped[pid] && scoped[parent[pid]]) {
+            scoped[pid]=1
+            changed=1
+          }
+        }
+      }
+      for (i=1; i<=n; i++) {
+        pid=pids[i]
+        if (!scoped[pid]) continue
+        if (command[pid] ~ /ralph\.sh|copilot -p/) {
+          print pid " " command[pid]
+        }
+      }
+    }
+  '
+}
+
 # --status: print active workers + claims and exit.
 if [[ "${1:-}" == "--status" ]]; then
   state_file="$MAIN_REPO/.ralph/state.json"
   echo "Parallelism: $PARALLELISM"
   echo
-  echo "Workers (from ps):"
-  ps -axww -o pid=,command= | grep -E 'ralph\.sh|copilot -p' | grep -v grep || echo "  (none)"
+  echo "Workers for $MAIN_REPO (from ps):"
+  workers="$(scoped_ralph_processes)"
+  if [[ -n "$workers" ]]; then
+    echo "$workers"
+  else
+    echo "  (none)"
+  fi
   echo
   if [[ -f "$state_file" ]]; then
     echo "Claims (from state.json):"
@@ -79,11 +133,11 @@ if [[ "${1:-}" == "--status" ]]; then
   exit 0
 fi
 
-# --stop: SIGTERM every worker we can find.
+# --stop: SIGTERM every worker for this repo.
 if [[ "${1:-}" == "--stop" ]]; then
-  pids=$(ps -axww -o pid=,command= | grep -E 'ralph\.sh|copilot -p' | grep -v grep | awk '{print $1}')
+  pids=$(scoped_ralph_processes | awk '{print $1}')
   if [[ -z "$pids" ]]; then
-    echo "No ralph workers running."
+    echo "No ralph workers running for $MAIN_REPO."
     exit 0
   fi
   for pid in $pids; do
@@ -92,20 +146,6 @@ if [[ "${1:-}" == "--stop" ]]; then
   done
   exit 0
 fi
-
-# --foreground only meaningful with single worker — fan-out doesn't have
-# anywhere to attach.
-if [[ "${1:-}" == "--foreground" && "$PARALLELISM" -ne 1 ]]; then
-  echo "❌ --foreground only valid with RALPH_PARALLELISM=1" >&2
-  exit 1
-fi
-
-# Source the state-lock helpers so we can use the same PID-stamped lockdir
-# primitive for worker locks and the launcher setup mutex.
-LOG_DIR="$MAIN_REPO/.ralph/logs"
-mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
-# shellcheck source=lib/state.sh
-. "$MAIN_REPO/.ralph/lib/state.sh"
 
 # Helper: is worker $1 currently running? Reads its singleton lockdir's owner
 # PID and validates it. Used to skip setup of worktrees that an active worker
@@ -119,6 +159,58 @@ is_worker_running() {
   pid=$(cat "$lockdir/owner" 2>/dev/null || echo "")
   is_pid_alive_and_ralph "$pid"
 }
+
+cleanup_worktrees() {
+  local removed=0 skipped=0
+  for ((i = 1; i <= PARALLELISM; i++)); do
+    local loop_repo
+    loop_repo=$(worker_repo "$i")
+    if is_worker_running "$i"; then
+      echo "⚠️  Worker $i is still running; leaving $loop_repo."
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if [[ ! -d "$loop_repo" ]]; then
+      continue
+    fi
+    if [[ -n "$(git -C "$loop_repo" status --porcelain 2>/dev/null || true)" ]]; then
+      echo "⚠️  Worker $i worktree is dirty; leaving $loop_repo."
+      skipped=$((skipped + 1))
+      continue
+    fi
+    echo "🧹 Removing worker $i worktree: $loop_repo"
+    if git -C "$MAIN_REPO" worktree remove "$loop_repo"; then
+      rm -rf "$MAIN_REPO/.ralph/lock/worker-$i" 2>/dev/null || true
+      removed=$((removed + 1))
+    else
+      echo "⚠️  Failed to remove worker $i worktree: $loop_repo"
+      skipped=$((skipped + 1))
+    fi
+  done
+  echo "✅ Cleanup complete: removed=$removed skipped=$skipped"
+  [[ "$skipped" -eq 0 ]]
+}
+
+# --cleanup: stop scoped workers and remove clean loop worktrees.
+if [[ "${1:-}" == "--cleanup" ]]; then
+  pids=$(scoped_ralph_processes | awk '{print $1}')
+  if [[ -n "$pids" ]]; then
+    for pid in $pids; do
+      echo "  SIGTERM $pid"
+      kill "$pid" 2>/dev/null || true
+    done
+    sleep 2
+  fi
+  cleanup_worktrees
+  exit $?
+fi
+
+# --foreground only meaningful with single worker — fan-out doesn't have
+# anywhere to attach.
+if [[ "${1:-}" == "--foreground" && "$PARALLELISM" -ne 1 ]]; then
+  echo "❌ --foreground only valid with RALPH_PARALLELISM=1" >&2
+  exit 1
+fi
 
 # Launcher-level mutex — prevents two concurrent `launch.sh` invocations from
 # both running setup (which mutates .git/info/exclude, worktrees, and branch
