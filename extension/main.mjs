@@ -8,6 +8,12 @@ import { detectTokens, parseTokenUnit } from "./lib/tokens.mjs";
 import { resolveRepoState } from "./lib/repo-resolver.mjs";
 import { initializeRalph } from "./lib/ralph-init.mjs";
 import { loadUserConfig } from "./lib/user-config.mjs";
+import {
+  retryFailedIssue,
+  skipFailedIssue,
+  removeQueuedIssue,
+  reorderQueuedIssue,
+} from "./lib/run-store.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -786,6 +792,26 @@ async function getUserConfig() {
   return config;
 }
 
+// Retry a failed issue
+async function retryIssue({ runId, issueNumber }) {
+  return retryFailedIssue({ repoRoot: REPO_ROOT, runId, issueNumber });
+}
+
+// Skip a failed issue
+async function skipIssue({ runId, issueNumber }) {
+  return skipFailedIssue({ repoRoot: REPO_ROOT, runId, issueNumber });
+}
+
+// Remove a queued issue
+async function removeIssue({ runId, issueNumber }) {
+  return removeQueuedIssue({ repoRoot: REPO_ROOT, runId, issueNumber });
+}
+
+// Reorder a queued issue
+async function reorderIssue({ runId, issueNumber, newIndex }) {
+  return reorderQueuedIssue({ repoRoot: REPO_ROOT, runId, issueNumber, newIndex });
+}
+
 const webview = new CopilotWebview({
   extensionName: "ralph_dashboard",
   contentDir: join(import.meta.dirname, "content"),
@@ -801,6 +827,10 @@ const webview = new CopilotWebview({
     initRalph,
     runPreflight,
     getUserConfig,
+    retryIssue,
+    skipIssue,
+    removeIssue,
+    reorderIssue,
     log: (msg, opts) => session.log(msg, opts),
   },
 });

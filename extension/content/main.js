@@ -228,13 +228,19 @@ function renderQueueTimeline(runState) {
   
   countEl.textContent = `${timeline.length} issue${timeline.length === 1 ? "" : "s"}`;
   
-  container.innerHTML = timeline.map(row => {
+  container.innerHTML = timeline.map((row, index) => {
     // Sanitize state for CSS class (whitelist known states)
     const safeStateClass = ["queued", "claimed", "running", "pr-opened", "merged", "failed", "skipped"]
       .includes(row.state) ? row.state : "queued";
     
+    // Determine which actions are available for this row
+    const canRetry = row.state === "failed";
+    const canSkip = row.state === "failed";
+    const canRemove = row.state === "queued";
+    const canReorder = row.state === "queued" && timeline.filter(r => r.state === "queued").length > 1;
+    
     return `
-    <div class="timeline-row" data-issue="${escapeHtml(String(row.issueNumber))}">
+    <div class="timeline-row" data-issue="${escapeHtml(String(row.issueNumber))}" data-index="${index}">
       <div class="timeline-header">
         <span class="timeline-issue-num">#${escapeHtml(String(row.issueNumber))}</span>
         <a href="${escapeHtml(row.issueUrl)}" 
@@ -270,9 +276,20 @@ function renderQueueTimeline(runState) {
           </span>
         ` : ""}
       </div>
+      
+      <div class="timeline-actions">
+        ${canRetry ? `<button class="timeline-action-btn retry-btn" data-issue="${escapeHtml(String(row.issueNumber))}">🔄 Retry</button>` : ""}
+        ${canSkip ? `<button class="timeline-action-btn skip-btn" data-issue="${escapeHtml(String(row.issueNumber))}">⏭ Skip</button>` : ""}
+        ${canRemove ? `<button class="timeline-action-btn remove-btn" data-issue="${escapeHtml(String(row.issueNumber))}">✖ Remove</button>` : ""}
+        ${canReorder && index > 0 ? `<button class="timeline-action-btn reorder-btn" data-issue="${escapeHtml(String(row.issueNumber))}" data-direction="up">↑</button>` : ""}
+        ${canReorder && index < timeline.length - 1 ? `<button class="timeline-action-btn reorder-btn" data-issue="${escapeHtml(String(row.issueNumber))}" data-direction="down">↓</button>` : ""}
+      </div>
     </div>
   `;
   }).join("");
+  
+  // Attach event listeners for action buttons
+  attachTimelineActions(runState.runId);
 }
 
 // Inline presenter implementation (matches queue-timeline.mjs for webview context)
@@ -312,6 +329,121 @@ function buildQueueTimelineInline(runState) {
     }
     
     return row;
+  });
+}
+
+// Attach action button event listeners for timeline
+function attachTimelineActions(runId) {
+  if (!runId) return;
+  
+  const container = $("queue-timeline");
+  if (!container) return;
+  
+  // Retry buttons
+  container.querySelectorAll(".retry-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const issueNumber = Number(btn.dataset.issue);
+      if (!Number.isFinite(issueNumber)) return;
+      
+      btn.disabled = true;
+      btn.textContent = "⏳ Retrying...";
+      
+      try {
+        const result = await copilot.retryIssue({ runId, issueNumber });
+        if (!result.success) {
+          alert(`Failed to retry: ${result.error}`);
+          btn.disabled = false;
+          btn.textContent = "🔄 Retry";
+        }
+        // On success, next refresh will show updated state
+      } catch (err) {
+        alert(`Error: ${err.message}`);
+        btn.disabled = false;
+        btn.textContent = "🔄 Retry";
+      }
+    };
+  });
+  
+  // Skip buttons
+  container.querySelectorAll(".skip-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const issueNumber = Number(btn.dataset.issue);
+      if (!Number.isFinite(issueNumber)) return;
+      
+      btn.disabled = true;
+      btn.textContent = "⏳ Skipping...";
+      
+      try {
+        const result = await copilot.skipIssue({ runId, issueNumber });
+        if (!result.success) {
+          alert(`Failed to skip: ${result.error}`);
+          btn.disabled = false;
+          btn.textContent = "⏭ Skip";
+        }
+      } catch (err) {
+        alert(`Error: ${err.message}`);
+        btn.disabled = false;
+        btn.textContent = "⏭ Skip";
+      }
+    };
+  });
+  
+  // Remove buttons
+  container.querySelectorAll(".remove-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const issueNumber = Number(btn.dataset.issue);
+      if (!Number.isFinite(issueNumber)) return;
+      
+      if (!confirm(`Remove issue #${issueNumber} from queue?`)) return;
+      
+      btn.disabled = true;
+      btn.textContent = "⏳ Removing...";
+      
+      try {
+        const result = await copilot.removeIssue({ runId, issueNumber });
+        if (!result.success) {
+          alert(`Failed to remove: ${result.error}`);
+          btn.disabled = false;
+          btn.textContent = "✖ Remove";
+        }
+      } catch (err) {
+        alert(`Error: ${err.message}`);
+        btn.disabled = false;
+        btn.textContent = "✖ Remove";
+      }
+    };
+  });
+  
+  // Reorder buttons
+  container.querySelectorAll(".reorder-btn").forEach(btn => {
+    btn.onclick = async () => {
+      const issueNumber = Number(btn.dataset.issue);
+      const direction = btn.dataset.direction;
+      if (!Number.isFinite(issueNumber) || !direction) return;
+      
+      const row = btn.closest(".timeline-row");
+      if (!row) return;
+      
+      const currentIndex = Number(row.dataset.index);
+      const newIndex = direction === "up" ? currentIndex - 1 : currentIndex + 1;
+      
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = "⏳";
+      
+      try {
+        const result = await copilot.reorderIssue({ runId, issueNumber, newIndex });
+        if (!result.success) {
+          alert(`Failed to reorder: ${result.error}`);
+          btn.disabled = false;
+          btn.textContent = originalText;
+        }
+      } catch (err) {
+        alert(`Error: ${err.message}`);
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    };
   });
 }
 
