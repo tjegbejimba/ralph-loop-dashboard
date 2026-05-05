@@ -4,27 +4,157 @@ const $ = (id) => document.getElementById(id);
 
 // Queue Builder - singleton instance
 let queueBuilder = null;
+let currentRepoKey = "default";
+let runModeRepoKey = null;
+
+function storageRepoKey(repoKey) {
+  return String(repoKey || "default");
+}
+
+function queueStorageKey(repoKey) {
+  return `ralph.queueBuilder.v1:${storageRepoKey(repoKey)}`;
+}
+
+function runModeStorageKey(repoKey) {
+  return `ralph.runMode.v1:${storageRepoKey(repoKey)}`;
+}
+
+function repoKeyFromStatus(status) {
+  return (
+    status?.config?.repoState?.repoRoot ||
+    status?.config?.repo ||
+    status?.config?.issue?.issueSearch ||
+    "default"
+  );
+}
+
+function normalizeIssue(issue) {
+  return {
+    number: Number(issue.number),
+    title: String(issue.title || ""),
+    url: issue.url || "",
+    labels: Array.isArray(issue.labels)
+      ? issue.labels.map((label) => (typeof label === "string" ? label : label?.name)).filter(Boolean)
+      : [],
+    milestone: issue.milestone ?? null,
+    slice: issue.slice,
+  };
+}
+
+function isValidQueueIssue(issue) {
+  return Number.isFinite(Number(issue?.number)) && String(issue?.title || "").length > 0;
+}
+
+function readPersistedQueue(repoKey) {
+  const key = queueStorageKey(repoKey);
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return { found: false, queue: [] };
+    const parsed = JSON.parse(raw);
+    if (!parsed || parsed.repo !== storageRepoKey(repoKey) || !Array.isArray(parsed.queue)) {
+      localStorage.removeItem(key);
+      return { found: false, queue: [] };
+    }
+    return {
+      found: true,
+      queue: parsed.queue.filter(isValidQueueIssue).map(normalizeIssue),
+    };
+  } catch (err) {
+    console.warn("Failed to load persisted Ralph queue:", err);
+    return { found: false, queue: [] };
+  }
+}
+
+function writePersistedQueue(repoKey, queue) {
+  try {
+    localStorage.setItem(
+      queueStorageKey(repoKey),
+      JSON.stringify({
+        repo: storageRepoKey(repoKey),
+        queue: queue.map(normalizeIssue),
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+  } catch (err) {
+    console.warn("Failed to persist Ralph queue:", err);
+  }
+}
+
+function loadPersistedRunMode(repoKey) {
+  try {
+    const mode = localStorage.getItem(runModeStorageKey(repoKey));
+    return mode === "one-pass" || mode === "until-empty" ? mode : null;
+  } catch (err) {
+    console.warn("Failed to load persisted Ralph run mode:", err);
+    return null;
+  }
+}
+
+function persistRunMode(repoKey, mode) {
+  if (mode !== "one-pass" && mode !== "until-empty") return;
+  try {
+    localStorage.setItem(runModeStorageKey(repoKey), mode);
+  } catch (err) {
+    console.warn("Failed to persist Ralph run mode:", err);
+  }
+}
+
+function setRunMode(mode) {
+  const input = document.querySelector(`input[name="run-mode"][value="${mode}"]`);
+  if (input) input.checked = true;
+}
+
+function hydrateRunMode(repoKey) {
+  if (runModeRepoKey === storageRepoKey(repoKey)) return;
+  runModeRepoKey = storageRepoKey(repoKey);
+  setRunMode(loadPersistedRunMode(repoKey) || "one-pass");
+}
+
+function issueHasLabel(issue, labelName) {
+  return (issue.labels || []).some((label) => {
+    const name = typeof label === "string" ? label : label?.name;
+    return String(name || "").toLowerCase() === labelName.toLowerCase();
+  });
+}
 
 // Import would go here in a module context, but since main.js is loaded as a script tag,
 // we inline a minimal QueueBuilder implementation that matches the tested module
-function getQueueBuilder() {
-  if (!queueBuilder) {
+function getQueueBuilder(repoKey = currentRepoKey) {
+  if (!queueBuilder || queueBuilder.repoKey !== storageRepoKey(repoKey)) {
+    const persisted = readPersistedQueue(repoKey);
     queueBuilder = {
-      queue: [],
+      repoKey: storageRepoKey(repoKey),
+      queue: persisted.queue,
+      needsAutoSeed: !persisted.found,
+      persist() {
+        writePersistedQueue(this.repoKey, this.queue);
+      },
       selectIssue(issue) {
-        if (this.queue.some(i => i.number === issue.number)) return;
-        this.queue.push(structuredClone(issue));
+        if (!isValidQueueIssue(issue)) return;
+        const normalized = normalizeIssue(issue);
+        if (this.queue.some(i => i.number === normalized.number)) return;
+        this.queue.push(normalized);
         this.queue.sort((a, b) => a.number - b.number);
+        this.persist();
       },
       deselectIssue(issueNumber) {
-        this.queue = this.queue.filter(i => i.number !== issueNumber);
+        const n = Number(issueNumber);
+        this.queue = this.queue.filter(i => i.number !== n);
+        this.persist();
       },
       reorderIssue(issueNumber, newIndex) {
-        const idx = this.queue.findIndex(i => i.number === issueNumber);
+        const n = Number(issueNumber);
+        const idx = this.queue.findIndex(i => i.number === n);
         if (idx === -1) return;
         if (newIndex < 0 || newIndex >= this.queue.length) return;
         const [issue] = this.queue.splice(idx, 1);
         this.queue.splice(newIndex, 0, issue);
+        this.persist();
+      },
+      clearQueue() {
+        this.queue = [];
+        this.needsAutoSeed = false;
+        this.persist();
       },
       getQueue() {
         return this.queue.map(i => structuredClone(i));
@@ -35,6 +165,23 @@ function getQueueBuilder() {
     };
   }
   return queueBuilder;
+}
+
+function maybeAutoSeedQueue(status) {
+  const qb = getQueueBuilder(currentRepoKey);
+  if (!qb.needsAutoSeed) return;
+  if (!Array.isArray(status.openSlices)) return;
+  qb.needsAutoSeed = false;
+  const readyIssues = (status.openSlices || [])
+    .filter((issue) => issueHasLabel(issue, "ready-for-agent"))
+    .map(normalizeIssue);
+  for (const issue of readyIssues) {
+    if (!qb.queue.some((item) => item.number === issue.number)) {
+      qb.queue.push(issue);
+    }
+  }
+  qb.queue.sort((a, b) => a.number - b.number);
+  qb.persist();
 }
 
 function fmtDuration(ms) {
@@ -577,6 +724,10 @@ function renderConfigSummary(config) {
 }
 
 function render(s) {
+  currentRepoKey = repoKeyFromStatus(s);
+  hydrateRunMode(currentRepoKey);
+  maybeAutoSeedQueue(s);
+
   const dot = $("status-dot");
   dot.classList.remove("green", "red", "yellow");
   
@@ -737,12 +888,18 @@ function render(s) {
       .map((i, idx) => {
         const slice = sliceNumFromIssue(i);
         const cleanTitle = cleanIssueTitle(i.title);
+        const labels = Array.isArray(i.labels) ? i.labels : [];
+        const ready = issueHasLabel(i, "ready-for-agent");
+        const labelHtml = labels
+          .map((label) => `<span class="label">${escapeHtml(label)}</span>`)
+          .join(" ");
         return `
-                    <li class="${idx === 0 ? "first-up issue-row" : "issue-row"}" data-issue="${i.number}" data-url="${escapeHtml(i.url)}">
+                    <li class="${idx === 0 ? "first-up issue-row" : "issue-row"}${ready ? " ready-for-agent" : ""}" data-issue="${i.number}" data-url="${escapeHtml(i.url)}">
                         <div class="issue-head">
                             <span class="slice-num">${slice ?? "?"}</span>
                             <span class="issue-num">#${i.number}</span>
                             <span class="issue-title">${escapeHtml(cleanTitle)}</span>
+                            ${labelHtml}
                             <span class="issue-toggle" aria-hidden="true">▸</span>
                         </div>
                         <div class="issue-detail" hidden></div>
@@ -1075,10 +1232,14 @@ async function handleStart() {
     // Preflight passed, start the loop
     btn.textContent = "starting…";
     const runOptions = getRunOptions();
-    const res = await copilot.startLoop({ runOptions });
+    const queue = getQueueBuilder().getQueue();
+    const res = await copilot.startLoop({ queue, runOptions });
     
     if (!res?.ok) {
       $("last-updated").textContent = `start failed: ${res?.error || "unknown"}`;
+    } else if (runOptions.runMode === "one-pass") {
+      getQueueBuilder().clearQueue();
+      renderQueueBuilder();
     }
   } catch (err) {
     $("last-updated").textContent = `start failed: ${err.message || err}`;
@@ -1110,6 +1271,13 @@ async function handleStop() {
 
 $("start-btn")?.addEventListener("click", handleStart);
 $("stop-btn")?.addEventListener("click", handleStop);
+document.querySelectorAll('input[name="run-mode"]').forEach((input) => {
+  input.addEventListener("change", (event) => {
+    if (event.target.checked) {
+      persistRunMode(currentRepoKey, event.target.value);
+    }
+  });
+});
 
 // Load user config defaults into form
 async function loadUserConfigDefaults() {

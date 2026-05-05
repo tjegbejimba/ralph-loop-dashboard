@@ -635,6 +635,215 @@ test("queue builder - manual reorder", async ({ page }) => {
   await expect(queueItems.nth(2)).toContainText("#3");
 });
 
+test("queue builder - auto-seeds selected queue from ready-for-agent open slices", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        openSlices: [
+          { number: 153, title: "Slice 153: fast path", labels: ["ready-for-agent"], url: "https://github.com/test/repo/issues/153", slice: 153 },
+          { number: 154, title: "Slice 154: needs answers", labels: ["needs-info"], url: "https://github.com/test/repo/issues/154", slice: 154 },
+          { number: 155, title: "Slice 155: cache tune", labels: ["enhancement", "ready-for-agent"], url: "https://github.com/test/repo/issues/155", slice: 155 },
+        ],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/auto-seed", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const queueItems = page.locator(".queue-item");
+  await expect(queueItems).toHaveCount(2);
+  await expect(queueItems.nth(0)).toContainText("#153");
+  await expect(queueItems.nth(1)).toContainText("#155");
+  await expect(page.locator(".issue-row.ready-for-agent")).toHaveCount(2);
+});
+
+test("queue builder - persists manual edits across reloads", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        openSlices: [],
+        workers: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/persist-queue", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 3, title: "First", labels: [], milestone: null, url: "https://github.com/test/repo/issues/3" },
+            { number: 7, title: "Second", labels: [], milestone: null, url: "https://github.com/test/repo/issues/7" },
+          ],
+          warnings: [],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  await page.locator('[data-issue-number="3"] .issue-select-checkbox').click();
+  await page.locator('[data-issue-number="7"] .issue-select-checkbox').click();
+  await page.locator(".queue-item").nth(0).locator(".queue-move-down").click();
+
+  await page.reload();
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const queueItems = page.locator(".queue-item");
+  await expect(queueItems).toHaveCount(2);
+  await expect(queueItems.nth(0)).toContainText("#7");
+  await expect(queueItems.nth(1)).toContainText("#3");
+});
+
+test("queue builder - localStorage queue is scoped by repo", async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      "ralph.queueBuilder.v1:/test/repo-a",
+      JSON.stringify({
+        repo: "/test/repo-a",
+        queue: [{ number: 99, title: "Other repo issue", labels: [], url: "https://github.com/test/a/issues/99" }],
+        updatedAt: new Date().toISOString(),
+      }),
+    );
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        openSlices: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/repo-b", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  await expect(page.locator(".queue-item")).toHaveCount(0);
+  await expect(page.locator("#queue-builder-container")).toContainText("No issues selected");
+});
+
+test("run options - run mode survives reload per repo", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        openSlices: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/run-mode", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+      }),
+      getUserConfig: () => Promise.resolve({}),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  await page.locator('input[name="run-mode"][value="until-empty"]').check();
+  await page.reload();
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  await expect(page.locator('input[name="run-mode"][value="until-empty"]')).toBeChecked();
+});
+
+test("queue builder - one-pass start clears persisted selected queue", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        openSlices: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/start-clears", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 5, title: "Start me", labels: [], milestone: null, url: "https://github.com/test/repo/issues/5" },
+          ],
+          warnings: [],
+        },
+      }),
+      getUserConfig: () => Promise.resolve({}),
+      runPreflight: () => Promise.resolve({
+        passed: true,
+        checks: [
+          { id: "queue-not-empty", label: "Queue has issues", status: "pass", message: "Queue contains 1 issue", blocking: true },
+        ],
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  await page.locator('[data-issue-number="5"] .issue-select-checkbox').click();
+  await expect(page.locator(".queue-item")).toHaveCount(1);
+
+  await page.locator("#start-btn").click();
+  await expect(page.locator("#queue-builder-container")).toContainText("No issues selected");
+
+  await page.reload();
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+  await expect(page.locator(".queue-item")).toHaveCount(0);
+});
+
 test("run options form displays with default values", async ({ page }) => {
   await page.addInitScript(() => {
     window.copilot = {
@@ -994,4 +1203,3 @@ test("queue timeline - is primary panel when run is active", async ({ page }) =>
   const workersPanel = page.locator(".panel.current");
   await expect(workersPanel).toHaveClass(/secondary/);
 });
-

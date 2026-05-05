@@ -468,13 +468,17 @@ async function getOpenSlices() {
     "--search",
     ISSUE_SEARCH,
     "--json",
-    "number,title,url",
+    "number,title,url,labels",
   ]);
   if (!Array.isArray(data)) return [];
   return data
     .map((i) => {
       const m = i.title.match(TITLE_NUM_RE);
-      return { ...i, slice: m ? Number(m.groups?.x ?? m[1]) : 999 };
+      return {
+        ...i,
+        labels: (i.labels || []).map((label) => label.name).filter(Boolean),
+        slice: m ? Number(m.groups?.x ?? m[1]) : 999,
+      };
     })
     .filter((i) => TITLE_REGEX.test(i.title))
     .sort((a, b) => a.slice - b.slice);

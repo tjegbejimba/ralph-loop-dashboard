@@ -39,6 +39,59 @@ This:
 
 Restart Copilot CLI afterwards (or `/restart`) so the extension is picked up.
 
+## Windows / WSL2
+
+Ralph is currently designed for a Unix-like environment. Native Windows is not
+yet a supported path because the launcher uses Bash, POSIX paths, symlinks,
+`ps`, `awk`, `kill`, `nohup`, `disown`, and Unix-style Copilot extension
+installation paths.
+
+The recommended Windows setup is **WSL2 with Ubuntu**:
+
+1. Install WSL2 and Ubuntu from Windows.
+2. Clone this repo inside the WSL filesystem, not under a Windows-mounted path:
+
+   ```bash
+   mkdir -p ~/Code
+   cd ~/Code
+   git clone https://github.com/tjegbejimba/ralph-loop-dashboard.git
+   cd ralph-loop-dashboard
+   ```
+
+3. Install the required CLI tools in WSL:
+
+   ```bash
+   sudo apt update
+   sudo apt install -y git gh jq nodejs npm
+   ```
+
+4. Authenticate GitHub CLI in WSL:
+
+   ```bash
+   gh auth login
+   ```
+
+5. Install or refresh Ralph into a target repo that also lives inside WSL:
+
+   ```bash
+   ./install.sh ~/Code/your-project --scripts-only
+   # or install both repo scripts and the dashboard extension
+   ./install.sh ~/Code/your-project --both
+   ```
+
+6. Review the target repo's `.ralph/RALPH.md` and `.ralph/config.json`, then use
+   the normal Ralph commands:
+
+   ```bash
+   ~/Code/your-project/.ralph/launch.sh --status
+   ~/Code/your-project/.ralph/launch.sh
+   ~/Code/your-project/.ralph/launch.sh --cleanup
+   ```
+
+Native Windows support would require a portability pass for process management,
+path handling, symlinks/junctions, extension install paths, and Copilot CLI
+extension behavior on Windows.
+
 ## File the work as issues
 
 The loop picks issues whose title matches a regex (default: `^Slice [0-9]+:`). Number them sequentially — lowest number runs first. A good shape:

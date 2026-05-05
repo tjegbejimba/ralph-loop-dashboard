@@ -118,6 +118,51 @@ render_validation_commands() {
   ' "$config_file"
 }
 
+install_agent_instructions() {
+  local target="$1"
+  local github_dir="$target/.github"
+  local instructions_file="$github_dir/copilot-instructions.md"
+  local marker="<!-- ralph-loop-instructions -->"
+
+  mkdir -p "$github_dir"
+
+  if [[ -f "$instructions_file" ]] && grep -qF "$marker" "$instructions_file"; then
+    echo "ℹ️  Ralph agent instructions already present: $instructions_file"
+    return 0
+  fi
+
+  if [[ -f "$instructions_file" ]]; then
+    {
+      printf '\n'
+      printf '%s\n' "$marker"
+      printf '## Ralph Loop\n\n'
+      printf 'This repo may use Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.\n\n'
+      printf -- '- Ralph source checkout on this machine: `%s`\n' "$REPO_DIR"
+      printf -- '- Repo worker prompt: `.ralph/RALPH.md`\n'
+      printf -- '- Repo config: `.ralph/config.json`\n'
+      printf -- '- Refresh scripts: `%s/install.sh "%s" --scripts-only`\n' "$REPO_DIR" "$target"
+      printf -- '- Check/stop/cleanup workers: `.ralph/launch.sh --status`, `--stop`, or `--cleanup`\n\n'
+      printf 'Do not overwrite `.ralph/RALPH.md` or `.ralph/config.json` unless explicitly asked.\n'
+    } >> "$instructions_file"
+    echo "✅ Ralph agent instructions appended: $instructions_file"
+    return 0
+  fi
+
+  {
+    printf '%s\n' "$marker"
+    printf '# Copilot instructions\n\n'
+    printf '## Ralph Loop\n\n'
+    printf 'This repo may use Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.\n\n'
+    printf -- '- Ralph source checkout on this machine: `%s`\n' "$REPO_DIR"
+    printf -- '- Repo worker prompt: `.ralph/RALPH.md`\n'
+    printf -- '- Repo config: `.ralph/config.json`\n'
+    printf -- '- Refresh scripts: `%s/install.sh "%s" --scripts-only`\n' "$REPO_DIR" "$target"
+    printf -- '- Check/stop/cleanup workers: `.ralph/launch.sh --status`, `--stop`, or `--cleanup`\n\n'
+    printf 'Do not overwrite `.ralph/RALPH.md` or `.ralph/config.json` unless explicitly asked.\n'
+  } > "$instructions_file"
+  echo "✅ Ralph agent instructions installed: $instructions_file"
+}
+
 install_scripts() {
   local target="$1"
   local ralph_dir="$target/.ralph"
@@ -140,6 +185,7 @@ install_scripts() {
   cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
   chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
   install_config "$target"
+  install_agent_instructions "$target"
 
   if [[ "$has_prompt" -eq 1 ]]; then
     echo "⚠️  $ralph_dir/RALPH.md already exists — leaving prompt customization untouched."

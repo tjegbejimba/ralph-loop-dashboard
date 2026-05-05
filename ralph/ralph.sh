@@ -462,7 +462,7 @@ ${issue_text}"
   set +e
   run_with_timeout "$TIMEOUT_SEC" \
     copilot -p "$full_prompt" \
-      --allow-all-tools \
+      --allow-all \
       --model "$MODEL" \
       2>&1 | tee "$log_file"
   rc=$?
