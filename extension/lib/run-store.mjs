@@ -154,3 +154,291 @@ export function getActiveRuns(repoRoot) {
   
   return runs;
 }
+
+/**
+ * Retry a failed issue by resetting it to queued state
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {string} options.runId - Run identifier
+ * @param {number} options.issueNumber - Issue number to retry
+ * @returns {Object} Result
+ * @returns {boolean} .success - Whether operation succeeded
+ * @returns {string} [.error] - Error message (only if success is false)
+ */
+export function retryFailedIssue({ repoRoot, runId, issueNumber }) {
+  // Validate required parameters
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string" };
+  }
+  if (!runId || typeof runId !== "string") {
+    return { success: false, error: "runId is required and must be a string" };
+  }
+  if (!Number.isFinite(issueNumber) || !Number.isInteger(issueNumber)) {
+    return { success: false, error: "issueNumber must be a finite integer" };
+  }
+
+  const runDir = join(repoRoot, ".ralph", "runs", runId);
+  const queuePath = join(runDir, "queue.json");
+  const statusPath = join(runDir, "status.json");
+
+  // Verify run exists
+  if (!existsSync(runDir) || !existsSync(queuePath) || !existsSync(statusPath)) {
+    return { success: false, error: `Run ${runId} not found` };
+  }
+
+  try {
+    // Load queue and status
+    const queue = JSON.parse(readFileSync(queuePath, "utf-8"));
+    const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+
+    // Verify issue is in queue
+    const issueInQueue = queue.some((i) => i.number === issueNumber);
+    if (!issueInQueue) {
+      return { success: false, error: `Issue ${issueNumber} not found in queue` };
+    }
+
+    // Verify issue is in failed state
+    const itemStatus = status.items[String(issueNumber)];
+    if (!itemStatus || itemStatus.status !== "failed") {
+      return {
+        success: false,
+        error: `Issue ${issueNumber} not in failed state (current: ${itemStatus?.status || "unknown"})`,
+      };
+    }
+
+    // Reset issue to queued state
+    status.items[String(issueNumber)] = {
+      status: "queued",
+      workerId: null,
+      pid: null,
+      logFile: null,
+      startedAt: null,
+      error: null,
+    };
+
+    // Write updated status
+    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Failed to retry issue: ${err.message}` };
+  }
+}
+
+/**
+ * Skip a failed issue by marking it as skipped
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {string} options.runId - Run identifier
+ * @param {number} options.issueNumber - Issue number to skip
+ * @returns {Object} Result
+ * @returns {boolean} .success - Whether operation succeeded
+ * @returns {string} [.error] - Error message (only if success is false)
+ */
+export function skipFailedIssue({ repoRoot, runId, issueNumber }) {
+  // Validate required parameters
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string" };
+  }
+  if (!runId || typeof runId !== "string") {
+    return { success: false, error: "runId is required and must be a string" };
+  }
+  if (!Number.isFinite(issueNumber) || !Number.isInteger(issueNumber)) {
+    return { success: false, error: "issueNumber must be a finite integer" };
+  }
+
+  const runDir = join(repoRoot, ".ralph", "runs", runId);
+  const queuePath = join(runDir, "queue.json");
+  const statusPath = join(runDir, "status.json");
+
+  // Verify run exists
+  if (!existsSync(runDir) || !existsSync(queuePath) || !existsSync(statusPath)) {
+    return { success: false, error: `Run ${runId} not found` };
+  }
+
+  try {
+    // Load queue and status
+    const queue = JSON.parse(readFileSync(queuePath, "utf-8"));
+    const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+
+    // Verify issue is in queue
+    const issueInQueue = queue.some((i) => i.number === issueNumber);
+    if (!issueInQueue) {
+      return { success: false, error: `Issue ${issueNumber} not found in queue` };
+    }
+
+    // Verify issue is in failed state
+    const itemStatus = status.items[String(issueNumber)];
+    if (!itemStatus || itemStatus.status !== "failed") {
+      return {
+        success: false,
+        error: `Issue ${issueNumber} not in failed state (current: ${itemStatus?.status || "unknown"})`,
+      };
+    }
+
+    // Mark issue as skipped
+    status.items[String(issueNumber)] = {
+      status: "skipped",
+      workerId: null,
+      pid: null,
+      logFile: null,
+      startedAt: null,
+      error: null,
+    };
+
+    // Write updated status
+    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Failed to skip issue: ${err.message}` };
+  }
+}
+
+/**
+ * Remove an unclaimed issue from the queue
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {string} options.runId - Run identifier
+ * @param {number} options.issueNumber - Issue number to remove
+ * @returns {Object} Result
+ * @returns {boolean} .success - Whether operation succeeded
+ * @returns {string} [.error] - Error message (only if success is false)
+ */
+export function removeQueuedIssue({ repoRoot, runId, issueNumber }) {
+  // Validate required parameters
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string" };
+  }
+  if (!runId || typeof runId !== "string") {
+    return { success: false, error: "runId is required and must be a string" };
+  }
+  if (!Number.isFinite(issueNumber) || !Number.isInteger(issueNumber)) {
+    return { success: false, error: "issueNumber must be a finite integer" };
+  }
+
+  const runDir = join(repoRoot, ".ralph", "runs", runId);
+  const queuePath = join(runDir, "queue.json");
+  const statusPath = join(runDir, "status.json");
+
+  // Verify run exists
+  if (!existsSync(runDir) || !existsSync(queuePath)) {
+    return { success: false, error: `Run ${runId} not found` };
+  }
+
+  try {
+    // Load queue
+    const queue = JSON.parse(readFileSync(queuePath, "utf-8"));
+
+    // Find issue index
+    const issueIndex = queue.findIndex((i) => i.number === issueNumber);
+    if (issueIndex === -1) {
+      return { success: false, error: `Issue ${issueNumber} not found in queue` };
+    }
+
+    // Load status (if exists) to check if issue is claimed/completed
+    if (existsSync(statusPath)) {
+      const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+      const itemStatus = status.items[String(issueNumber)];
+
+      // Reject if issue is already claimed or in terminal state
+      if (itemStatus && ["claimed", "running", "merged", "pr-opened"].includes(itemStatus.status)) {
+        return {
+          success: false,
+          error: `Issue ${issueNumber} is already claimed or completed (state: ${itemStatus.status})`,
+        };
+      }
+    }
+
+    // Remove issue from queue
+    queue.splice(issueIndex, 1);
+
+    // Write updated queue
+    writeFileSync(queuePath, JSON.stringify(queue, null, 2), "utf-8");
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Failed to remove issue: ${err.message}` };
+  }
+}
+
+/**
+ * Reorder an unclaimed issue in the queue
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {string} options.runId - Run identifier
+ * @param {number} options.issueNumber - Issue number to reorder
+ * @param {number} options.newIndex - New zero-based index position
+ * @returns {Object} Result
+ * @returns {boolean} .success - Whether operation succeeded
+ * @returns {string} [.error] - Error message (only if success is false)
+ */
+export function reorderQueuedIssue({ repoRoot, runId, issueNumber, newIndex }) {
+  // Validate required parameters
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string" };
+  }
+  if (!runId || typeof runId !== "string") {
+    return { success: false, error: "runId is required and must be a string" };
+  }
+  if (!Number.isFinite(issueNumber) || !Number.isInteger(issueNumber)) {
+    return { success: false, error: "issueNumber must be a finite integer" };
+  }
+  if (!Number.isFinite(newIndex) || !Number.isInteger(newIndex) || newIndex < 0) {
+    return { success: false, error: "newIndex must be a non-negative integer" };
+  }
+
+  const runDir = join(repoRoot, ".ralph", "runs", runId);
+  const queuePath = join(runDir, "queue.json");
+  const statusPath = join(runDir, "status.json");
+
+  // Verify run exists
+  if (!existsSync(runDir) || !existsSync(queuePath)) {
+    return { success: false, error: `Run ${runId} not found` };
+  }
+
+  try {
+    // Load queue
+    const queue = JSON.parse(readFileSync(queuePath, "utf-8"));
+
+    // Find issue index
+    const issueIndex = queue.findIndex((i) => i.number === issueNumber);
+    if (issueIndex === -1) {
+      return { success: false, error: `Issue ${issueNumber} not found in queue` };
+    }
+
+    // Validate newIndex
+    if (newIndex >= queue.length) {
+      return { success: false, error: `New index ${newIndex} is invalid (queue length: ${queue.length})` };
+    }
+
+    // Load status (if exists) to check if issue is claimed/completed
+    if (existsSync(statusPath)) {
+      const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+      const itemStatus = status.items[String(issueNumber)];
+
+      // Reject if issue is already claimed or in terminal state
+      if (itemStatus && ["claimed", "running", "merged", "pr-opened"].includes(itemStatus.status)) {
+        return {
+          success: false,
+          error: `Issue ${issueNumber} is already claimed or completed (state: ${itemStatus.status})`,
+        };
+      }
+    }
+
+    // Reorder: remove from current position and insert at new position
+    const [issue] = queue.splice(issueIndex, 1);
+    queue.splice(newIndex, 0, issue);
+
+    // Write updated queue
+    writeFileSync(queuePath, JSON.stringify(queue, null, 2), "utf-8");
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Failed to reorder issue: ${err.message}` };
+  }
+}
