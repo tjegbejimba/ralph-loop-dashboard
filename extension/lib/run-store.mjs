@@ -74,6 +74,11 @@ export function createRun({ repoRoot, queue, runOptions }) {
   };
   writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf-8");
   
+  // Write initial empty status
+  const statusPath = join(runDir, "status.json");
+  const initialStatus = { items: {} };
+  writeFileSync(statusPath, JSON.stringify(initialStatus, null, 2), "utf-8");
+  
   return {
     runId,
     runDir,

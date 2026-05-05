@@ -134,6 +134,24 @@ test("createRun validates required parameters", () => {
   }
 });
 
+test("createRun writes initial empty status.json", () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-"));
+  try {
+    const queue = [{ number: 1, title: "Test issue" }];
+    const runOptions = { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" };
+    
+    const result = createRun({ repoRoot: tmpRepo, queue, runOptions });
+    
+    const statusPath = join(result.runDir, "status.json");
+    assert.ok(existsSync(statusPath), "status.json should exist");
+    
+    const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+    assert.deepEqual(status, { items: {} }, "status.json should have empty items map");
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
 test("getActiveRuns validates metadata schema", () => {
   const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-"));
   try {
