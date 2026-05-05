@@ -787,3 +787,211 @@ test("start button blocked when preflight fails", async ({ page }) => {
   await expect(startBtn).toBeEnabled();
 });
 
+// Queue Timeline Tests
+test("queue timeline - renders queued issues with GitHub links", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        runState: {
+          runId: "test-run-123",
+          repoOwner: "test",
+          repoName: "repo",
+          queue: [
+            { number: 1, title: "First issue" },
+            { number: 2, title: "Second issue" },
+          ],
+          status: { items: {} },
+        },
+        config: { profile: "generic", warnings: [] },
+      }),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const timeline = page.locator("#queue-timeline");
+  await expect(timeline).toBeVisible();
+  
+  const rows = page.locator(".timeline-row");
+  await expect(rows).toHaveCount(2);
+  
+  // Check first row
+  await expect(rows.nth(0)).toContainText("#1");
+  await expect(rows.nth(0)).toContainText("First issue");
+  await expect(rows.nth(0).locator(".timeline-state")).toContainText("queued");
+  await expect(rows.nth(0).locator(".timeline-issue-link")).toHaveAttribute(
+    "href",
+    "https://github.com/test/repo/issues/1"
+  );
+});
+
+test("queue timeline - shows PR link when PR opened", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        runState: {
+          runId: "test-run-123",
+          repoOwner: "test",
+          repoName: "repo",
+          queue: [
+            { number: 5, title: "Issue with PR" },
+          ],
+          status: {
+            items: {
+              "5": {
+                status: "pr-opened",
+                workerId: 1,
+                pid: null,
+                logFile: "worker-1-issue-5.log",
+                startedAt: "2026-05-04T10:00:00Z",
+                error: null,
+                prNumber: 42
+              }
+            }
+          },
+        },
+        config: { profile: "generic", warnings: [] },
+      }),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const row = page.locator(".timeline-row").first();
+  await expect(row.locator(".timeline-state")).toContainText("pr-opened");
+  await expect(row.locator(".timeline-pr-link")).toBeVisible();
+  await expect(row.locator(".timeline-pr-link")).toHaveAttribute(
+    "href",
+    "https://github.com/test/repo/pull/42"
+  );
+  await expect(row.locator(".timeline-pr-link")).toContainText("PR #42");
+});
+
+test("queue timeline - shows log file for running issues", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: true,
+        workers: [],
+        runState: {
+          runId: "test-run-123",
+          repoOwner: "test",
+          repoName: "repo",
+          queue: [
+            { number: 3, title: "Running issue" },
+          ],
+          status: {
+            items: {
+              "3": {
+                status: "running",
+                workerId: 2,
+                pid: 12345,
+                logFile: "worker-2-issue-3.log",
+                startedAt: "2026-05-04T10:00:00Z",
+                error: null
+              }
+            }
+          },
+        },
+        config: { profile: "generic", warnings: [] },
+      }),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const row = page.locator(".timeline-row").first();
+  await expect(row.locator(".timeline-state")).toContainText("running");
+  await expect(row.locator(".timeline-log")).toBeVisible();
+  await expect(row.locator(".timeline-log")).toContainText("worker-2-issue-3.log");
+  await expect(row.locator(".worker-pill")).toContainText("w2");
+});
+
+test("queue timeline - shows error for failed issues", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        workers: [],
+        runState: {
+          runId: "test-run-123",
+          repoOwner: "test",
+          repoName: "repo",
+          queue: [
+            { number: 6, title: "Failed issue" },
+          ],
+          status: {
+            items: {
+              "6": {
+                status: "failed",
+                workerId: 1,
+                pid: null,
+                logFile: "worker-1-issue-6.log",
+                startedAt: "2026-05-04T07:00:00Z",
+                error: "Validation failed"
+              }
+            }
+          },
+        },
+        config: { profile: "generic", warnings: [] },
+      }),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const row = page.locator(".timeline-row").first();
+  await expect(row.locator(".timeline-state")).toHaveClass(/failed/);
+  await expect(row.locator(".timeline-error")).toBeVisible();
+  await expect(row.locator(".timeline-error")).toContainText("Validation failed");
+});
+
+test("queue timeline - is primary panel when run is active", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: true,
+        workers: [],
+        runState: {
+          runId: "test-run-123",
+          repoOwner: "test",
+          repoName: "repo",
+          queue: [{ number: 1, title: "Test" }],
+          status: { items: {} },
+        },
+        config: { profile: "generic", warnings: [] },
+      }),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  // Queue timeline should be the dominant panel
+  const timeline = page.locator("#queue-timeline-panel");
+  await expect(timeline).toBeVisible();
+  await expect(timeline).toHaveClass(/primary/);
+  
+  // Active workers should be secondary
+  const workersPanel = page.locator(".panel.current");
+  await expect(workersPanel).toHaveClass(/secondary/);
+});
+

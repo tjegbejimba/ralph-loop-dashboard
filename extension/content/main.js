@@ -206,6 +206,109 @@ function renderWorkerCardHtml(it, isLive) {
   `;
 }
 
+// --- Queue Timeline rendering ---
+
+function renderQueueTimeline(runState) {
+  const container = $("queue-timeline");
+  const countEl = $("queue-timeline-count");
+  const panel = $("queue-timeline-panel");
+  
+  if (!runState || !runState.queue || runState.queue.length === 0) {
+    container.innerHTML = '<div class="placeholder">No active run</div>';
+    countEl.textContent = "—";
+    panel?.classList.remove("primary");
+    return;
+  }
+  
+  // Mark timeline as primary when a run is active
+  panel?.classList.add("primary");
+  
+  // Transform queue and status into timeline rows using the presenter pattern
+  const timeline = buildQueueTimelineInline(runState);
+  
+  countEl.textContent = `${timeline.length} issue${timeline.length === 1 ? "" : "s"}`;
+  
+  container.innerHTML = timeline.map(row => `
+    <div class="timeline-row" data-issue="${row.issueNumber}">
+      <div class="timeline-header">
+        <span class="timeline-issue-num">#${row.issueNumber}</span>
+        <a href="${escapeHtml(row.issueUrl)}" 
+           target="_blank" 
+           rel="noopener noreferrer"
+           class="timeline-issue-link">
+          ${escapeHtml(row.title)}
+        </a>
+        ${row.workerId ? `<span class="worker-pill">w${row.workerId}</span>` : ""}
+      </div>
+      
+      <div class="timeline-meta">
+        <span class="timeline-state state-${row.state}">${row.state}</span>
+        
+        ${row.prUrl ? `
+          <a href="${escapeHtml(row.prUrl)}" 
+             target="_blank" 
+             rel="noopener noreferrer"
+             class="timeline-pr-link">
+            PR #${row.prNumber}
+          </a>
+        ` : ""}
+        
+        ${row.logFile ? `
+          <span class="timeline-log" title="${escapeHtml(row.logFile)}">
+            📄 ${escapeHtml(row.logFile)}
+          </span>
+        ` : ""}
+        
+        ${row.error ? `
+          <span class="timeline-error" title="${escapeHtml(row.error)}">
+            ⚠️ ${escapeHtml(row.error)}
+          </span>
+        ` : ""}
+      </div>
+    </div>
+  `).join("");
+}
+
+// Inline presenter implementation (matches queue-timeline.mjs for webview context)
+function buildQueueTimelineInline(runState) {
+  const queue = runState.queue || [];
+  const status = runState.status || { items: {} };
+  const repoOwner = runState.repoOwner || "";
+  const repoName = runState.repoName || "";
+  
+  return queue.map(issue => {
+    const issueNumber = issue.number;
+    const itemStatus = status.items[String(issueNumber)];
+    
+    const row = {
+      issueNumber,
+      title: issue.title,
+      state: itemStatus?.status || "queued",
+      issueUrl: `https://github.com/${repoOwner}/${repoName}/issues/${issueNumber}`,
+      prUrl: null,
+      prNumber: null,
+      logFile: null,
+      workerId: null,
+      startedAt: null,
+      error: null,
+    };
+    
+    if (itemStatus) {
+      row.workerId = itemStatus.workerId ?? null;
+      row.logFile = itemStatus.logFile ?? null;
+      row.startedAt = itemStatus.startedAt ?? null;
+      row.error = itemStatus.error ?? null;
+      
+      if (itemStatus.prNumber) {
+        row.prNumber = itemStatus.prNumber;
+        row.prUrl = `https://github.com/${repoOwner}/${repoName}/pull/${itemStatus.prNumber}`;
+      }
+    }
+    
+    return row;
+  });
+}
+
 // --- Desktop notifications on transitions ---
 
 const notifyState = {
@@ -443,8 +546,19 @@ function render(s) {
 
   // Active workers — render one card per active iteration.
   const workersContainer = $("workers-container");
+  const workersPanel = document.querySelector(".panel.current");
   const workers = Array.isArray(s.workers) ? s.workers : [];
   const workersCount = $("workers-count");
+  
+  // Mark workers panel as secondary when queue timeline is active
+  if (workersPanel) {
+    if (s.runState && s.runState.queue && s.runState.queue.length > 0) {
+      workersPanel.classList.add("secondary");
+    } else {
+      workersPanel.classList.remove("secondary");
+    }
+  }
+  
   if (workersCount) {
     workersCount.textContent = workers.length === 0 ? "—" : `${workers.length} active`;
   }
@@ -470,6 +584,9 @@ function render(s) {
   }
 
   renderConfigSummary(s.config);
+  
+  // Queue Timeline (primary panel for active runs)
+  renderQueueTimeline(s.runState);
 
   // Queue
   const queue = $("queue-list");
