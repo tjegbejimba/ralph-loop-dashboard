@@ -228,28 +228,33 @@ function renderQueueTimeline(runState) {
   
   countEl.textContent = `${timeline.length} issue${timeline.length === 1 ? "" : "s"}`;
   
-  container.innerHTML = timeline.map(row => `
-    <div class="timeline-row" data-issue="${row.issueNumber}">
+  container.innerHTML = timeline.map(row => {
+    // Sanitize state for CSS class (whitelist known states)
+    const safeStateClass = ["queued", "claimed", "running", "pr-opened", "merged", "failed", "skipped"]
+      .includes(row.state) ? row.state : "queued";
+    
+    return `
+    <div class="timeline-row" data-issue="${escapeHtml(String(row.issueNumber))}">
       <div class="timeline-header">
-        <span class="timeline-issue-num">#${row.issueNumber}</span>
+        <span class="timeline-issue-num">#${escapeHtml(String(row.issueNumber))}</span>
         <a href="${escapeHtml(row.issueUrl)}" 
            target="_blank" 
            rel="noopener noreferrer"
            class="timeline-issue-link">
           ${escapeHtml(row.title)}
         </a>
-        ${row.workerId ? `<span class="worker-pill">w${row.workerId}</span>` : ""}
+        ${row.workerId ? `<span class="worker-pill">w${escapeHtml(String(row.workerId))}</span>` : ""}
       </div>
       
       <div class="timeline-meta">
-        <span class="timeline-state state-${row.state}">${row.state}</span>
+        <span class="timeline-state state-${safeStateClass}">${escapeHtml(row.state)}</span>
         
         ${row.prUrl ? `
           <a href="${escapeHtml(row.prUrl)}" 
              target="_blank" 
              rel="noopener noreferrer"
              class="timeline-pr-link">
-            PR #${row.prNumber}
+            PR #${escapeHtml(String(row.prNumber))}
           </a>
         ` : ""}
         
@@ -266,7 +271,8 @@ function renderQueueTimeline(runState) {
         ` : ""}
       </div>
     </div>
-  `).join("");
+  `;
+  }).join("");
 }
 
 // Inline presenter implementation (matches queue-timeline.mjs for webview context)
