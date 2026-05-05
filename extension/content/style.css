@@ -1108,3 +1108,137 @@ li:hover {
   color: var(--yellow);
 }
 
+/* Queue Timeline Styles */
+.panel.queue-timeline {
+  order: -1; /* Place timeline first in flexbox order */
+}
+
+.panel.queue-timeline.primary {
+  background: var(--panel-2);
+  border: 1px solid var(--accent);
+}
+
+.panel.current.secondary {
+  order: 1;
+}
+
+.queue-timeline-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.timeline-row {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px;
+  transition: border-color 0.2s;
+}
+
+.timeline-row:hover {
+  border-color: var(--accent);
+}
+
+.timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.timeline-issue-num {
+  color: var(--muted);
+  font-weight: 600;
+  font-family: ui-monospace, monospace;
+}
+
+.timeline-issue-link {
+  color: var(--text);
+  text-decoration: none;
+  flex: 1;
+  font-weight: 500;
+}
+
+.timeline-issue-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
+.timeline-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.timeline-state {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.timeline-state.state-queued {
+  background: rgba(139, 148, 158, 0.15);
+  color: var(--muted);
+}
+
+.timeline-state.state-claimed {
+  background: rgba(188, 140, 255, 0.15);
+  color: var(--purple);
+}
+
+.timeline-state.state-running {
+  background: rgba(88, 166, 255, 0.15);
+  color: var(--accent);
+}
+
+.timeline-state.state-pr-opened {
+  background: rgba(210, 153, 34, 0.15);
+  color: var(--yellow);
+}
+
+.timeline-state.state-merged {
+  background: rgba(63, 185, 80, 0.15);
+  color: var(--green);
+}
+
+.timeline-state.state-failed {
+  background: rgba(248, 81, 73, 0.15);
+  color: var(--red);
+}
+
+.timeline-state.state-skipped {
+  background: rgba(139, 148, 158, 0.15);
+  color: var(--muted);
+  text-decoration: line-through;
+}
+
+.timeline-pr-link {
+  color: var(--yellow);
+  text-decoration: none;
+  font-family: ui-monospace, monospace;
+}
+
+.timeline-pr-link:hover {
+  text-decoration: underline;
+}
+
+.timeline-log {
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.timeline-error {
+  color: var(--red);
+  font-size: 11px;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
