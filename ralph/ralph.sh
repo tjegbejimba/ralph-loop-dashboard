@@ -228,7 +228,7 @@ while true; do
     num=""; title=""; body=""; chosen_blockers=""
     
     for row in $(echo "$queue_json" | jq -r '.[] | @base64'); do
-      decoded=$(echo "$row" | base64 --decode)
+      decoded=$(echo "$row" | tr -d '\r' | base64 --decode)
       cand_num=$(echo "$decoded" | jq -r .number)
       cand_title=$(echo "$decoded" | jq -r .title)
       
@@ -317,7 +317,7 @@ while true; do
     num=""; title=""; body=""; chosen_blockers=""
     while IFS= read -r row; do
       [[ -z "$row" ]] && continue
-      decoded=$(echo "$row" | base64 --decode)
+      decoded=$(echo "$row" | tr -d '\r' | base64 --decode)
       cand_num=$(echo "$decoded" | jq -r .number)
       cand_title=$(echo "$decoded" | jq -r .title)
       cand_body=$(echo "$decoded" | jq -r .body)
