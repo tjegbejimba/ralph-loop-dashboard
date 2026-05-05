@@ -4,7 +4,7 @@
 # Two things happen here:
 #   1. The .ralph/ scripts (ralph.sh, launch.sh, RALPH.md) get copied into
 #      the target repo so the loop is git-tracked per-project.
-#   2. The dashboard extension gets symlinked into ~/.copilot/extensions/
+#   2. The dashboard extension gets copied into ~/.copilot/extensions/
 #      so it's available in every Copilot CLI session, not just one repo.
 #
 # Usage (from inside this repo):
@@ -121,22 +121,31 @@ render_validation_commands() {
 install_scripts() {
   local target="$1"
   local ralph_dir="$target/.ralph"
+  local has_prompt=0
 
   if [[ -d "$ralph_dir" ]]; then
-    echo "⚠️  $ralph_dir already exists — leaving untouched."
-    install_config "$target"
-    echo "   Delete or rename it first if you want to re-bootstrap scripts."
-    return 0
+    echo "🔄 Refreshing loop scripts -> $ralph_dir"
+    [[ -f "$ralph_dir/RALPH.md" ]] && has_prompt=1
+  else
+    echo "📋 Copying loop scripts -> $ralph_dir"
   fi
 
-  echo "📋 Copying loop scripts -> $ralph_dir"
   mkdir -p "$ralph_dir/lib"
   cp "$REPO_DIR/ralph/ralph.sh" "$ralph_dir/ralph.sh"
   cp "$REPO_DIR/ralph/launch.sh" "$ralph_dir/launch.sh"
   cp "$REPO_DIR/ralph/lib/state.sh" "$ralph_dir/lib/state.sh"
+  cp "$REPO_DIR/ralph/lib/status.sh" "$ralph_dir/lib/status.sh"
+  cp "$REPO_DIR/ralph/lib/pr-merge.sh" "$ralph_dir/lib/pr-merge.sh"
+  rm -rf "$ralph_dir/profiles"
   cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
   chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
   install_config "$target"
+
+  if [[ "$has_prompt" -eq 1 ]]; then
+    echo "⚠️  $ralph_dir/RALPH.md already exists — leaving prompt customization untouched."
+    echo "   Delete it first if you want to re-render from the template."
+    return 0
+  fi
 
   # Render RALPH.md from template using detected target repo slug.
   local repo_slug
@@ -161,6 +170,7 @@ logs/
 lock/
 state.json
 state.lock/
+runs/
 EOF
 
   echo "✅ Loop scripts installed. Customize $ralph_dir/RALPH.md if needed."
@@ -170,20 +180,24 @@ EOF
 install_extension() {
   local user_ext_dir="$HOME/.copilot/extensions"
   mkdir -p "$user_ext_dir"
-  local link_target="$user_ext_dir/ralph-dashboard"
+  local install_target="$user_ext_dir/ralph-dashboard"
 
-  if [[ -L "$link_target" ]]; then
-    echo "🔗 Existing symlink at $link_target — refreshing."
-    rm "$link_target"
-  elif [[ -e "$link_target" ]]; then
-    echo "⚠️  $link_target exists and is not a symlink." >&2
+  if [[ -L "$install_target" || -d "$install_target" ]]; then
+    echo "📦 Refreshing extension at $install_target"
+    rm -rf "$install_target"
+  elif [[ -e "$install_target" ]]; then
+    echo "⚠️  $install_target exists and is not a directory/symlink." >&2
     echo "   Move/delete it manually then re-run." >&2
     return 1
   fi
 
-  ln -s "$REPO_DIR/extension" "$link_target"
-  echo "✅ Extension linked: $link_target -> $REPO_DIR/extension"
-  echo "   Restart Copilot CLI (or run /restart) to load it."
+  mkdir -p "$install_target"
+  cp -R "$REPO_DIR/extension/." "$install_target/"
+  if [[ -f "$install_target/package.json" ]]; then
+    (cd "$install_target" && npm install --no-audit --no-fund)
+  fi
+  echo "✅ Extension installed: $install_target"
+  echo "   Restart Copilot CLI (or reload extensions) to load it."
 }
 
 case "$MODE" in

@@ -35,7 +35,7 @@ cd ralph-loop-dashboard
 This:
 - Copies `ralph/*` → `<your-project>/.ralph/`, with `RALPH.md` rendered from the template using your repo slug
 - Creates `<your-project>/.ralph/config.json` from a profile (`generic`, `bun`, or `python`)
-- Symlinks `extension/` → `~/.copilot/extensions/ralph-dashboard/` (user-level, available in all Copilot CLI sessions)
+- Copies `extension/` → `~/.copilot/extensions/ralph-dashboard/` and installs its dependencies (user-level, available in all Copilot CLI sessions)
 
 Restart Copilot CLI afterwards (or `/restart`) so the extension is picked up.
 
@@ -59,6 +59,7 @@ Each issue body should describe the slice's intent + acceptance criteria. The lo
 .ralph/launch.sh --foreground        # attached (single-worker only)
 .ralph/launch.sh --status            # active workers + claims
 .ralph/launch.sh --stop              # SIGTERM all workers
+.ralph/launch.sh --cleanup           # stop workers + remove clean worker worktrees
 ```
 
 ### Parallel workers
@@ -83,6 +84,8 @@ Or use the dashboard's "Start" button (after restarting Copilot CLI):
 ```
 
 The loop iterates until no open matching issues remain, then exits cleanly.
+Use `--cleanup` after a run to remove worker worktrees that Ralph created. Dirty
+worktrees are left in place for inspection instead of being deleted.
 
 ## Configuration
 
@@ -96,7 +99,8 @@ Project-specific config lives at `.ralph/config.json`. Built-in profiles live in
 ```
 
 The installer never overwrites an existing `.ralph/config.json` unless
-`--force-config` is passed.
+`--force-config` is passed. Re-running it refreshes the loop scripts and helper
+libraries while preserving an existing `.ralph/RALPH.md` prompt.
 
 Config is intentionally small:
 
@@ -160,6 +164,7 @@ The agent (in `RALPH.md`) is locked into:
 - **Red → Green → Refactor**, no skipping the red phase
 - All local checks pass before push (`lint`, `typecheck`, `test`, `e2e`, `build` — adapt to your repo)
 - PR body must include `Closes #<N>` for auto-close on merge
+- PR bodies are created through a repo-local `.ralph-pr-body-<N>.md` file and passed with `gh pr create --body-file` to avoid unsafe inline shell bodies
 - Dual-model code review (parallel `gpt-5.5` + `claude-opus-4.7`) before merge
 - Pre-merge rebase, force-push with lease, watch CI, squash-merge
 
@@ -178,7 +183,7 @@ And via the agent's tool surface: `getStatus`, `startLoop`, `stopLoop`, `getPrDe
 ## Caveats
 
 - **macOS-tested.** The launcher and process detection use `ps -axww`. Linux should work but is not exercised; PRs welcome.
-- **Bun-native repos** are the original target — `RALPH.md` references `bun test` etc. Edit the template (or the rendered `.ralph/RALPH.md`) for npm/pnpm/cargo/etc.
+- **Validation is profile-driven.** Edit `.ralph/config.json`, the selected profile, or the rendered `.ralph/RALPH.md` for npm/pnpm/cargo/etc.
 - The loop assumes you have `gh` authenticated and Copilot CLI installed.
 
 ## License

@@ -41,7 +41,13 @@ You MUST use the `tdd` skill (red-green-refactor). Invoke it explicitly via the 
    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
    ```
 7. **Push**: `git push -u origin <branch>`.
-8. **Open PR**: `gh pr create --base main --title "<conventional title>" --body "<body>"`. The PR body MUST include the literal string `Closes #<N>` on its own line — with the `#` and the issue number digit, no other phrasing (NOT `Closes issue 4`, NOT `Resolves #4`, NOT `Fixes 4`). After creating the PR, run `gh pr view <pr> --json closingIssuesReferences -q '.closingIssuesReferences[].number'` and confirm the slice's issue number appears. If it does not, edit the PR body to fix the closure keyword before proceeding.
+8. **Open PR safely**:
+   - Create the PR body in a repo-local scratch file named `.ralph-pr-body-<N>.md` using the file editing tool, not a shell heredoc and not `/tmp`.
+   - The PR body file MUST include the literal string `Closes #<N>` on its own line — with the `#` and the issue number digit, no other phrasing (NOT `Closes issue 4`, NOT `Resolves #4`, NOT `Fixes 4`).
+   - Run `gh pr create --base main --title "<conventional title>" --body-file .ralph-pr-body-<N>.md`.
+   - Do not pass multi-line PR bodies via inline `--body`; shell safety filters may block those commands.
+   - After creating the PR, run `gh pr view <pr> --json closingIssuesReferences -q '.closingIssuesReferences[].number'` and confirm the slice's issue number appears. If it does not, edit the PR body file and run `gh pr edit <pr> --body-file .ralph-pr-body-<N>.md`.
+   - Remove `.ralph-pr-body-<N>.md` after the PR body is accepted.
 9. **Dual-model code review** (mandatory before merge):
    - Dispatch `code-review` agents in parallel against the open PR with both `gpt-5.5` and `claude-opus-4.7` (use `mode: "background"`, run them concurrently, then dedupe and merge findings).
    - Adopt every finding that prevents a bug, security issue, or test failure. Push fix commits to the same branch.
@@ -71,8 +77,8 @@ In addition to the slice's own acceptance criteria, Slice 1 MUST:
 ## Hard limits
 
 - One slice per iteration. Do not touch other slices' files.
-- No live network calls to AMC, TMDB, Letterboxd, or Telegram in tests. Use fixtures or stubs.
-- Never commit, log, or echo secrets (`.amc-vendor-key`, Telegram tokens, etc.).
+- Do not add live external service calls to automated tests. Use fixtures or stubs.
+- Never commit, log, or echo secrets.
 - Never push directly to `main`.
 
 ## Stop conditions
