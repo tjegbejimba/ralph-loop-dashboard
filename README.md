@@ -41,12 +41,39 @@ Restart Copilot CLI afterwards (or `/restart`) so the extension is picked up.
 
 ## Windows / WSL2
 
-Ralph is currently designed for a Unix-like environment. Native Windows is not
-yet a supported path because the launcher uses Bash, POSIX paths, symlinks,
-`ps`, `awk`, `kill`, `nohup`, `disown`, and Unix-style Copilot extension
-installation paths.
+Ralph runs in two supported modes on Windows:
 
-The recommended Windows setup is **WSL2 with Ubuntu**:
+- **WSL2 with Ubuntu** (recommended for parallelism): full POSIX flow, multiple workers.
+- **Native Windows via Git Bash** (single-worker, foreground): uses `bash.exe` from
+  Git for Windows directly. Sufficient for one-issue-at-a-time use; subject to the
+  caveats below.
+
+### Native Windows (single-worker)
+
+Prerequisites:
+- [Git for Windows](https://git-scm.com/download/win) (provides `bash.exe`).
+- Node 20+, `gh` CLI, `jq` (all on `PATH`).
+
+The dashboard probes for `bash.exe` in this order:
+1. `RALPH_BASH_EXE` environment variable (use this if you have a non-default install).
+2. `C:\Program Files\Git\usr\bin\bash.exe`
+3. `C:\Program Files\Git\bin\bash.exe`
+4. `bash` on `PATH` (last resort — may pick up WSL bash, which won't work for
+   native Windows mode).
+
+Limitations (these are why WSL2 is still recommended for heavy use):
+
+- **Foreground-only.** The launcher runs with `--foreground` to sidestep a
+  Cygwin/MSYS fork crash (`bash 1026 dofork: ... died waiting for dll loading,
+  errno 11`) that happens when Bash is spawned detached from a non-Bash parent.
+- **Parallelism is clamped to 1.** A request for `parallelism > 1` from the
+  dashboard is reduced to 1 with a warning. For real parallelism, use WSL2.
+- The dashboard tracks the running loop via `.ralph\launcher.pid` (written on
+  Start, removed on Stop). Externally launched loops that write the same
+  pidfile (e.g., Glasswork's `scripts/launch-ralph.ps1`) appear in the
+  dashboard automatically.
+
+### WSL2 with Ubuntu (recommended)
 
 1. Install WSL2 and Ubuntu from Windows.
 2. Clone this repo inside the WSL filesystem, not under a Windows-mounted path:
@@ -88,9 +115,8 @@ The recommended Windows setup is **WSL2 with Ubuntu**:
    ~/Code/your-project/.ralph/launch.sh --cleanup
    ```
 
-Native Windows support would require a portability pass for process management,
-path handling, symlinks/junctions, extension install paths, and Copilot CLI
-extension behavior on Windows.
+Native Windows mode handles single-worker workflows; WSL2 remains required for
+parallel workers and is the most thoroughly tested path.
 
 ## File the work as issues
 

@@ -14,6 +14,16 @@ import {
   removeQueuedIssue,
   reorderQueuedIssue,
 } from "./lib/run-store.mjs";
+import {
+  isAlive,
+  readPidFile,
+  writePidFile,
+  removePidFile,
+  resolveBashExe,
+  toBashPath,
+} from "./lib/platform-shim.mjs";
+
+const IS_WINDOWS = process.platform === "win32";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +40,7 @@ const LOOP_LOG = join(REPO_ROOT, ".ralph", "loop.out");
 const LOGS_DIR = join(REPO_ROOT, ".ralph", "logs");
 const STATE_FILE = join(REPO_ROOT, ".ralph", "state.json");
 const CONFIG_FILE = join(REPO_ROOT, ".ralph", "config.json");
+const LAUNCHER_PID_FILE = join(REPO_ROOT, ".ralph", "launcher.pid");
 
 // Iteration log filenames may include an optional worker-id segment:
 //   iter-{YYYYMMDD}-{HHMMSS}-w{id}-issue-{N}.log   (parallel workers)
@@ -146,6 +157,18 @@ const ISSUE_SEARCH =
 const STAGE_MATCHERS = compileStages(RALPH_CONFIG, CONFIG_WARNINGS);
 
 async function getLoopProcess() {
+  // Windows: use the pidfile-based contract. POSIX `ps -axww` doesn't exist
+  // on Windows, and we don't want to introduce wmic / powershell dependencies
+  // here. Both the dashboard's own startLoop() (below) and external launchers
+  // like Glasswork's scripts/launch-ralph.ps1 write .ralph\launcher.pid.
+  if (IS_WINDOWS) {
+    const pid = readPidFile(LAUNCHER_PID_FILE);
+    if (pid && isAlive(pid)) {
+      return [{ pid, cmd: "ralph launcher (windows)" }];
+    }
+    return [];
+  }
+
   try {
     // Use ps -ax with full command output for cross-platform support
     // (macOS pgrep -a doesn't print command lines like Linux pgrep -a does).
@@ -446,10 +469,13 @@ function getIterationHistory(limit = 20) {
 
 async function ghJson(args) {
   try {
-    const env = {
-      ...process.env,
-      PATH: `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`,
-    };
+    const env = { ...process.env };
+    if (!IS_WINDOWS) {
+      // POSIX behaviour preserved: gh installed via Homebrew lives outside
+      // the default Copilot CLI PATH on macOS, so we prepend the standard
+      // Homebrew bin dirs. Windows already has gh on the system PATH.
+      env.PATH = `/opt/homebrew/bin:/usr/local/bin:${process.env.PATH || ""}`;
+    }
     const { stdout } = await execFileAsync("gh", args, { cwd: REPO_ROOT, timeout: 10000, env });
     return JSON.parse(stdout);
   } catch (err) {
@@ -682,13 +708,23 @@ async function getStatus() {
 // Spawn .ralph/launch.sh detached so the loop survives this extension/session.
 async function startLoop({ runOptions } = {}) {
   const procs = await getLoopProcess();
-  if (procs.some((p) => p.cmd.includes("ralph.sh"))) {
+  // On Windows getLoopProcess returns the launcher pidfile entry directly;
+  // POSIX returns ralph.sh / copilot -p entries.
+  const alreadyRunning = IS_WINDOWS
+    ? procs.length > 0
+    : procs.some((p) => p.cmd.includes("ralph.sh"));
+  if (alreadyRunning) {
     return { ok: false, error: "Loop is already running.", processes: procs };
   }
   const launcher = join(REPO_ROOT, ".ralph", "launch.sh");
   if (!existsSync(launcher)) {
     return { ok: false, error: `launcher not found: ${launcher}` };
   }
+
+  if (IS_WINDOWS) {
+    return startLoopWindows({ runOptions });
+  }
+
   try {
     // Append stdout/stderr to loop.out and fully detach so the process
     // survives the extension lifecycle.
@@ -725,6 +761,72 @@ async function startLoop({ runOptions } = {}) {
   }
 }
 
+// Windows-only: spawn launch.sh via Git for Windows bash with --foreground
+// to sidestep the Cygwin fork crash that bites `nohup ... &` (the default
+// background path inside launch.sh). Foreground mode runs everything inside
+// a single hidden bash.exe console — no fork, no DLL-load race.
+//
+// We write the bash.exe PID to .ralph\launcher.pid so getLoopProcess() and
+// stopLoop() can find the loop later. This matches the contract used by
+// Glasswork's scripts/launch-ralph.ps1, so external launches and dashboard
+// launches are interchangeable from the dashboard's point of view.
+async function startLoopWindows({ runOptions }) {
+  let parallelism = runOptions?.parallelism ? Number(runOptions.parallelism) : 1;
+  if (!Number.isFinite(parallelism) || parallelism < 1) parallelism = 1;
+  let parallelismWarning = null;
+  if (parallelism > 1) {
+    parallelismWarning =
+      `Windows supports foreground-only launches (parallelism clamped to 1; ` +
+      `requested ${parallelism}). Use WSL for multi-worker runs.`;
+    parallelism = 1;
+  }
+
+  let bashExe;
+  try {
+    bashExe = resolveBashExe(process.env);
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+
+  const env = { ...process.env };
+  // PATH stays as-is on Windows: gh and git live on the system PATH.
+  env.RALPH_PARALLELISM = String(parallelism);
+  if (runOptions?.model) {
+    env.RALPH_MODEL = runOptions.model;
+  }
+
+  const repoRootBash = toBashPath(REPO_ROOT);
+  const logPathBash = toBashPath(LOOP_LOG);
+  const launcherArgs = ["--foreground"];
+  if (runOptions?.runMode === "one-pass") launcherArgs.push("--once");
+  const launcherCmd = launcherArgs.join(" ");
+  // -lc gives us a login shell with PATH/profile loaded; exec replaces bash
+  // with launch.sh so the recorded PID is the launcher itself.
+  const bashCommand = `cd '${repoRootBash}' && exec ./.ralph/launch.sh ${launcherCmd} >> '${logPathBash}' 2>&1`;
+
+  try {
+    const child = spawn(bashExe, ["-lc", bashCommand], {
+      cwd: REPO_ROOT,
+      detached: true,
+      windowsHide: true,
+      stdio: "ignore",
+      env,
+    });
+    child.unref();
+    if (typeof child.pid !== "number") {
+      return { ok: false, error: "spawn returned no pid" };
+    }
+    writePidFile(LAUNCHER_PID_FILE, child.pid);
+    return {
+      ok: true,
+      pid: child.pid,
+      ...(parallelismWarning ? { warning: parallelismWarning } : {}),
+    };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+}
+
 // Stop the loop by SIGTERMing every detected ralph.sh + copilot -p PID.
 async function stopLoop() {
   const procs = await getLoopProcess();
@@ -740,6 +842,11 @@ async function stopLoop() {
     } catch (err) {
       failed.push({ pid: p.pid, error: String(err.message || err) });
     }
+  }
+  // Windows: clean up the launcher pidfile so the next status query reflects
+  // reality immediately. POSIX has no pidfile to clean.
+  if (IS_WINDOWS) {
+    removePidFile(LAUNCHER_PID_FILE);
   }
   return { ok: killed.length > 0, killed, failed };
 }
