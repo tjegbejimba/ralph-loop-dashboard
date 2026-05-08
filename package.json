@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "npm run test:unit && npm run test:shell && playwright test",
-    "test:shell": "bash test/status.test.sh && bash test/queue-consume.test.sh && bash test/launch-cleanup.test.sh && bash test/install-refresh.test.sh",
+    "test:shell": "bash test/status.test.sh && bash test/queue-consume.test.sh && bash test/run-queue-terminal.test.sh && bash test/launch-cleanup.test.sh && bash test/install-refresh.test.sh",
     "test:unit": "node --test test/*.test.mjs",
     "test:ui": "playwright test --ui"
   },
