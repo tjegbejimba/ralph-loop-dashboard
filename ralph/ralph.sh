@@ -270,13 +270,23 @@ while true; do
     done
     
     if [[ -z "$num" ]]; then
-      # No unclaimed issues remain — check if any are still running
-      remaining=$(echo "$queue_json" | jq -r 'length')
-      if [[ "$remaining" -eq 0 ]]; then
-        echo "✅ Worker $WORKER_ID: run $RUN_ID queue is empty. Done."
+      # No claimable issue this pass. Decide whether to exit or wait:
+      # - If every queue item is in a terminal status (merged/failed/skipped),
+      #   the run is done — exit cleanly.
+      # - Otherwise some items are claimed/in-progress on other workers; sleep.
+      total=$(echo "$queue_json" | jq -r 'length')
+      terminal_count=0
+      while IFS= read -r qnum; do
+        [[ -z "$qnum" ]] && continue
+        if status_is_terminal "$qnum"; then
+          terminal_count=$((terminal_count + 1))
+        fi
+      done < <(echo "$queue_json" | jq -r '.[].number')
+      if [[ "$total" -gt 0 && "$terminal_count" -eq "$total" ]]; then
+        echo "✅ Worker $WORKER_ID: run $RUN_ID queue fully resolved ($terminal_count/$total terminal). Done."
         exit 0
       fi
-      echo "⏸  Worker $WORKER_ID: no unclaimed issues in run $RUN_ID queue (total=$remaining); sleeping ${POLL_SEC}s."
+      echo "⏸  Worker $WORKER_ID: no claimable issues in run $RUN_ID queue (terminal=$terminal_count/$total); sleeping ${POLL_SEC}s."
       sleep "$POLL_SEC"
       continue
     fi
