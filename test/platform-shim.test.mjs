@@ -122,21 +122,27 @@ test("resolveBashExe honours RALPH_BASH_EXE override", () => {
   }
 });
 
-test("resolveBashExe falls back to 'bash' when nothing matches", () => {
+test("resolveBashExe returns null when nothing matches (no PATH fallback)", () => {
   const original = process.env.RALPH_BASH_EXE;
   // Point at a path that definitely does not exist.
   process.env.RALPH_BASH_EXE = join(tmpdir(), "does-not-exist-xyz.exe");
   try {
     const result = resolveBashExe();
-    // On a real POSIX runner, the Git-for-Windows paths don't exist either,
-    // so we should fall through to "bash". On Windows runners that have Git
-    // installed, we'll find one of the standard locations — also fine.
+    // On a POSIX runner none of the Git-for-Windows paths exist, so the
+    // function must return null (no PATH fallback — see ADR 0002). On a
+    // Windows runner with Git for Windows installed, we'll find one of the
+    // standard locations — also acceptable.
     assert.ok(
-      result === "bash" ||
+      result === null ||
         result === "C:\\Program Files\\Git\\usr\\bin\\bash.exe" ||
         result === "C:\\Program Files\\Git\\bin\\bash.exe",
       `unexpected resolveBashExe result: ${result}`,
     );
+    // Critical regression guard: must NOT return a bare "bash" string. ADR
+    // 0002 explicitly drops the PATH fallback because it can resolve to
+    // C:\Windows\System32\bash.exe (WSL launcher) and produce confusing
+    // half-working failures.
+    assert.notEqual(result, "bash", "must not fall back to bare 'bash' on PATH");
   } finally {
     if (original === undefined) delete process.env.RALPH_BASH_EXE;
     else process.env.RALPH_BASH_EXE = original;

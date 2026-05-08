@@ -782,6 +782,14 @@ async function startLoopWindows({ runOptions }) {
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }
+  if (!bashExe) {
+    return {
+      ok: false,
+      error:
+        `Could not locate Git Bash. Install Git for Windows (https://git-scm.com/download/win), ` +
+        `or set RALPH_BASH_EXE to your bash.exe path. See docs/adr/0002.`,
+    };
+  }
 
   const env = { ...process.env };
   // PATH stays as-is on Windows: gh and git live on the system PATH.

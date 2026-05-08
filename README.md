@@ -58,8 +58,10 @@ The dashboard probes for `bash.exe` in this order:
 1. `RALPH_BASH_EXE` environment variable (use this if you have a non-default install).
 2. `C:\Program Files\Git\usr\bin\bash.exe`
 3. `C:\Program Files\Git\bin\bash.exe`
-4. `bash` on `PATH` (last resort — may pick up WSL bash, which won't work for
-   native Windows mode).
+
+If none of these resolve, the Start fails with a clear error pointing you at
+`RALPH_BASH_EXE`. The dashboard does **not** fall back to bare `bash` on
+`PATH` — see `docs/adr/0002-no-path-bash-fallback.md` for why.
 
 Limitations (these are why WSL2 is still recommended for heavy use):
 

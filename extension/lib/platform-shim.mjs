@@ -55,10 +55,18 @@ export function removePidFile(path) {
 //   1. RALPH_BASH_EXE env override (escape hatch for non-standard installs)
 //   2. C:\Program Files\Git\usr\bin\bash.exe (Git for Windows, default loc)
 //   3. C:\Program Files\Git\bin\bash.exe (Git for Windows, alt entry point)
-//   4. "bash" on PATH (last resort; may pick up wsl-bash, hence last)
 //
-// Returns the first existing path, or null when none are found. Callers are
-// responsible for surfacing a clear error to the user.
+// Returns the first existing path, or null when none are found. Callers must
+// surface a clear error to the user pointing them at RALPH_BASH_EXE.
+//
+// We deliberately do NOT fall back to bare "bash" on PATH. On a Windows
+// machine with WSL2 installed, "bash" on PATH is usually
+// C:\Windows\System32\bash.exe — the WSL launcher, not Git Bash. WSL bash
+// would happily exec our launch.sh, but inside WSL's filesystem view with a
+// different gh/git/copilot toolchain and credentials, producing
+// half-working partial-success failures that don't point at "wrong bash."
+// An honest "can't find Git Bash, set RALPH_BASH_EXE" error is strictly
+// better. See docs/adr/0002.
 export function resolveBashExe() {
   const candidates = [];
   if (process.env.RALPH_BASH_EXE) {
@@ -75,8 +83,7 @@ export function resolveBashExe() {
       // ignore and continue
     }
   }
-  // Fall back to bare "bash" — Node will resolve it via PATH at spawn time.
-  return "bash";
+  return null;
 }
 
 // Convert a Windows path (C:\foo\bar) to a POSIX-style path that bash

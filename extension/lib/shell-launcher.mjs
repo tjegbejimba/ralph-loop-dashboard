@@ -107,6 +107,15 @@ export async function launchRun({
         resolve({ success: false, error: String(err.message || err) });
         return;
       }
+      if (!bashExe) {
+        resolve({
+          success: false,
+          error:
+            `Could not locate Git Bash. Install Git for Windows (https://git-scm.com/download/win), ` +
+            `or set RALPH_BASH_EXE to your bash.exe path.`,
+        });
+        return;
+      }
       const scriptBash = toBashPath(scriptPath);
       child = spawn(bashExe, ["-lc", `exec '${scriptBash}'`], {
         detached: true,
