@@ -282,7 +282,11 @@ while true; do
           terminal_count=$((terminal_count + 1))
         fi
       done < <(echo "$queue_json" | jq -r '.[].number')
-      if [[ "$total" -gt 0 && "$terminal_count" -eq "$total" ]]; then
+      if [[ "$total" -eq 0 ]]; then
+        echo "✅ Worker $WORKER_ID: run $RUN_ID queue is empty. Done."
+        exit 0
+      fi
+      if [[ "$terminal_count" -eq "$total" ]]; then
         echo "✅ Worker $WORKER_ID: run $RUN_ID queue fully resolved ($terminal_count/$total terminal). Done."
         exit 0
       fi
