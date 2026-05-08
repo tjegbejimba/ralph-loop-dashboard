@@ -53,16 +53,23 @@ You MUST use the `tdd` skill (red-green-refactor). Invoke it explicitly via the 
    - Adopt every finding that prevents a bug, security issue, or test failure. Push fix commits to the same branch.
    - Set aside cosmetic or low-value findings; briefly justify in the PR body's "Review notes" section.
    - If both models return zero findings, record that in the PR body too.
-10. **Pre-merge sync**: `git fetch origin main && git rebase origin/main`. Rerun **all** local checks (the validation commands configured for this repo). They must pass against the rebased base — this is the only validation gate before merge. `git push --force-with-lease`.
-11. **Merge immediately**: `gh pr merge <pr> --repo {{REPO}} --squash --delete-branch --admin`. Do **not** wait for GitHub Actions; the local re-run in step 10 is the source of truth. CI still runs post-merge on `main` as a safety net.
+10. **Pre-merge sync**: `git fetch origin main && git rebase origin/main`. Rerun **all** local checks (the validation commands configured for this repo). They must pass against the rebased base. `git push --force-with-lease`.
+11. **Fast merge respecting repo protections**:
+    - First try the normal merge path: `gh pr merge <pr> --repo {{REPO}} --squash --delete-branch`.
+    - Do **not** use `--admin`; Ralph must not bypass required checks, reviews, CODEOWNERS, or other branch protections.
+    - If GitHub allows the merge after step 10's local green checks, continue immediately to verification.
+    - If GitHub blocks the merge because required checks are pending, wait only for required checks: `gh pr checks <pr> --repo {{REPO}} --required --watch --fail-fast`, then retry the same normal merge command.
+    - If GitHub blocks the merge because the branch is out of date or no longer mergeable, repeat step 10 once, then retry the same normal merge command. If it still cannot merge, exit non-zero.
 12. **Verify**: `gh issue view <N> --repo {{REPO}} --json state,closedByPullRequests` should show `state: CLOSED` and at least one entry in `closedByPullRequests` with `mergedAt != null`. If not, exit non-zero.
 
-> **Known residual race**: with parallel workers, a third worker can land on `main` between step 10's push and step 11's merge, slipping a stale base through. Tolerated for now — caught by the post-merge CI run on `main` and surfaced as a follow-up issue if it ever bites. To eliminate, enable "Require branches to be up to date before merging" on `main` and wrap steps 10–11 in a rebase-retry loop.
+> **Known residual race**: if the target repo does not require branches to be up to date before merging, a third worker can land on `main` between step 10's push and step 11's merge, slipping a stale base through. Tolerated for now — caught by the post-merge CI run on `main` and surfaced as a follow-up issue if it ever bites. To eliminate, enable "Require branches to be up to date before merging" on `main`; Ralph will then rebase and retry instead of bypassing protection.
 
 ## On failure
 
 - **Tests/lint/build fail locally**: fix and continue. Do not skip tests, do not weaken assertions.
 - **Local pre-merge re-run fails after rebase** (step 10): another worker's merge introduced a semantic conflict. Fix locally, push, restart step 10. Do not merge until step 10 is green against the latest `origin/main`.
+- **Required checks fail** (step 11): read the logs (`gh run view --log-failed`), fix, push, restart step 10, and retry the normal merge. One re-run is acceptable for an obvious infra flake; otherwise treat as a real failure.
+- **Normal merge fails for permissions or policy** (step 11): do not use `--admin` or weaken branch protection. Convert the PR to draft, comment with the GitHub error, and exit non-zero for human review.
 - **Acceptance criteria can't be met** (spec contradiction, missing dependency, ambiguous requirement): convert the PR to draft, post a comment summarizing the blocker, and **exit non-zero**. Do not merge. Do not close the issue. The loop will halt for human review.
 - **Never** call `gh issue close` directly. The only valid closure is via a merged PR.
 

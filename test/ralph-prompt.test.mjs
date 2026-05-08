@@ -10,3 +10,9 @@ test("Ralph prompt requires body-file PR creation instead of inline PR bodies", 
   assert.doesNotMatch(prompt, /gh pr create --base main --title "<conventional title>" --body "<body>"/);
   assert.match(prompt, /not a shell heredoc and not `\/tmp`/);
 });
+
+test("Ralph prompt respects branch protections during merge", () => {
+  assert.match(prompt, /Do \*\*not\*\* use `--admin`/);
+  assert.match(prompt, /gh pr checks <pr> --repo \{\{REPO\}\} --required --watch --fail-fast/);
+  assert.doesNotMatch(prompt, /gh pr merge <pr> --repo \{\{REPO\}\} --squash --delete-branch --admin/);
+});
