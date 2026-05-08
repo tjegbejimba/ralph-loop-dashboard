@@ -66,8 +66,10 @@ Limitations (these are why WSL2 is still recommended for heavy use):
 - **Foreground-only.** The launcher runs with `--foreground` to sidestep a
   Cygwin/MSYS fork crash (`bash 1026 dofork: ... died waiting for dll loading,
   errno 11`) that happens when Bash is spawned detached from a non-Bash parent.
-- **Parallelism is clamped to 1.** A request for `parallelism > 1` from the
-  dashboard is reduced to 1 with a warning. For real parallelism, use WSL2.
+- **Parallelism is hard-errored above 1.** A request for `parallelism > 1`
+  fails the Start with an explanatory error rather than silently clamping —
+  see `docs/adr/0001-windows-native-single-worker.md`. For real parallelism,
+  use WSL2.
 - The dashboard tracks the running loop via `.ralph\launcher.pid` (written on
   Start, removed on Stop). Externally launched loops that write the same
   pidfile (e.g., Glasswork's `scripts/launch-ralph.ps1`) appear in the

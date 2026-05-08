@@ -21,6 +21,7 @@ import {
   removePidFile,
   resolveBashExe,
   toBashPath,
+  validateWindowsParallelism,
 } from "./lib/platform-shim.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
@@ -771,15 +772,9 @@ async function startLoop({ runOptions } = {}) {
 // Glasswork's scripts/launch-ralph.ps1, so external launches and dashboard
 // launches are interchangeable from the dashboard's point of view.
 async function startLoopWindows({ runOptions }) {
-  let parallelism = runOptions?.parallelism ? Number(runOptions.parallelism) : 1;
-  if (!Number.isFinite(parallelism) || parallelism < 1) parallelism = 1;
-  let parallelismWarning = null;
-  if (parallelism > 1) {
-    parallelismWarning =
-      `Windows supports foreground-only launches (parallelism clamped to 1; ` +
-      `requested ${parallelism}). Use WSL for multi-worker runs.`;
-    parallelism = 1;
-  }
+  const validation = validateWindowsParallelism(runOptions?.parallelism);
+  if (!validation.ok) return validation;
+  const parallelism = validation.parallelism;
 
   let bashExe;
   try {
@@ -817,11 +812,7 @@ async function startLoopWindows({ runOptions }) {
       return { ok: false, error: "spawn returned no pid" };
     }
     writePidFile(LAUNCHER_PID_FILE, child.pid);
-    return {
-      ok: true,
-      pid: child.pid,
-      ...(parallelismWarning ? { warning: parallelismWarning } : {}),
-    };
+    return { ok: true, pid: child.pid };
   } catch (err) {
     return { ok: false, error: String(err.message || err) };
   }

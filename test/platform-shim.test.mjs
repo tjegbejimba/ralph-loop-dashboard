@@ -12,6 +12,7 @@ import {
   removePidFile,
   resolveBashExe,
   toBashPath,
+  validateWindowsParallelism,
 } from "../extension/lib/platform-shim.mjs";
 
 test("isAlive returns true for the current process", () => {
@@ -151,4 +152,44 @@ test("toBashPath passes through POSIX paths unchanged", () => {
   assert.equal(toBashPath("/home/foo/bar"), "/home/foo/bar");
   assert.equal(toBashPath("./relative"), "./relative");
   assert.equal(toBashPath(""), "");
+});
+
+// validateWindowsParallelism — see docs/adr/0001 for the policy.
+test("validateWindowsParallelism: 1 is accepted", () => {
+  const r = validateWindowsParallelism(1);
+  assert.equal(r.ok, true);
+  assert.equal(r.parallelism, 1);
+});
+
+test("validateWindowsParallelism: missing/falsey defaults to 1", () => {
+  for (const v of [undefined, null, 0, ""]) {
+    const r = validateWindowsParallelism(v);
+    assert.equal(r.ok, true, `expected ok for ${JSON.stringify(v)}`);
+    assert.equal(r.parallelism, 1);
+  }
+});
+
+test("validateWindowsParallelism: NaN/garbage defaults to 1", () => {
+  for (const v of [NaN, "abc", -3, -1]) {
+    const r = validateWindowsParallelism(v);
+    assert.equal(r.ok, true, `expected ok for ${JSON.stringify(v)}`);
+    assert.equal(r.parallelism, 1);
+  }
+});
+
+test("validateWindowsParallelism: > 1 is a hard error (no silent clamp)", () => {
+  const r = validateWindowsParallelism(4);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /Cygwin fork/);
+  assert.match(r.error, /WSL2/);
+  assert.match(r.error, /Requested 4/);
+  // Critically: must NOT contain a parallelism field that callers might use.
+  // ADR 0001 says we don't silently clamp.
+  assert.equal(r.parallelism, undefined);
+});
+
+test("validateWindowsParallelism: string '2' is also rejected", () => {
+  const r = validateWindowsParallelism("2");
+  assert.equal(r.ok, false);
+  assert.match(r.error, /Requested 2/);
 });

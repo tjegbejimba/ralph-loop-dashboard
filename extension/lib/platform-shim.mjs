@@ -88,3 +88,22 @@ export function toBashPath(winPath) {
   const rest = winPath.slice(2).replace(/\\/g, "/");
   return `/${drive}${rest}`;
 }
+
+// Validate a parallelism request on Windows. Returns {ok:true, parallelism}
+// for valid inputs (1, or missing/falsey treated as 1), or {ok:false, error}
+// when the user requests >1. See docs/adr/0001 for why this is a hard error
+// rather than a silent clamp.
+export function validateWindowsParallelism(requested) {
+  let n = requested ? Number(requested) : 1;
+  if (!Number.isFinite(n) || n < 1) n = 1;
+  if (n > 1) {
+    return {
+      ok: false,
+      error:
+        `Windows native mode runs one worker at a time (Cygwin fork ` +
+        `limitation). Reduce parallelism to 1 in Run options, or use WSL2 ` +
+        `for parallel workers. Requested ${n}.`,
+    };
+  }
+  return { ok: true, parallelism: n };
+}
