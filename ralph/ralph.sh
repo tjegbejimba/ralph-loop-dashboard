@@ -13,8 +13,14 @@
 #   .ralph/ralph.sh --once    # run a single iteration then exit
 #
 # Env:
-#   RALPH_MODEL          model passed to copilot (default: claude-sonnet-4.5)
-#   RALPH_TIMEOUT_SEC    per-iteration timeout in seconds (default: 7200)
+#   RALPH_MODEL                   model passed to copilot (default: claude-sonnet-4.5)
+#   RALPH_TIMEOUT_SEC             per-iteration timeout in seconds (default: 7200)
+#   RALPH_AUTOPILOT_CONTINUES     copilot --max-autopilot-continues value (default: 15).
+#                                 Copilot CLI's default is 5, which is enough for short TDD
+#                                 cycles but runs out before commit/push/PR if the agent has
+#                                 to debug a build, re-run tests, etc. Bump this if you see
+#                                 iterations halt after staging changes but before opening
+#                                 a PR.
 #   RALPH_WORKER_ID      this worker's identity (default: 1) — must be unique
 #                        across concurrent workers; controls lock + log naming
 #   RALPH_POLL_SEC       sleep between selection attempts when no work is
@@ -58,6 +64,7 @@ WORKER_ID="${RALPH_WORKER_ID:-1}"
 LOCK_DIR="$SCRIPT_DIR/lock/worker-${WORKER_ID}"
 MODEL="${RALPH_MODEL:-claude-sonnet-4.5}"
 TIMEOUT_SEC="${RALPH_TIMEOUT_SEC:-7200}"
+AUTOPILOT_CONTINUES="${RALPH_AUTOPILOT_CONTINUES:-15}"
 POLL_SEC="${RALPH_POLL_SEC:-30}"
 RUN_ID="${RALPH_RUN_ID:-}"
 ONCE=0
@@ -464,6 +471,7 @@ ${issue_text}"
     copilot -p "$full_prompt" \
       --allow-all \
       --model "$MODEL" \
+      --max-autopilot-continues "$AUTOPILOT_CONTINUES" \
       2>&1 | tee "$log_file"
   rc=$?
   set -e

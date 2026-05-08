@@ -194,6 +194,7 @@ Environment variables still override config:
 | `RALPH_ISSUE_SEARCH` | config or `Slice in:title` | `gh issue list --search` query (extension) |
 | `RALPH_MODEL` | `claude-sonnet-4.5` | Model passed to `copilot -p` |
 | `RALPH_TIMEOUT_SEC` | `7200` | Per-iteration timeout |
+| `RALPH_AUTOPILOT_CONTINUES` | `15` | `copilot --max-autopilot-continues` value. Copilot CLI's default is 5, which often runs out before commit/push/PR if the agent has to debug a build. Bump this if iterations halt after staging changes but before opening a PR. |
 | `RALPH_MAIN_REPO` | parent of `.ralph/` | Path to your main checkout |
 | `RALPH_LOOP_REPO` | `<MAIN>-ralph` | Base path for loop worktree(s); worker N gets `-N` suffix when parallelism>1 |
 | `RALPH_LOOP_BRANCH` | `ralph-loop` | Base branch name; worker N gets `-N` suffix when parallelism>1 |
