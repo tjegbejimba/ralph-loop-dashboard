@@ -68,6 +68,47 @@ mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
 # shellcheck source=lib/state.sh
 . "$MAIN_REPO/.ralph/lib/state.sh"
 
+# Keep-awake (macOS): per-worker caffeinate processes are tracked in
+# .ralph/lock/caffeinate-<N>.pid so --status, --stop, and --cleanup can
+# manage them explicitly. Defense-in-depth against PID-reuse and missed
+# kqueue notifications: caffeinate runs with `-w <worker_pid>` (primary)
+# AND `-t 21600` (6h hard cap), so even if `-w` misbehaves, caffeinate
+# self-terminates within 6 hours.
+CAFFEINATE_TIMEOUT_SEC="${RALPH_CAFFEINATE_TIMEOUT:-21600}"
+
+caffeinate_pidfile() {
+  echo "$MAIN_REPO/.ralph/lock/caffeinate-$1.pid"
+}
+
+# Spawn a caffeinate watching $worker_pid; record its PID. macOS-only; no-op
+# elsewhere.
+spawn_caffeinate() {
+  local worker_n="$1" worker_pid="$2"
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+  command -v caffeinate >/dev/null 2>&1 || return 0
+  caffeinate -i -m -w "$worker_pid" -t "$CAFFEINATE_TIMEOUT_SEC" \
+    >/dev/null 2>&1 < /dev/null &
+  local caf_pid=$!
+  disown
+  echo "$caf_pid" > "$(caffeinate_pidfile "$worker_n")"
+  echo "  worker $worker_n caffeinate PID: $caf_pid (idle+disk sleep blocked, ${CAFFEINATE_TIMEOUT_SEC}s cap)"
+}
+
+# Kill all tracked caffeinate processes and remove their pidfiles.
+stop_all_caffeinate() {
+  local pidfile cpid
+  shopt -s nullglob
+  for pidfile in "$MAIN_REPO/.ralph/lock/"caffeinate-*.pid; do
+    cpid=$(cat "$pidfile" 2>/dev/null || echo "")
+    if [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+      echo "  SIGTERM caffeinate $cpid"
+      kill "$cpid" 2>/dev/null || true
+    fi
+    rm -f "$pidfile"
+  done
+  shopt -u nullglob
+}
+
 scoped_ralph_processes() {
   ps -axww -o pid=,ppid=,command= | awk -v script="$RALPH_SCRIPT" '
     {
@@ -130,6 +171,24 @@ if [[ "${1:-}" == "--status" ]]; then
   else
     echo "Claims: (no state.json yet)"
   fi
+  echo
+  echo "Keep-awake (caffeinate):"
+  shopt -s nullglob
+  caf_files=("$MAIN_REPO/.ralph/lock/"caffeinate-*.pid)
+  shopt -u nullglob
+  if [[ ${#caf_files[@]} -eq 0 ]]; then
+    echo "  (none)"
+  else
+    for pidfile in "${caf_files[@]}"; do
+      pid=$(cat "$pidfile" 2>/dev/null || echo "")
+      worker_n=$(basename "$pidfile" .pid | sed 's/^caffeinate-//')
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        echo "  worker $worker_n: PID $pid (alive)"
+      else
+        echo "  worker $worker_n: PID $pid (dead, stale pidfile — will be cleaned on --stop/--cleanup)"
+      fi
+    done
+  fi
   exit 0
 fi
 
@@ -138,12 +197,14 @@ if [[ "${1:-}" == "--stop" ]]; then
   pids=$(scoped_ralph_processes | awk '{print $1}')
   if [[ -z "$pids" ]]; then
     echo "No ralph workers running for $MAIN_REPO."
+    stop_all_caffeinate
     exit 0
   fi
   for pid in $pids; do
     echo "  SIGTERM $pid"
     kill "$pid" 2>/dev/null || true
   done
+  stop_all_caffeinate
   exit 0
 fi
 
@@ -201,6 +262,7 @@ if [[ "${1:-}" == "--cleanup" ]]; then
     done
     sleep 2
   fi
+  stop_all_caffeinate
   cleanup_worktrees
   exit $?
 fi
@@ -266,6 +328,7 @@ if [[ "${1:-}" == "--foreground" ]]; then
   cd "$(worker_repo 1)"
   release_lockdir "$SETUP_LOCK"
   trap - EXIT
+  spawn_caffeinate 1 "$$"
   RALPH_WORKER_ID=1 exec "$MAIN_REPO/.ralph/ralph.sh"
 fi
 
@@ -281,8 +344,10 @@ for ((i = 1; i <= PARALLELISM; i++)); do
   mkdir -p "$(dirname "$worker_log")"
   RALPH_WORKER_ID=$i nohup "$MAIN_REPO/.ralph/ralph.sh" \
     >>"$worker_log" 2>&1 < /dev/null &
+  worker_pid=$!
   disown
-  echo "  worker $i PID: $!  → $worker_log"
+  echo "  worker $i PID: $worker_pid  → $worker_log"
+  spawn_caffeinate "$i" "$worker_pid"
 done
 
 # Aggregate startup line into shared loop.out for backward-compat dashboard.
