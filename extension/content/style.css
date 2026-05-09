@@ -924,6 +924,11 @@ li:hover {
   color: #f0c674;
   flex-shrink: 0;
 }
+.issue-preview-row .warning.warning--blocking {
+  background: rgba(248, 81, 73, 0.12);
+  border-color: rgba(248, 81, 73, 0.4);
+  color: #ffa198;
+}
 .warning-icon {
   font-size: 12px;
 }

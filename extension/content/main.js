@@ -985,9 +985,11 @@ function renderIssuePreview(preview) {
     const milestone = issue.milestone ? 
       `<span class="milestone">${escapeHtml(issue.milestone)}</span>` : '';
     const warnings = warningsByIssue.get(issue.number) || [];
-    const warningHtml = warnings.map(w => 
-      `<div class="warning"><span class="warning-icon">⚠</span> ${escapeHtml(w.message)}</div>`
-    ).join('');
+    const warningHtml = warnings.map(w => {
+      const blockingClass = w.blocking ? ' warning--blocking' : '';
+      const icon = w.blocking ? '🚫' : '⚠';
+      return `<div class="warning${blockingClass}"><span class="warning-icon">${icon}</span> ${escapeHtml(w.message)}</div>`;
+    }).join('');
     
     return `
       <div class="issue-preview-row" data-issue-number="${issue.number}">
