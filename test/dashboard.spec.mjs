@@ -1203,3 +1203,169 @@ test("queue timeline - is primary panel when run is active", async ({ page }) =>
   const workersPanel = page.locator(".panel.current");
   await expect(workersPanel).toHaveClass(/secondary/);
 });
+
+// ─── Issue preview — preflight warnings ──────────────────────────────────────
+
+test("issue preview - renders needs_triage warning with nonblocking style", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        openSlices: [],
+        workers: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 10, title: "Half-baked", labels: [], milestone: null, url: "https://github.com/test/repo/issues/10" },
+          ],
+          warnings: [
+            { issueNumber: 10, type: "needs_triage", message: "Issue #10 still has the needs-triage label", blocking: false },
+          ],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const row = page.locator('[data-issue-number="10"]');
+  await expect(row).toBeVisible();
+  await expect(row.locator('.warning')).toBeVisible();
+  await expect(row.locator('.warning')).toContainText("needs-triage");
+  // Nonblocking: should NOT have the blocking class
+  await expect(row.locator('.warning.warning--blocking')).toHaveCount(0);
+});
+
+test("issue preview - renders not_ready_for_agent warning with nonblocking style", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        openSlices: [],
+        workers: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 11, title: "Not AFK safe", labels: [], milestone: null, url: "https://github.com/test/repo/issues/11" },
+          ],
+          warnings: [
+            { issueNumber: 11, type: "not_ready_for_agent", message: "Issue #11 is missing the ready-for-agent label", blocking: false },
+          ],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const row = page.locator('[data-issue-number="11"]');
+  await expect(row).toBeVisible();
+  await expect(row.locator('.warning')).toContainText("ready-for-agent");
+  await expect(row.locator('.warning.warning--blocking')).toHaveCount(0);
+});
+
+test("issue preview - renders unresolved_blocker warning", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        openSlices: [],
+        workers: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 12, title: "Blocked task", labels: [], milestone: null, url: "https://github.com/test/repo/issues/12" },
+          ],
+          warnings: [
+            { issueNumber: 12, type: "unresolved_blocker", message: "Issue #12 is blocked by open issue #5", blockerNumber: 5, blocking: false },
+          ],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const row = page.locator('[data-issue-number="12"]');
+  await expect(row).toBeVisible();
+  await expect(row.locator('.warning')).toContainText("#5");
+  await expect(row.locator('.warning.warning--blocking')).toHaveCount(0);
+});
+
+test("issue preview - blocking warning uses warning--blocking class and distinct icon", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.copilot = {
+      getStatus: () => Promise.resolve({
+        timestamp: new Date().toISOString(),
+        loopRunning: false,
+        openSlices: [],
+        workers: [],
+        config: {
+          repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+          profile: "generic",
+          validation: { commands: [] },
+          warnings: [],
+        },
+        issuePreview: {
+          issues: [
+            { number: 13, title: "Needs triage", labels: [], milestone: null, url: "https://github.com/test/repo/issues/13" },
+          ],
+          warnings: [
+            { issueNumber: 13, type: "needs_triage", message: "Issue #13 still has the needs-triage label", blocking: true },
+          ],
+        },
+      }),
+      startLoop: () => Promise.resolve({ ok: true }),
+      stopLoop: () => Promise.resolve({ ok: true }),
+      getPrDetail: () => Promise.resolve(null),
+      getIssueDetail: () => Promise.resolve(null),
+    };
+  });
+  await page.goto(baseUrl);
+  await page.waitForFunction(
+    () => document.getElementById("last-updated").textContent !== "—",
+  );
+
+  const row = page.locator('[data-issue-number="13"]');
+  await expect(row).toBeVisible();
+  // Blocking warning should have the blocking class
+  await expect(row.locator('.warning.warning--blocking')).toHaveCount(1);
+  // Blocking icon is 🚫
+  await expect(row.locator('.warning-icon')).toContainText("🚫");
+});

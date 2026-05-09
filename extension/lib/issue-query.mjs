@@ -16,7 +16,7 @@ import { spawnSync } from "node:child_process";
  * @returns {Array<Object>} .warnings - Nonblocking warnings
  * @returns {Object|null} .error - Error object if query failed
  */
-export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, claimedIssues = [] }) {
+export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, claimedIssues = [], parsedDependencies = null, config = {} }) {
   try {
     // Validate claimedIssues is an array
     if (!Array.isArray(claimedIssues)) {
@@ -54,9 +54,15 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
     
     const warnings = [];
     const claimedSet = new Set(claimedIssues);
+    const preflight = config?.preflight ?? {};
     
     // Normalize to preview format
     const issues = rawIssues.map(issue => {
+      // Normalize labels early so checks use plain strings
+      const labels = Array.isArray(issue.labels)
+        ? issue.labels.map(l => l?.name).filter(Boolean)
+        : [];
+
       // Check for empty body
       if (!issue.body || issue.body.trim() === "") {
         warnings.push({
@@ -89,12 +95,47 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
           message: `Issue #${issue.number} is already claimed in another active run`,
         });
       }
+
+      // Check needs-triage label
+      if (labels.includes("needs-triage")) {
+        warnings.push({
+          issueNumber: issue.number,
+          type: "needs_triage",
+          message: `Issue #${issue.number} still has the needs-triage label`,
+          blocking: preflight.requireNotNeedsTriage === true,
+        });
+      }
+
+      // Check ready-for-agent label
+      if (!labels.includes("ready-for-agent")) {
+        warnings.push({
+          issueNumber: issue.number,
+          type: "not_ready_for_agent",
+          message: `Issue #${issue.number} is missing the ready-for-agent label`,
+          blocking: preflight.requireReadyForAgent === true,
+        });
+      }
+
+      // Check unresolved blockers (graceful fallback when dep parser not available)
+      const rawBlockers = parsedDependencies?.[issue.number];
+      const blockers = Array.isArray(rawBlockers) ? rawBlockers : [];
+      for (const blocker of blockers) {
+        if (blocker && blocker.isOpen === true && Number.isInteger(blocker.number)) {
+          warnings.push({
+            issueNumber: issue.number,
+            type: "unresolved_blocker",
+            message: `Issue #${issue.number} is blocked by open issue #${blocker.number}`,
+            blockerNumber: blocker.number,
+            blocking: false,
+          });
+        }
+      }
       
       return {
         number: issue.number,
         title: issue.title,
         body: issue.body,
-        labels: Array.isArray(issue.labels) ? issue.labels.map(l => l.name) : [],
+        labels,
         milestone: issue.milestone ? issue.milestone.title : null,
         url: issue.url,
       };
