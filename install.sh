@@ -221,6 +221,12 @@ EOF
 
   echo "✅ Loop scripts installed. Customize $ralph_dir/RALPH.md if needed."
   echo "   To start the loop: $ralph_dir/launch.sh"
+  echo ""
+  echo "⚠️  Remember to create the required Ralph labels in your target repo:"
+  echo "   gh label create needs-triage    --color E4E669 --description 'Needs human triage before agent work'"
+  echo "   gh label create ready-for-agent --color 0075CA --description 'Safe for AFK Ralph workers to pick up'"
+  echo "   gh label create hitl            --color B60205 --description 'Requires human interaction; not safe for AFK Ralph workers'"
+  echo "   See docs/labels.md for full label vocabulary."
 }
 
 install_extension() {
