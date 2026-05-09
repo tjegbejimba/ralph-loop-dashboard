@@ -11,8 +11,9 @@
 #   .ralph/launch.sh --status     # show running workers + claims
 #   .ralph/launch.sh --stop       # SIGTERM all workers
 #   .ralph/launch.sh --cleanup    # stop workers and remove clean loop worktrees
-#   .ralph/launch.sh --enqueue <N>... # set issue.numbers in .ralph/config.json
-#   .ralph/launch.sh --help       # show this usage text
+#   .ralph/launch.sh --enqueue <N>... # write issue numbers to config.json
+#   .ralph/launch.sh --enqueue-prd <N> # resolve PRD slices and enqueue
+#   .ralph/launch.sh --help       # show usage
 #
 # Configuration (env vars, all optional):
 #   RALPH_PARALLELISM  Number of concurrent workers (default: 1)
@@ -36,63 +37,6 @@ MAIN_REPO="${RALPH_MAIN_REPO:-$DEFAULT_MAIN}"
 LOOP_REPO_BASE="${RALPH_LOOP_REPO:-${MAIN_REPO}-ralph}"
 LOOP_BRANCH_BASE="${RALPH_LOOP_BRANCH:-ralph-loop}"
 PARALLELISM="${RALPH_PARALLELISM:-1}"
-
-# --help: print usage and exit.
-if [[ "${1:-}" == "--help" ]]; then
-  sed -n '/^# Usage:/,/^#$/p' "$0" | sed 's/^# \{0,1\}//'
-  exit 0
-fi
-
-# --enqueue: write issue numbers into .ralph/config.json and exit.
-if [[ "${1:-}" == "--enqueue" ]]; then
-  shift
-  if [[ $# -eq 0 ]]; then
-    echo "❌ --enqueue requires at least one issue number" >&2
-    exit 1
-  fi
-  # Validate: all must be positive integers; reject duplicates.
-  seen=()
-  for n in "$@"; do
-    if ! [[ "$n" =~ ^[1-9][0-9]*$ ]]; then
-      echo "❌ Invalid issue number: '$n' (must be a positive integer)" >&2
-      exit 1
-    fi
-    for s in "${seen[@]:-}"; do
-      if [[ "$s" == "$n" ]]; then
-        echo "❌ Duplicate issue number: $n" >&2
-        exit 1
-      fi
-    done
-    seen+=("$n")
-  done
-  config_file="$MAIN_REPO/.ralph/config.json"
-  if [[ ! -f "$config_file" ]]; then
-    echo "❌ .ralph/config.json not found at: $config_file" >&2
-    exit 1
-  fi
-  # Build new numbers array (compact JSON).
-  new_nums=$(printf '%s\n' "$@" | jq -R 'tonumber' | jq -sc '.')
-  # Read current numbers for idempotency check and display.
-  if ! current_nums=$(jq -c '(.issue.numbers // [])' "$config_file"); then
-    echo "❌ Failed to parse .ralph/config.json — not valid JSON" >&2
-    exit 1
-  fi
-  old_display=$(jq -r '(.issue.numbers // []) | map("#" + tostring) | join(" ")' "$config_file")
-  # Idempotency: skip write if numbers already match.
-  if [[ "$current_nums" == "$new_nums" ]]; then
-    echo "No change: issue.numbers already [$(printf '#%s ' "$@" | sed 's/ $//' )]"
-    exit 0
-  fi
-  # Atomic write: write to a temp file in the same directory then rename.
-  tmp_file=$(mktemp "${config_file}.XXXXXX")
-  trap 'rm -f "$tmp_file"' EXIT
-  jq --argjson nums "$new_nums" '.issue.numbers = $nums' "$config_file" > "$tmp_file"
-  mv "$tmp_file" "$config_file"
-  trap - EXIT
-  new_display=$(printf '%s\n' "$@" | sed 's/^/#/' | tr '\n' ' ' | sed 's/ $//')
-  echo "Enqueued $# issue(s): $new_display (was: $old_display)"
-  exit 0
-fi
 
 RALPH_SCRIPT="$(cd "$MAIN_REPO/.ralph" && pwd -P)/ralph.sh"
 
