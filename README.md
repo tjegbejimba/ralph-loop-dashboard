@@ -155,9 +155,23 @@ coordinate via `.ralph/state.json` (file-locked).
 RALPH_PARALLELISM=2 .ralph/launch.sh
 ```
 
-A worker only claims an issue whose **Blocked by** issues are all CLOSED, so
-the dependency graph from your sliced issues is honored automatically. Stale
-claims (worker crashed) are auto-reaped on the next selection round.
+A worker only claims an issue whose **Blocked by** issues are satisfied, so the
+dependency graph from your sliced issues is honored automatically. Use a
+dependency section in the issue body:
+
+```markdown
+## Blocked by
+- #123
+- #124
+```
+
+`## Blocked by` is the canonical syntax. Dashboard parsing also treats
+`## Depends on` as an alias. A blocker is satisfied only when the blocker issue
+was closed by a merged PR, not merely closed manually. Stale claims (worker
+crashed) are auto-reaped on the next selection round.
+
+See [Dependency-aware run queues](docs/dependency-aware-run-queues.md) for the
+planned dashboard preflight contract.
 
 Or use the dashboard's "Start" button (after restarting Copilot CLI):
 
