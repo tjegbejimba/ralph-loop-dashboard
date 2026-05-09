@@ -238,6 +238,21 @@ is_issue_satisfied() {
       return
     fi
   done
+  # Release-branch fallback: GitHub does not populate
+  # closedByPullRequestsReferences for PRs whose base != default branch.
+  # When RALPH_RELEASE_BRANCH is set, accept state=CLOSED + a merged PR with
+  # closing-keyword body match into the release branch as satisfied. See
+  # docs/release-branch.md.
+  if [[ -n "${RALPH_RELEASE_BRANCH:-}" ]]; then
+    local found
+    found=$(gh pr list --repo "$REPO" --state merged --base "$RALPH_RELEASE_BRANCH" \
+      --search "in:body \"Closes #${n}\" OR in:body \"Fixes #${n}\" OR in:body \"Resolves #${n}\"" \
+      --json number -q '.[0].number' 2>/dev/null || echo "")
+    if [[ -n "$found" && "$found" != "null" ]]; then
+      echo 1
+      return
+    fi
+  fi
   echo 0
 }
 
