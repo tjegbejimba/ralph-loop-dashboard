@@ -186,6 +186,9 @@ Each issue body should describe the slice's intent + acceptance criteria. The lo
 .ralph/launch.sh --status            # active workers + claims
 .ralph/launch.sh --stop              # SIGTERM all workers
 .ralph/launch.sh --cleanup           # stop workers + remove clean worker worktrees
+.ralph/launch.sh --enqueue <N>...    # write issue numbers to config.json
+.ralph/launch.sh --enqueue-prd <N>   # resolve PRD slices and enqueue them
+.ralph/launch.sh --help | -h         # print flag list and exit
 ```
 
 ### Parallel workers
