@@ -291,6 +291,7 @@ Environment variables still override config:
 | `RALPH_PARALLELISM` | `1` | Number of concurrent workers |
 | `RALPH_WORKER_ID` | `1` | Set automatically by `launch.sh`; identifies a worker in `state.json` and log filenames |
 | `RALPH_POLL_SEC` | `30` | How long a worker sleeps when no eligible issue is available |
+| `RALPH_IDLE_EXIT_POLLS` | `20` | Consecutive idle polls before a worker exits (0 = disabled, "sleep forever") |
 | `RALPH_REPO_ROOT` | walks up from cwd | Override for the dashboard's project detection |
 
 To customize the title pattern (e.g., for "Task N:" instead of "Slice N:"):
@@ -299,6 +300,53 @@ To customize the title pattern (e.g., for "Task N:" instead of "Slice N:"):
 export RALPH_TITLE_REGEX='^Task [0-9]+:'
 export RALPH_TITLE_NUM_REGEX='^Task (?<x>[0-9]+):'
 export RALPH_ISSUE_SEARCH='Task in:title'
+```
+
+## Idle worker timeout
+
+Workers automatically exit after a configurable number of consecutive "no claimable issue" polls, preventing quota burns when all queue items have resolved.
+
+**Default**: 20 consecutive idle polls (~10 minutes at the default 30-second poll interval).
+
+```bash
+# Shrink the idle window to 5 minutes
+export RALPH_IDLE_EXIT_POLLS=10   # 10 × 30s = 5 min
+
+# Disable idle exit (legacy "sleep forever" behaviour)
+export RALPH_IDLE_EXIT_POLLS=0
+```
+
+The counter also resets to 0 whenever a worker successfully claims an issue, so a worker that alternates between idle waits and active iterations will not exit prematurely.
+
+You can also set `worker.idleExitAfterPolls` in `.ralph/config.json`; the env var takes precedence:
+
+```json
+{
+  "worker": { "idleExitAfterPolls": 10 }
+}
+```
+
+When the threshold fires the worker logs: `⏸  Worker N: idle for X polls, exiting.` and exits 0.
+
+## Stale-script detection
+
+When `launch.sh` detects that `ralph/ralph.sh` (the source in the Ralph checkout) is newer than `.ralph/ralph.sh` (the installed copy), it refuses to start and prints:
+
+```
+❌ Your installed scripts are stale — run ./install.sh <repo> --scripts-only
+   (pass --force to launch anyway)
+```
+
+This catches the common regression where a fix lands in the source but the installed copy in the target repo was never refreshed. Refresh with:
+
+```bash
+./install.sh /path/to/project --scripts-only
+```
+
+Pass `--force` to override the check (e.g., when you intentionally want to test an older copy):
+
+```bash
+.ralph/launch.sh --force
 ```
 
 ## Workflow guarantees

@@ -40,6 +40,19 @@ PARALLELISM="${RALPH_PARALLELISM:-1}"
 
 RALPH_SCRIPT="$(cd "$MAIN_REPO/.ralph" && pwd -P)/ralph.sh"
 
+# Strip --force from $@ early so all sub-commands benefit from the flag.
+FORCE=0
+_filtered_args=()
+for _a in "$@"; do
+  if [[ "$_a" == "--force" ]]; then
+    FORCE=1
+  else
+    _filtered_args+=("$_a")
+  fi
+done
+set -- "${_filtered_args[@]:-}"
+unset _filtered_args _a
+
 # Repo slug for gh calls; respects RALPH_REPO override.
 REPO="${RALPH_REPO:-$(git -C "$MAIN_REPO" config --get remote.origin.url 2>/dev/null \
   | sed -E 's#(git@github.com:|https://github.com/)##; s/\.git$//' || true)}"
@@ -231,6 +244,13 @@ Options:
   --stop          Send SIGTERM to all scoped Ralph workers.
   --cleanup       Stop workers and remove clean loop worktrees.
   --help, -h      Print this message and exit.
+  --force         Override stale-script check (see below).
+
+Stale-script check:
+  When both ralph/ralph.sh (source) and .ralph/ralph.sh (installed) are present
+  and the source is newer, launch refuses with a hint to run:
+    ./install.sh <repo> --scripts-only
+  Pass --force to bypass this check.
 
 Environment:
   RALPH_PARALLELISM   Number of concurrent workers (default: 1)
@@ -512,6 +532,29 @@ NODEEOF
   echo "Enqueued PRD #${_prd_n} (${_afk_count} AFK slices, ${_hitl_count} HITL skipped, ${_blocker_count} unresolved blockers): ${_issues_display}"
   exit 0
 fi
+
+# Stale-script detection: when both ralph/ralph.sh (source) and
+# .ralph/ralph.sh (installed copy) exist, refuse to launch if the source is
+# newer than the installed copy. This catches the regression where fixes land
+# in the source but workers keep running the stale installed version.
+# Only applies to the launch/foreground paths; status/stop/cleanup/enqueue
+# are exempt so operators can always inspect and kill stuck workers.
+_src_ralph="$MAIN_REPO/ralph/ralph.sh"
+_ins_ralph="$MAIN_REPO/.ralph/ralph.sh"
+if [[ -f "$_src_ralph" && -f "$_ins_ralph" ]]; then
+  _src_mtime=$(stat -f %m "$_src_ralph" 2>/dev/null || stat -c %Y "$_src_ralph" 2>/dev/null || echo "")
+  _ins_mtime=$(stat -f %m "$_ins_ralph" 2>/dev/null || stat -c %Y "$_ins_ralph" 2>/dev/null || echo "")
+  if [[ -n "$_src_mtime" && -n "$_ins_mtime" && "$_src_mtime" -gt "$_ins_mtime" ]]; then
+    if [[ "$FORCE" -eq 1 ]]; then
+      echo "⚠️  Installed scripts are stale but --force override active." >&2
+    else
+      echo "❌ Your installed scripts are stale — run ./install.sh <repo> --scripts-only" >&2
+      echo "   (pass --force to launch anyway)" >&2
+      exit 1
+    fi
+  fi
+fi
+unset _src_ralph _ins_ralph _src_mtime _ins_mtime
 
 # --foreground only meaningful with single worker — fan-out doesn't have
 # anywhere to attach.

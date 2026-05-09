@@ -70,6 +70,16 @@ POLL_SEC="${RALPH_POLL_SEC:-30}"
 RUN_ID="${RALPH_RUN_ID:-}"
 ONCE=0
 
+# Idle-exit threshold: number of consecutive "no claimable issue" polls before
+# the worker exits cleanly. 0 = disabled (legacy "sleep forever" behaviour).
+_cfg_idle=$(config_get '.worker.idleExitAfterPolls')
+IDLE_EXIT_POLLS="${RALPH_IDLE_EXIT_POLLS:-${_cfg_idle:-20}}"
+if ! [[ "$IDLE_EXIT_POLLS" =~ ^[0-9]+$ ]]; then
+  echo "❌ RALPH_IDLE_EXIT_POLLS must be a non-negative integer (got: $IDLE_EXIT_POLLS)" >&2
+  exit 1
+fi
+unset _cfg_idle
+
 # Parse --run-id flag (overrides RALPH_RUN_ID env var)
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -208,6 +218,10 @@ wait_for_issue_closed_by_merged_pr() {
   return 1
 }
 
+# Counts consecutive poll cycles where no claimable issue was found.
+# Reset to 0 whenever a worker successfully claims an issue.
+_idle_polls=0
+
 while true; do
   # Preflight: clean tree, on main, up to date
   if [[ -n "$(git status --porcelain)" ]]; then
@@ -292,6 +306,11 @@ while true; do
         exit 0
       fi
       echo "⏸  Worker $WORKER_ID: no claimable issues in run $RUN_ID queue (terminal=$terminal_count/$total); sleeping ${POLL_SEC}s."
+      _idle_polls=$((_idle_polls + 1))
+      if [[ "$IDLE_EXIT_POLLS" -gt 0 && "$_idle_polls" -ge "$IDLE_EXIT_POLLS" ]]; then
+        echo "⏸  Worker $WORKER_ID: idle for $_idle_polls polls, exiting."
+        exit 0
+      fi
       sleep "$POLL_SEC"
       continue
     fi
@@ -387,6 +406,11 @@ while true; do
         exit 0
       fi
       echo "⏸  Worker $WORKER_ID: no eligible issue (remaining=$remaining, claimed=$(echo "$claimed_set" | wc -l | tr -d ' ')); sleeping ${POLL_SEC}s."
+      _idle_polls=$((_idle_polls + 1))
+      if [[ "$IDLE_EXIT_POLLS" -gt 0 && "$_idle_polls" -ge "$IDLE_EXIT_POLLS" ]]; then
+        echo "⏸  Worker $WORKER_ID: idle for $_idle_polls polls, exiting."
+        exit 0
+      fi
       sleep "$POLL_SEC"
       continue
     fi
@@ -432,6 +456,7 @@ while true; do
   fi
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
   CURRENT_CLAIM="$num"
+  _idle_polls=0  # Reset idle counter: worker successfully claimed an issue
   # In run-aware mode, also update status.json atomically under same lock
   if [[ -n "$RUN_ID" ]]; then
     status_update_item "$num" "claimed" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
