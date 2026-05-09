@@ -293,6 +293,8 @@ Environment variables still override config:
 | `RALPH_POLL_SEC` | `30` | How long a worker sleeps when no eligible issue is available |
 | `RALPH_IDLE_EXIT_POLLS` | `20` | Consecutive idle polls before a worker exits (0 = disabled, "sleep forever") |
 | `RALPH_REPO_ROOT` | walks up from cwd | Override for the dashboard's project detection |
+| `RALPH_RELEASE_BRANCH` | unset | Name of a non-default base branch to target (e.g. `multi-user`, `next`, `v2`). When set, the post-iteration verifier accepts PRs merged into that branch as closing their referenced issue, and may call `gh pr merge` + `gh issue close` itself if copilot leaves a green PR open. See [`docs/release-branch.md`](docs/release-branch.md). |
+| `RALPH_BRANCH_PREFIX` | unset | Per-issue branch prefix used by the branch-only fallback (e.g. `mu-`, `release-`). Only meaningful when `RALPH_RELEASE_BRANCH` is also set. If copilot pushed `${prefix}${N}-…` but never opened a PR, the verifier opens one and retries the merge. |
 
 To customize the title pattern (e.g., for "Task N:" instead of "Slice N:"):
 

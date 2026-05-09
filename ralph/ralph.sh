@@ -68,6 +68,12 @@ TIMEOUT_SEC="${RALPH_TIMEOUT_SEC:-7200}"
 AUTOPILOT_CONTINUES="${RALPH_AUTOPILOT_CONTINUES:-15}"
 POLL_SEC="${RALPH_POLL_SEC:-30}"
 RUN_ID="${RALPH_RUN_ID:-}"
+# Release-branch flow (opt-in). When RALPH_RELEASE_BRANCH is set, the verifier
+# also accepts PRs merged into that branch as closing their referenced issue,
+# and may call `gh pr merge` + `gh issue close` itself if copilot left a green
+# PR open or pushed a branch without opening a PR. See docs/release-branch.md.
+RELEASE_BRANCH="${RALPH_RELEASE_BRANCH:-}"
+BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-}"
 ONCE=0
 
 # Idle-exit threshold: number of consecutive "no claimable issue" polls before
@@ -588,6 +594,38 @@ ${issue_text}"
         | head -1)
       if [[ -n "$fallback_pr" ]]; then
         echo "✅ Found merged PR #$fallback_pr referencing 'Closes #$num' — accepting." >&2
+        merged_count=1
+      fi
+    fi
+
+    # Release-branch flow (opt-in via RALPH_RELEASE_BRANCH). GitHub does not
+    # auto-link `Closes #N` for PRs whose base != default branch, so closure
+    # has to be done explicitly. We try, in order:
+    #   (a) merge an open PR into the release branch + manually close issue;
+    #   (b) if BRANCH_PREFIX is set and a `${prefix}${num}-…` branch was pushed
+    #       with no PR, open one and retry (a);
+    #   (c) accept state=CLOSED + a release-branch PR merged in this iteration.
+    if [[ "$merged_count" -lt 1 && -n "$RELEASE_BRANCH" && "$state" != "CLOSED" ]]; then
+      if ralph_merge_release_branch_pr_for_issue "$num" "$RELEASE_BRANCH"; then
+        state="CLOSED"
+        merged_count=1
+      elif [[ -n "$BRANCH_PREFIX" ]] && ralph_open_pr_for_pushed_branch "$num" "$RELEASE_BRANCH" "$BRANCH_PREFIX"; then
+        sleep 15  # give the new PR a moment to register checks
+        if ralph_merge_release_branch_pr_for_issue "$num" "$RELEASE_BRANCH"; then
+          state="CLOSED"
+          merged_count=1
+        fi
+      fi
+    fi
+    if [[ "$merged_count" -lt 1 && -n "$RELEASE_BRANCH" && "$state" == "CLOSED" ]]; then
+      echo "ℹ️  Issue #$num: checking recent merged PRs into release branch '$RELEASE_BRANCH' since $iter_start_ts..." >&2
+      release_pr=$(gh pr list --repo "$REPO" --state merged --limit 20 --base "$RELEASE_BRANCH" \
+        --search "in:body \"#$num\"" \
+        --json number,body,mergedAt,baseRefName \
+        --jq ".[] | select(.mergedAt > \"$iter_start_ts\") | select(.baseRefName == \"$RELEASE_BRANCH\") | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | .number" \
+        | head -1)
+      if [[ -n "$release_pr" ]]; then
+        echo "✅ Found merged PR #$release_pr into release branch '$RELEASE_BRANCH' referencing #$num — accepting." >&2
         merged_count=1
       fi
     fi
