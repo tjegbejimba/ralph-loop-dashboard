@@ -101,7 +101,7 @@ echo "PASS Test 4"
 echo "Test 5: negative integer is rejected"
 echo "$REFERENCE_CONFIG" > "$TEST_ROOT/.ralph/config.json"
 set +e
-output=$(enqueue -- -1 2>&1)
+output=$(enqueue -1 2>&1)
 status=$?
 set -e
 if [[ "$status" -eq 0 ]]; then
@@ -193,6 +193,23 @@ if ! echo "$output" | grep -q "\-\-enqueue"; then
   exit 1
 fi
 echo "PASS Test 10"
+
+# ---------------------------------------------------------------------------
+echo "Test 11: --enqueue with no arguments is rejected"
+echo "$REFERENCE_CONFIG" > "$TEST_ROOT/.ralph/config.json"
+set +e
+output=$(enqueue 2>&1)
+status=$?
+set -e
+if [[ "$status" -eq 0 ]]; then
+  echo "FAIL Test 11: expected non-zero exit with no arguments"
+  exit 1
+fi
+if ! echo "$output" | grep -qi "at least one\|require"; then
+  echo "FAIL Test 11: error should mention 'at least one': $output"
+  exit 1
+fi
+echo "PASS Test 11"
 
 echo ""
 echo "All enqueue tests passed!"
