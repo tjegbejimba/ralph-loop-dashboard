@@ -1,3 +1,4 @@
+<!-- RALPH_PRD_REF: {{PRD_REFERENCE}} -->
 # Ralph TDD Loop — Per-Iteration Prompt
 
 You are working through ONE slice of {{PRD_REFERENCE}} in `{{REPO}}`. The full issue body for the slice you must implement is appended at the end of this prompt under `--- ISSUE #N ---`.

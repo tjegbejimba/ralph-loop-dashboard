@@ -96,6 +96,14 @@ fi
 
 RALPH_SCRIPT="$(cd "$MAIN_REPO/.ralph" && pwd -P)/ralph.sh"
 
+# Repo slug for gh calls; respects RALPH_REPO override.
+REPO="${RALPH_REPO:-$(git -C "$MAIN_REPO" config --get remote.origin.url 2>/dev/null \
+  | sed -E 's#(git@github.com:|https://github.com/)##; s/\.git$//' || true)}"
+
+# gh binary — override via RALPH_GH_BIN for tests/CI environments where PATH
+# is manipulated before the script prepends /opt/homebrew/bin.
+GH="${RALPH_GH_BIN:-gh}"
+
 # Validate parallelism
 if ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
   echo "❌ RALPH_PARALLELISM must be a positive integer (got: $PARALLELISM)" >&2
@@ -119,6 +127,48 @@ worker_branch() {
   else
     echo "${LOOP_BRANCH_BASE}-${n}"
   fi
+}
+
+# do_enqueue CONFIG_PATH N1 [N2 ...]
+# Writes issue numbers to config.json's issue.numbers, preserving all other
+# fields. Prints a short summary. Returns non-zero on error.
+do_enqueue() {
+  local config="$1"; shift
+  local numbers=("$@")
+
+  if [[ ! -f "$config" ]]; then
+    echo "❌ .ralph/config.json not found at $config" >&2
+    return 1
+  fi
+
+  # Deduplicate while preserving order (defense-in-depth for callers).
+  local _seen_dedup=() _deduped=() _dup_n
+  for _dup_n in "${numbers[@]}"; do
+    local _already=0
+    local _s
+    for _s in "${_seen_dedup[@]:-}"; do [[ "$_s" == "$_dup_n" ]] && _already=1 && break; done
+    if [[ "$_already" -eq 0 ]]; then
+      _seen_dedup+=("$_dup_n")
+      _deduped+=("$_dup_n")
+    fi
+  done
+  numbers=("${_deduped[@]:-}")
+
+  local nums_json current old_display new_display tmp
+  nums_json=$(printf '%s\n' "${numbers[@]}" | jq -R 'tonumber' | jq -sc '.')
+  current=$(jq -c '.issue.numbers // []' "$config")
+  old_display=$(jq -r '(.issue.numbers // []) | map("#\(.)") | join(" ")' "$config")
+  new_display=$(printf '#%s ' "${numbers[@]}" | sed 's/ $//')
+
+  if [[ "$current" == "$nums_json" ]]; then
+    echo "Enqueued ${#numbers[@]} issues: $new_display (unchanged)"
+    return 0
+  fi
+
+  tmp=$(mktemp)
+  jq --argjson nums "$nums_json" '.issue.numbers = $nums' "$config" > "$tmp"
+  mv "$tmp" "$config"
+  echo "Enqueued ${#numbers[@]} issues: $new_display (was: $old_display)"
 }
 
 # Source the state-lock helpers so we can use the same PID-stamped lockdir
@@ -210,6 +260,44 @@ scoped_ralph_processes() {
 }
 
 # --status: print active workers + claims and exit.
+if [[ "${1:-}" == "--help" ]]; then
+  cat <<'USAGE'
+Usage:
+  .ralph/launch.sh                          # background, logs to .ralph/logs/
+  .ralph/launch.sh --foreground             # attached (parallelism=1 only)
+  .ralph/launch.sh --status                 # show running workers + claims
+  .ralph/launch.sh --stop                   # SIGTERM all workers
+  .ralph/launch.sh --cleanup                # stop workers + remove worktrees
+  .ralph/launch.sh --enqueue <N>...         # write issue numbers to config.json
+  .ralph/launch.sh --enqueue-prd <N>        # resolve PRD slices and enqueue them
+
+Options:
+  --enqueue <N>...
+      Updates .ralph/config.json issue.numbers to the provided list, preserving
+      all other fields. N must be positive integers. Idempotent.
+
+  --enqueue-prd <N>
+      Given a PRD issue number, finds all open AFK child slices (label:ready-for-
+      agent, not label:hitl, unassigned) via GitHub search, enqueues them via
+      --enqueue, and updates the {{PRD_REFERENCE}} in .ralph/RALPH.md.
+      Mutually exclusive with --enqueue.
+
+  --foreground    Run the worker loop in the foreground (RALPH_PARALLELISM=1 only).
+  --status        Print running workers and issue claims.
+  --stop          Send SIGTERM to all scoped Ralph workers.
+  --cleanup       Stop workers and remove clean loop worktrees.
+
+Environment:
+  RALPH_PARALLELISM   Number of concurrent workers (default: 1)
+  RALPH_MAIN_REPO     Path to main checkout
+  RALPH_LOOP_REPO     Base path for loop worktree(s)
+  RALPH_LOOP_BRANCH   Base branch name for loop worktree(s)
+  RALPH_REPO          owner/repo slug for gh calls (auto-detected from git remote)
+  RALPH_GH_BIN        Path to gh binary (default: gh)
+USAGE
+  exit 0
+fi
+
 if [[ "${1:-}" == "--status" ]]; then
   state_file="$MAIN_REPO/.ralph/state.json"
   echo "Parallelism: $PARALLELISM"
@@ -325,6 +413,154 @@ if [[ "${1:-}" == "--cleanup" ]]; then
   stop_all_caffeinate
   cleanup_worktrees
   exit $?
+fi
+
+# Mutual exclusivity: --enqueue and --enqueue-prd cannot appear together.
+_has_enqueue=0; _has_enqueue_prd=0
+for _a in "$@"; do
+  [[ "$_a" == "--enqueue" ]]     && _has_enqueue=1
+  [[ "$_a" == "--enqueue-prd" ]] && _has_enqueue_prd=1
+done
+if [[ "$_has_enqueue" -eq 1 && "$_has_enqueue_prd" -eq 1 ]]; then
+  echo "❌ --enqueue and --enqueue-prd are mutually exclusive" >&2
+  exit 1
+fi
+unset _has_enqueue _has_enqueue_prd _a
+
+# --enqueue <N>...: write issue numbers into .ralph/config.json
+if [[ "${1:-}" == "--enqueue" ]]; then
+  shift
+  if [[ $# -eq 0 ]]; then
+    echo "❌ --enqueue requires at least one issue number" >&2
+    exit 1
+  fi
+  for _n in "$@"; do
+    if ! [[ "$_n" =~ ^[1-9][0-9]*$ ]]; then
+      echo "❌ Invalid issue number: $_n (must be a positive integer)" >&2
+      exit 1
+    fi
+  done
+  _seen_enq=()
+  for _n in "$@"; do
+    for _s in "${_seen_enq[@]:-}"; do
+      if [[ "$_s" == "$_n" ]]; then
+        echo "❌ Duplicate issue number: $_n" >&2
+        exit 1
+      fi
+    done
+    _seen_enq+=("$_n")
+  done
+  unset _n _s _seen_enq
+  do_enqueue "$MAIN_REPO/.ralph/config.json" "$@"
+  exit $?
+fi
+
+# --enqueue-prd <N>: resolve PRD child slices, enqueue them, update RALPH.md
+if [[ "${1:-}" == "--enqueue-prd" ]]; then
+  shift
+  if [[ $# -ne 1 ]]; then
+    echo "❌ --enqueue-prd requires exactly one PRD issue number" >&2
+    exit 1
+  fi
+  _prd_n="$1"
+  if ! [[ "$_prd_n" =~ ^[1-9][0-9]*$ ]]; then
+    echo "❌ Invalid PRD issue number: $_prd_n (must be a positive integer)" >&2
+    exit 1
+  fi
+
+  # Verify PRD exists.
+  if ! "$GH" issue view "$_prd_n" --repo "$REPO" --json number >/dev/null 2>&1; then
+    echo "❌ PRD issue #$_prd_n not found in $REPO" >&2
+    exit 1
+  fi
+
+  # Find AFK child slices (ready-for-agent, not hitl, open, unassigned).
+  _afk_json=$("$GH" issue list \
+    --repo "$REPO" \
+    --search "\"Parent #${_prd_n}\" label:ready-for-agent -label:hitl is:open no:assignee" \
+    --json number,labels \
+    --limit 100 2>/dev/null || echo "[]")
+
+  # Count HITL issues separately for the summary line.
+  _hitl_count=$("$GH" issue list \
+    --repo "$REPO" \
+    --search "\"Parent #${_prd_n}\" label:hitl is:open" \
+    --json number \
+    --limit 100 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
+
+  # Collect AFK issue numbers.
+  _afk_numbers=()
+  while IFS= read -r _num; do
+    [[ -n "$_num" ]] && _afk_numbers+=("$_num")
+  done < <(echo "$_afk_json" | jq -r '.[].number' 2>/dev/null || true)
+
+  if [[ ${#_afk_numbers[@]} -eq 0 ]]; then
+    echo "❌ No AFK child slices found for PRD #$_prd_n (${_hitl_count} HITL issues skipped)" >&2
+    exit 1
+  fi
+
+  # Topo-sort via dependency parser if available; otherwise preserve gh order.
+  _dep_parser="$MAIN_REPO/extension/lib/dependency-parser.mjs"
+  _blocker_count=0
+  if [[ -f "$_dep_parser" ]]; then
+    _sorted_result=$(
+      node --input-type=module 2>/dev/null <<NODEEOF || echo '{"sorted":[],"blockers":0}'
+import { parseDependencies } from '${_dep_parser}';
+const numbers = ${_afk_json};
+const sorted = parseDependencies(numbers);
+const sortedNums = sorted.map(i => i.number ?? i);
+const blockers = sorted.filter(i => i.blocked === true).length;
+console.log(JSON.stringify({sorted: sortedNums, blockers}));
+NODEEOF
+    )
+    _sorted_json=$(echo "$_sorted_result" | jq '.sorted // []' 2>/dev/null || echo "[]")
+    _afk_numbers=()
+    while IFS= read -r _num; do
+      [[ -n "$_num" ]] && _afk_numbers+=("$_num")
+    done < <(echo "$_sorted_json" | jq -r '.[]' 2>/dev/null || true)
+    # Restore original order if parser returned empty (error fallback).
+    if [[ ${#_afk_numbers[@]} -eq 0 ]]; then
+      echo "⚠️  Warning: dependency parser returned no results — using original order" >&2
+      _afk_numbers=()
+      while IFS= read -r _num; do
+        [[ -n "$_num" ]] && _afk_numbers+=("$_num")
+      done < <(echo "$_afk_json" | jq -r '.[].number' 2>/dev/null || true)
+      _blocker_count=0
+    else
+      _blocker_count=$(echo "$_sorted_result" | jq '.blockers // 0' 2>/dev/null || echo 0)
+    fi
+  fi
+
+  # Write issue numbers to config via shared enqueue function.
+  do_enqueue "$MAIN_REPO/.ralph/config.json" "${_afk_numbers[@]}"
+
+  # Update RALPH.md: replace {{PRD_REFERENCE}} placeholder and/or the
+  # existing reference following the RALPH_PRD_REF marker comment.
+  _ralph_md="$MAIN_REPO/.ralph/RALPH.md"
+  if [[ ! -f "$_ralph_md" ]]; then
+    echo "⚠️  Warning: .ralph/RALPH.md not found — skipping RALPH.md update"
+  elif ! grep -qF '<!-- RALPH_PRD_REF:' "$_ralph_md"; then
+    echo "⚠️  Warning: .ralph/RALPH.md lacks PRD reference marker (<!-- RALPH_PRD_REF: -->) — skipping RALPH.md update"
+  else
+    # Extract the current reference value from the marker line.
+    _cur_ref=$(sed -nE 's/.*<!-- RALPH_PRD_REF: ([^ >]+) -->.*/\1/p' "$_ralph_md" | head -1)
+    if [[ -z "$_cur_ref" ]]; then
+      echo "⚠️  Warning: RALPH_PRD_REF marker has no value — skipping RALPH.md update"
+    elif [[ "$_cur_ref" != "#${_prd_n}" ]]; then
+      # Escape for use as a sed literal-string pattern (| delimiter).
+      # Curly braces are not special in BRE, so {{PRD_REFERENCE}} is safe as-is.
+      _escaped=$(printf '%s' "$_cur_ref" | sed 's/[.[\*^$]/\\&/g')
+      _tmp=$(mktemp)
+      sed "s|${_escaped}|#${_prd_n}|g" "$_ralph_md" > "$_tmp"
+      mv "$_tmp" "$_ralph_md"
+    fi
+  fi
+
+  # Print summary.
+  _afk_count=${#_afk_numbers[@]}
+  _issues_display=$(printf '#%s ' "${_afk_numbers[@]}" | sed 's/ $//')
+  echo "Enqueued PRD #${_prd_n} (${_afk_count} AFK slices, ${_hitl_count} HITL skipped, ${_blocker_count} unresolved blockers): ${_issues_display}"
+  exit 0
 fi
 
 # --foreground only meaningful with single worker — fan-out doesn't have
