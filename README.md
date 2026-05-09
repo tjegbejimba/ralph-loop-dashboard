@@ -122,6 +122,49 @@ Limitations (these are why WSL2 is still recommended for heavy use):
 Native Windows mode handles single-worker workflows; WSL2 remains required for
 parallel workers and is the most thoroughly tested path.
 
+## Agent skill workflow
+
+Ralph includes a `to-ralph` skill that closes the loop between planning and execution. The full agent-driven workflow:
+
+```
+grill-me → to-prd → to-issues → to-ralph → .ralph/launch.sh
+```
+
+| Step | Skill / Command | What it does |
+|------|-----------------|--------------|
+| 1 | `grill-me` | Interview the user until the plan is fully understood |
+| 2 | `to-prd` | Synthesize context into a PRD and publish it as a GitHub issue |
+| 3 | `to-issues` | Break the PRD into independently-grabbable slice issues |
+| 4 | `to-ralph` | Enqueue issues into Ralph and surface preflight warnings |
+| 5 | `.ralph/launch.sh` | **Human decision** — start workers when ready |
+
+### Using to-ralph
+
+After `to-issues` has filed the slice issues, invoke the `to-ralph` skill:
+
+```
+/to-ralph
+```
+
+The skill will:
+1. Identify the PRD issue number from context (or ask if unclear).
+2. Run `.ralph/launch.sh --enqueue <N>` to write issue numbers into `.ralph/config.json`.
+3. Run `.ralph/launch.sh --status` and parse preflight warnings.
+4. Print either a ✅ **Ready to launch** summary or a ⚠️ list of blockers to fix.
+
+It will **never** start workers — that remains a human decision.
+
+### Installing skills
+
+`install.sh` symlinks the `to-ralph` skill (and any future skills in `skills/`) into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
+
+```bash
+./install.sh /path/to/your/project      # installs scripts + extension + skills
+./install.sh --skills-only              # symlink skills only, no target repo needed
+```
+
+If `~/.agents/skills/` does not exist, install.sh prints an actionable hint instead of failing.
+
 ## File the work as issues
 
 The loop picks issues whose title matches a regex (default: `^Slice [0-9]+:`). Number them sequentially — lowest number runs first. A good shape:

@@ -6,30 +6,81 @@
 #      the target repo so the loop is git-tracked per-project.
 #   2. The dashboard extension gets copied into ~/.copilot/extensions/
 #      so it's available in every Copilot CLI session, not just one repo.
+#   3. The to-ralph skill gets symlinked into ~/.agents/skills/to-ralph
+#      so the global agent gains the "publish PRD → load Ralph" capability.
 #
 # Usage (from inside this repo):
 #   ./install.sh /path/to/your/project
 #   ./install.sh /path/to/your/project --profile python
 #   ./install.sh /path/to/your/project --extension-only
 #   ./install.sh /path/to/your/project --scripts-only --profile bun
+#   ./install.sh --skills-only          # symlink skills only, no repo required
+#   ./install.sh --help                 # show this help
 
 set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./install.sh <target-repo-dir> [OPTIONS]
+       ./install.sh --skills-only
+       ./install.sh --help
+
+Modes (default: --both):
+  --both            Install loop scripts, dashboard extension, and skills (default)
+  --scripts-only    Install only the .ralph/ loop scripts into the target repo
+  --extension-only  Install only the dashboard extension into ~/.copilot/extensions/
+  --skills-only     Symlink agent skills (e.g. to-ralph) into ~/.agents/skills/
+                    No target repo is required for this mode.
+
+Options:
+  --profile <name>  Use a specific config profile (bun | python | generic).
+                    Auto-detected from package.json if omitted.
+  --force-config    Overwrite an existing .ralph/config.json from the profile.
+  --help, -h        Show this help message and exit.
+
+Skills (installed in --both and --skills-only modes):
+  to-ralph          Symlinked to ~/.agents/skills/to-ralph.
+                    Enables the agent to enqueue a PRD into Ralph and surface
+                    preflight warnings before you launch workers.
+
+  If ~/.agents/skills/ does not exist, install.sh prints an actionable hint
+  instead of erroring. Skills are best-effort in --both mode.
+EOF
+}
+
+# Handle --help / -h before any positional argument parsing.
+for arg in "$@"; do
+  if [[ "$arg" == "--help" || "$arg" == "-h" ]]; then
+    usage
+    exit 0
+  fi
+done
 
 TARGET="${1:-}"
 MODE="--both"
 PROFILE=""
 FORCE_CONFIG=0
 
-if [[ -z "$TARGET" ]]; then
-  echo "Usage: $0 <target-repo-dir> [--both | --extension-only | --scripts-only] [--profile bun|python|generic] [--force-config]" >&2
+# --skills-only does not require a target repo directory.
+if [[ "$TARGET" == "--skills-only" ]]; then
+  MODE="--skills-only"
+  TARGET=""
+  shift || true
+elif [[ -z "$TARGET" ]]; then
+  echo "Usage: $0 <target-repo-dir> [--both | --extension-only | --scripts-only | --skills-only] [--profile bun|python|generic] [--force-config]" >&2
   exit 1
+else
+  shift || true
 fi
-shift || true
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --both|--extension-only|--scripts-only)
       MODE="$1"
+      shift
+      ;;
+    --skills-only)
+      MODE="--skills-only"
       shift
       ;;
     --profile)
@@ -51,17 +102,20 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ ! -d "$TARGET" ]]; then
-  echo "❌ Target repo not found: $TARGET" >&2
-  exit 1
-fi
-
-if [[ ! -d "$TARGET/.git" ]]; then
-  echo "❌ Target is not a git repo: $TARGET" >&2
-  exit 1
-fi
-
 REPO_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+# Target repo validation is only required for modes that touch the repo.
+if [[ "$MODE" != "--skills-only" ]]; then
+  if [[ ! -d "$TARGET" ]]; then
+    echo "❌ Target repo not found: $TARGET" >&2
+    exit 1
+  fi
+
+  if [[ ! -d "$TARGET/.git" ]]; then
+    echo "❌ Target is not a git repo: $TARGET" >&2
+    exit 1
+  fi
+fi
 
 detect_profile() {
   local target="$1"
@@ -258,16 +312,47 @@ install_extension() {
   echo "   Restart Copilot CLI (or reload extensions) to load it."
 }
 
+install_skills() {
+  local skills_dir="$HOME/.agents/skills"
+  local install_target="$skills_dir/to-ralph"
+  local source="$REPO_DIR/skills/to-ralph"
+
+  if [[ ! -d "$skills_dir" ]]; then
+    echo "ℹ️  ~/.agents/skills/ not found — to-ralph skill not installed."
+    echo "   Create the directory and re-run to install the skill:"
+    echo "   mkdir -p ~/.agents/skills && $0 --skills-only"
+    return 0
+  fi
+
+  if [[ -e "$install_target" && ! -L "$install_target" ]]; then
+    echo "⚠️  $install_target exists and is not a symlink — leaving untouched." >&2
+    echo "   Remove it manually to install the to-ralph skill." >&2
+    return 1
+  fi
+
+  # Remove stale symlink before re-creating (idempotent).
+  if [[ -L "$install_target" ]]; then
+    rm "$install_target"
+  fi
+
+  ln -s "$source" "$install_target"
+  echo "✅ to-ralph skill symlinked: $install_target -> $source"
+}
+
 case "$MODE" in
   --both|"")
     install_scripts "$TARGET"
     install_extension
+    install_skills 0 || true   # best-effort in --both; never fail the overall install
     ;;
   --scripts-only)
     install_scripts "$TARGET"
     ;;
   --extension-only)
     install_extension
+    ;;
+  --skills-only)
+    install_skills
     ;;
   *)
     echo "Unknown mode: $MODE" >&2
