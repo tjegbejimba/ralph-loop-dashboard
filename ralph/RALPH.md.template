@@ -65,6 +65,16 @@ You MUST use the `tdd` skill (red-green-refactor). Invoke it explicitly via the 
 
 > **Known residual race**: if the target repo does not require branches to be up to date before merging, a third worker can land on `main` between step 10's push and step 11's merge, slipping a stale base through. Tolerated for now — caught by the post-merge CI run on `main` and surfaced as a follow-up issue if it ever bites. To eliminate, enable "Require branches to be up to date before merging" on `main`; Ralph will then rebase and retry instead of bypassing protection.
 
+### Release-branch override (when `$RALPH_RELEASE_BRANCH` is set)
+
+If the environment variable `RALPH_RELEASE_BRANCH` is set (e.g. `multi-user`, `next`, `v2`), the loop is targeting a non-default base branch. In that mode:
+
+- Substitute `$RALPH_RELEASE_BRANCH` for `main` everywhere above (preflight checkout/pull, rebase target, PR `--base`, post-merge fast-forward).
+- If `RALPH_BRANCH_PREFIX` is set (e.g. `mu-`), name your branch `${RALPH_BRANCH_PREFIX}<N>-<short-kebab-name>` instead of `slice-<N>-…`.
+- After step 11's successful merge, you MUST also run `gh issue close <N> --repo {{REPO}} --reason completed --comment "Merged via PR #<pr> into \`$RALPH_RELEASE_BRANCH\`."`. GitHub does **not** auto-close issues from PRs whose base ≠ default branch, even with `Closes #<N>` in the body. This is the one exception to the "never call `gh issue close`" rule below.
+- Step 12's verify check still applies: the issue must be `CLOSED` and `closedByPullRequests` should contain the merged PR (the explicit `gh issue close` makes the first half true; the link itself may or may not populate for non-default bases — that's fine, the verifier accepts the merged PR via body-text matching).
+- See `docs/release-branch.md` for the full design.
+
 ## On failure
 
 - **Tests/lint/build fail locally**: fix and continue. Do not skip tests, do not weaken assertions.
@@ -72,7 +82,7 @@ You MUST use the `tdd` skill (red-green-refactor). Invoke it explicitly via the 
 - **Required checks fail** (step 11): read the logs (`gh run view --log-failed`), fix, push, restart step 10, and retry the normal merge. One re-run is acceptable for an obvious infra flake; otherwise treat as a real failure.
 - **Normal merge fails for permissions or policy** (step 11): do not use `--admin` or weaken branch protection. Convert the PR to draft, comment with the GitHub error, and exit non-zero for human review.
 - **Acceptance criteria can't be met** (spec contradiction, missing dependency, ambiguous requirement): convert the PR to draft, post a comment summarizing the blocker, and **exit non-zero**. Do not merge. Do not close the issue. The loop will halt for human review.
-- **Never** call `gh issue close` directly. The only valid closure is via a merged PR.
+- **Never** call `gh issue close` directly. The only valid closure is via a merged PR. (Exception: when `$RALPH_RELEASE_BRANCH` is set, you MUST run `gh issue close --reason completed` immediately after `gh pr merge` because GitHub does not auto-close from non-default-base merges. Never standalone — only paired with the merge of the closing PR.)
 
 ## Slice 1 special requirements
 

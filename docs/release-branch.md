@@ -60,13 +60,15 @@ fallback exists for resilience, not as the primary closure path.
 
 ## Ground rule update
 
-The "never call `gh issue close`" rule (see `docs/labels.md` and the
-canonical RALPH.md prompts) still applies to the **default-branch** flow.
-For release-branch flows, `gh issue close --reason completed` is invoked by
-the verifier — but only as the second half of `gh pr merge && gh issue
-close`, never standalone. RALPH.md prompts targeting a release branch should
-include an explicit closure step so the agent does it directly when
-possible; the verifier picks up the slack when copilot stops mid-flow.
+The "never call `gh issue close`" rule (see the canonical RALPH.md prompt
+template at `ralph/RALPH.md.template`) still applies to the
+**default-branch** flow. For release-branch flows, `gh issue close --reason
+completed` is invoked by the verifier — but only as the second half of `gh
+pr merge && gh issue close`, never standalone. RALPH.md prompts targeting a
+release branch should include an explicit closure step so the agent does it
+directly when possible; the verifier picks up the slack when copilot stops
+mid-flow. The shipped template (`ralph/RALPH.md.template`) carries this
+exception in its "Release-branch override" section.
 
 ## Related
 
