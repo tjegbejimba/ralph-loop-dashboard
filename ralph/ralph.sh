@@ -50,6 +50,7 @@ TITLE_REGEX="${RALPH_TITLE_REGEX:-$(config_get '.issue.titleRegex')}"
 TITLE_REGEX="${TITLE_REGEX:-^Slice [0-9]+:}"
 TITLE_NUM_RE="${RALPH_TITLE_NUM_REGEX:-$(config_get '.issue.titleNumRegex')}"
 TITLE_NUM_RE="${TITLE_NUM_RE:-^Slice (?<x>[0-9]+):}"
+ISSUE_SEARCH="${RALPH_ISSUE_SEARCH:-$(config_get '.issue.issueSearch')}"
 if ! jq -nr --arg re "$TITLE_REGEX" '"" | test($re)' >/dev/null 2>&1; then
   echo "⚠️  Invalid issue.titleRegex \"$TITLE_REGEX\"; using default Slice pattern." >&2
   TITLE_REGEX="^Slice [0-9]+:"
@@ -298,7 +299,10 @@ while true; do
     # Legacy mode: search GitHub for issues matching TITLE_REGEX
     # Fetch open issues matching the title regex along with their bodies so we
     # can evaluate "Blocked by" sections without an extra round-trip per issue.
+    _gh_search_args=()
+    [[ -n "$ISSUE_SEARCH" ]] && _gh_search_args=(--search "$ISSUE_SEARCH")
     open_json=$(gh issue list --repo "$REPO" --state open --limit 100 \
+      "${_gh_search_args[@]}" \
       --json number,title,body)
 
     # Sort eligible issues by slice number ascending; pick the first one whose
