@@ -316,15 +316,11 @@ install_skills() {
   local skills_dir="$HOME/.agents/skills"
   local install_target="$skills_dir/to-ralph"
   local source="$REPO_DIR/skills/to-ralph"
-  local strict="${1:-0}"   # 1 = fail on missing dir, 0 = hint only
 
   if [[ ! -d "$skills_dir" ]]; then
     echo "ℹ️  ~/.agents/skills/ not found — to-ralph skill not installed."
     echo "   Create the directory and re-run to install the skill:"
     echo "   mkdir -p ~/.agents/skills && $0 --skills-only"
-    if [[ "$strict" -eq 1 ]]; then
-      return 0
-    fi
     return 0
   fi
 
@@ -356,7 +352,7 @@ case "$MODE" in
     install_extension
     ;;
   --skills-only)
-    install_skills 1
+    install_skills
     ;;
   *)
     echo "Unknown mode: $MODE" >&2

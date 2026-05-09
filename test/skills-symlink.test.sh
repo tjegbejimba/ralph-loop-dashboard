@@ -13,19 +13,24 @@ pass() { echo "PASS: $1"; ((pass_count++)) || true; }
 fail() { echo "FAIL: $1"; ((fail_count++)) || true; }
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Single cleanup trap — accumulates all temp dirs, cleaned on exit.
 # ---------------------------------------------------------------------------
+CLEANUP_DIRS=()
+cleanup() { for d in "${CLEANUP_DIRS[@]:-}"; do rm -rf "$d"; done; }
+trap cleanup EXIT
 
 make_fake_home() {
   local h
   h="$(mktemp -d)"
   mkdir -p "$h/.agents/skills"
+  CLEANUP_DIRS+=("$h")
   echo "$h"
 }
 
 make_fake_home_no_skills() {
   local h
   h="$(mktemp -d)"
+  CLEANUP_DIRS+=("$h")
   # intentionally no ~/.agents/skills/
   echo "$h"
 }
@@ -75,7 +80,6 @@ fi
 # Test 2: --skills-only creates symlink in ~/.agents/skills/to-ralph
 # ---------------------------------------------------------------------------
 TEST_HOME="$(make_fake_home)"
-trap 'rm -rf "$TEST_HOME"' EXIT
 
 exit_code=0
 output=$(HOME="$TEST_HOME" "$REPO_ROOT/install.sh" --skills-only 2>&1) || exit_code=$?
@@ -125,7 +129,6 @@ fi
 # Test 4: missing ~/.agents/skills/ prints actionable hint, exits 0
 # ---------------------------------------------------------------------------
 NO_SKILLS_HOME="$(make_fake_home_no_skills)"
-trap 'rm -rf "$NO_SKILLS_HOME"' EXIT
 
 hint_exit=0
 hint_output=$(HOME="$NO_SKILLS_HOME" "$REPO_ROOT/install.sh" --skills-only 2>&1) || hint_exit=$?
@@ -152,7 +155,6 @@ fi
 # Test 5: non-symlink at target path is not clobbered
 # ---------------------------------------------------------------------------
 SAFE_HOME="$(make_fake_home)"
-trap 'rm -rf "$SAFE_HOME"' EXIT
 
 # Place a real file at the target location
 mkdir -p "$SAFE_HOME/.agents/skills"
@@ -177,7 +179,6 @@ fi
 # Test 6: --both mode installs skills (best-effort, does not fail on missing skills dir)
 # ---------------------------------------------------------------------------
 BOTH_HOME="$(make_fake_home)"
-trap 'rm -rf "$BOTH_HOME"' EXIT
 TARGET="$BOTH_HOME/target"
 
 git init -q "$TARGET"
