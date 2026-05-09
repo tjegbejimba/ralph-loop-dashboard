@@ -723,10 +723,19 @@ function renderConfigSummary(config) {
   $("config-summary").innerHTML = `${commandHtml}${warningHtml}`;
 }
 
+function updateHeader(headerText) {
+  const title = headerText || "Ralph Loop";
+  const h1 = $("header-title");
+  if (h1) h1.textContent = title;
+  document.title = title;
+}
+
 function render(s) {
   currentRepoKey = repoKeyFromStatus(s);
   hydrateRunMode(currentRepoKey);
   maybeAutoSeedQueue(s);
+
+  updateHeader(s.headerText);
 
   const dot = $("status-dot");
   dot.classList.remove("green", "red", "yellow");
