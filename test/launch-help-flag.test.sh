@@ -30,9 +30,11 @@ EOF
 chmod +x .ralph/launch.sh .ralph/ralph.sh
 
 # --- Test 1: --help exits 0 and prints usage ---
+set +e
 output=$(RALPH_MAIN_REPO="$MAIN_REPO" RALPH_LOOP_REPO="$LOOP_REPO" \
   "$MAIN_REPO/.ralph/launch.sh" --help 2>&1)
 status=$?
+set -e
 
 if [[ "$status" -ne 0 ]]; then
   echo "FAIL: --help should exit 0, got $status"
@@ -102,7 +104,30 @@ if [[ -d "$LOOP_REPO" ]]; then
 fi
 echo "PASS: unknown flag exits non-zero with error + usage"
 
-# --- Test 4: bare invocation gets past flag parsing (no "unknown option:" error) ---
+# --- Test 4: --foreground --bogus exits non-zero (guard checks all args) ---
+set +e
+output=$(RALPH_MAIN_REPO="$MAIN_REPO" RALPH_LOOP_REPO="$LOOP_REPO" \
+  RALPH_PARALLELISM=1 \
+  "$MAIN_REPO/.ralph/launch.sh" --foreground --bogus 2>&1)
+fg_bogus_status=$?
+set -e
+
+if [[ "$fg_bogus_status" -eq 0 ]]; then
+  echo "FAIL: --foreground --bogus should exit non-zero"
+  exit 1
+fi
+if ! grep -qF -- "unknown option: --bogus" <<<"$output"; then
+  echo "FAIL: --foreground --bogus should print 'unknown option: --bogus', got:"
+  echo "$output"
+  exit 1
+fi
+if [[ -d "$LOOP_REPO" ]]; then
+  echo "FAIL: --foreground --bogus should not create a worktree"
+  exit 1
+fi
+echo "PASS: --foreground --bogus exits non-zero with error + usage"
+
+# --- Test 5: bare invocation gets past flag parsing (no "unknown option:" error) ---
 set +e
 output=$(RALPH_MAIN_REPO="$MAIN_REPO" RALPH_LOOP_REPO="$LOOP_REPO" \
   "$MAIN_REPO/.ralph/launch.sh" 2>&1)

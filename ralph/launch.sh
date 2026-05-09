@@ -521,11 +521,16 @@ if [[ "${1:-}" == "--foreground" && "$PARALLELISM" -ne 1 ]]; then
 fi
 
 # Reject any remaining unknown flags before touching filesystem state.
-if [[ "${1:-}" == -* ]] && [[ "${1:-}" != "--foreground" ]]; then
-  echo "unknown option: ${1}" >&2
-  print_usage >&2
-  exit 1
-fi
+# Iterate all args: --foreground is the only valid positional at this point.
+for _flag in "$@"; do
+  [[ "$_flag" == "--foreground" ]] && continue
+  if [[ "$_flag" == -* ]]; then
+    echo "unknown option: $_flag" >&2
+    print_usage >&2
+    exit 1
+  fi
+done
+unset _flag
 
 # Launcher-level mutex — prevents two concurrent `launch.sh` invocations from
 # both running setup (which mutates .git/info/exclude, worktrees, and branch
