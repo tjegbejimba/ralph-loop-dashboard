@@ -73,7 +73,7 @@ export async function fetchPrdTitle(repo, prdReference, { ghJsonFn } = {}) {
     }
   }
 
-  _cache.set(cacheKey, title);
+  if (title !== null) _cache.set(cacheKey, title);
   return title;
 }
 

@@ -150,13 +150,13 @@ test("fetchPrdTitle caches success results", async () => {
   assert.equal(callCount, 1, "gh should only be called once");
 });
 
-test("fetchPrdTitle caches null (failure) results to avoid repeated calls", async () => {
+test("fetchPrdTitle does not cache null (failure) results — retries on next call", async () => {
   clearPrdTitleCache();
   let callCount = 0;
   const stub = async (_args) => { callCount++; return { error: "boom" }; };
   await fetchPrdTitle("owner/repo", "#6", { ghJsonFn: stub });
   await fetchPrdTitle("owner/repo", "#6", { ghJsonFn: stub });
-  assert.equal(callCount, 1, "failing gh call should only happen once");
+  assert.equal(callCount, 2, "failed gh calls should be retried (transient failure recovery)");
 });
 
 test("fetchPrdTitle returns null when prdReference is falsy", async () => {
