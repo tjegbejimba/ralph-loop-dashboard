@@ -203,8 +203,7 @@ scoped_ralph_processes() {
   '
 }
 
-# --status: print active workers + claims and exit.
-if [[ "${1:-}" == "--help" ]]; then
+print_usage() {
   cat <<'USAGE'
 Usage:
   .ralph/launch.sh                          # background, logs to .ralph/logs/
@@ -214,6 +213,7 @@ Usage:
   .ralph/launch.sh --cleanup                # stop workers + remove worktrees
   .ralph/launch.sh --enqueue <N>...         # write issue numbers to config.json
   .ralph/launch.sh --enqueue-prd <N>        # resolve PRD slices and enqueue them
+  .ralph/launch.sh --help | -h              # print this message
 
 Options:
   --enqueue <N>...
@@ -230,6 +230,7 @@ Options:
   --status        Print running workers and issue claims.
   --stop          Send SIGTERM to all scoped Ralph workers.
   --cleanup       Stop workers and remove clean loop worktrees.
+  --help, -h      Print this message and exit.
 
 Environment:
   RALPH_PARALLELISM   Number of concurrent workers (default: 1)
@@ -239,6 +240,11 @@ Environment:
   RALPH_REPO          owner/repo slug for gh calls (auto-detected from git remote)
   RALPH_GH_BIN        Path to gh binary (default: gh)
 USAGE
+}
+
+# --help / -h: print usage and exit.
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  print_usage
   exit 0
 fi
 
@@ -513,6 +519,18 @@ if [[ "${1:-}" == "--foreground" && "$PARALLELISM" -ne 1 ]]; then
   echo "❌ --foreground only valid with RALPH_PARALLELISM=1" >&2
   exit 1
 fi
+
+# Reject any remaining unknown flags before touching filesystem state.
+# Iterate all args: --foreground is the only valid positional at this point.
+for _flag in "$@"; do
+  [[ "$_flag" == "--foreground" ]] && continue
+  if [[ "$_flag" == -* ]]; then
+    echo "unknown option: $_flag" >&2
+    print_usage >&2
+    exit 1
+  fi
+done
+unset _flag
 
 # Launcher-level mutex — prevents two concurrent `launch.sh` invocations from
 # both running setup (which mutates .git/info/exclude, worktrees, and branch
