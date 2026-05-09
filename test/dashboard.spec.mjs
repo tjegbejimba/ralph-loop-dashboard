@@ -1369,3 +1369,100 @@ test("issue preview - blocking warning uses warning--blocking class and distinct
   // Blocking icon is 🚫
   await expect(row.locator('.warning-icon')).toContainText("🚫");
 });
+
+// ─── Header title tests (slice #48) ─────────────────────────────────────────
+
+function makeHeaderStatus(overrides = {}) {
+  return {
+    timestamp: new Date().toISOString(),
+    loopRunning: false,
+    workers: [],
+    currentIteration: null,
+    currentPr: null,
+    recentPrs: [],
+    iterationHistory: { iterations: [], stats: null },
+    cumulative: null,
+    config: {
+      repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+      profile: "generic",
+      validation: { commands: [] },
+      warnings: [],
+      repo: null,
+      prdReference: null,
+    },
+    headerText: null,
+    ...overrides,
+  };
+}
+
+test("header shows full PRD title when prdReference and prdTitle are both set", async ({ page }) => {
+  await loadDashboard(page, makeHeaderStatus({
+    headerText: "Ralph Loop — PRD #7: My Awesome PRD",
+    config: {
+      repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+      profile: "generic",
+      validation: { commands: [] },
+      warnings: [],
+      repo: "owner/repo",
+      prdReference: "#7",
+    },
+  }));
+
+  await expect(page.locator("h1")).toHaveText("Ralph Loop — PRD #7: My Awesome PRD");
+  const title = await page.title();
+  expect(title).toBe("Ralph Loop — PRD #7: My Awesome PRD");
+});
+
+test("header shows PRD reference only when prdTitle fetch fails", async ({ page }) => {
+  await loadDashboard(page, makeHeaderStatus({
+    headerText: "Ralph Loop — PRD #7",
+    config: {
+      repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+      profile: "generic",
+      validation: { commands: [] },
+      warnings: [],
+      repo: "owner/repo",
+      prdReference: "#7",
+    },
+  }));
+
+  await expect(page.locator("h1")).toHaveText("Ralph Loop — PRD #7");
+  const title = await page.title();
+  expect(title).toBe("Ralph Loop — PRD #7");
+});
+
+test("header shows repo when no prdReference is set", async ({ page }) => {
+  await loadDashboard(page, makeHeaderStatus({
+    headerText: "Ralph Loop — owner/repo",
+    config: {
+      repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+      profile: "generic",
+      validation: { commands: [] },
+      warnings: [],
+      repo: "owner/repo",
+      prdReference: null,
+    },
+  }));
+
+  await expect(page.locator("h1")).toHaveText("Ralph Loop — owner/repo");
+  const title = await page.title();
+  expect(title).toBe("Ralph Loop — owner/repo");
+});
+
+test("header shows bare 'Ralph Loop' when neither prdReference nor repo is set", async ({ page }) => {
+  await loadDashboard(page, makeHeaderStatus({
+    headerText: "Ralph Loop",
+    config: {
+      repoState: { state: "resolved", repoRoot: "/test/repo", hasRalph: true },
+      profile: "generic",
+      validation: { commands: [] },
+      warnings: [],
+      repo: null,
+      prdReference: null,
+    },
+  }));
+
+  await expect(page.locator("h1")).toHaveText("Ralph Loop");
+  const title = await page.title();
+  expect(title).toBe("Ralph Loop");
+});

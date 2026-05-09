@@ -23,6 +23,12 @@ import {
   toBashPath,
   validateWindowsParallelism,
 } from "./lib/platform-shim.mjs";
+import {
+  parsePrdReference,
+  extractRepo,
+  buildHeaderText,
+  fetchPrdTitle,
+} from "./lib/header.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -634,6 +640,8 @@ function getCumulativeStats(prs) {
 function getConfigSummary() {
   return {
     profile: RALPH_CONFIG.profile || "generic",
+    repo: extractRepo(ISSUE_SEARCH),
+    prdReference: parsePrdReference(REPO_ROOT),
     issue: {
       titleRegex: TITLE_REGEX_SOURCE,
       titleNumRegex: titleNumRegex.source,
@@ -688,6 +696,13 @@ async function getStatus() {
       currentPr: it.issue ? await getCurrentPr(it.issue) : null,
     })),
   );
+  const config = getConfigSummary();
+  const prdTitle = await fetchPrdTitle(config.repo, config.prdReference, { ghJsonFn: ghJson });
+  const headerText = buildHeaderText({
+    repo: config.repo,
+    prdReference: config.prdReference,
+    prdTitle,
+  });
   return {
     timestamp: new Date().toISOString(),
     loopRunning: procs.some((p) => p.cmd.includes("ralph.sh")),
@@ -702,7 +717,9 @@ async function getStatus() {
     iterationHistory: { iterations, stats: history.stats },
     openSlices: slices,
     recentPrs: prs,
-    config: getConfigSummary(),
+    config,
+    prdTitle,
+    headerText,
   };
 }
 
