@@ -27,6 +27,10 @@ for (const profile of ["generic", "bun", "python"]) {
       search.includes("-label:hitl"),
       `${profile} issueSearch ("${search}") must include -label:hitl`
     );
+    assert.ok(
+      search.includes("label:ready-for-agent"),
+      `${profile} issueSearch ("${search}") must include label:ready-for-agent`
+    );
   });
 }
 
@@ -59,5 +63,18 @@ test("install.sh contains a hint to create the hitl label in target repos", () =
   assert.ok(
     content.includes("hitl"),
     "install.sh should mention the hitl label to guide maintainers"
+  );
+});
+
+// RED: ralph.sh must read issueSearch from config and pass it to gh issue list
+test("ralph.sh reads issueSearch config and passes it as --search to gh issue list", () => {
+  const content = readFileSync(join(ROOT, "ralph/ralph.sh"), "utf8");
+  assert.ok(
+    content.includes("issueSearch") || content.includes("ISSUE_SEARCH"),
+    "ralph.sh must reference issueSearch / ISSUE_SEARCH"
+  );
+  assert.ok(
+    content.includes("--search"),
+    "ralph.sh must pass --search to gh issue list"
   );
 });
