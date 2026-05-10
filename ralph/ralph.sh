@@ -338,11 +338,17 @@ while true; do
     state_unlock
 
     # Build a sorted list of (number, title, body) for matching issues.
+    # Use try-style operators (capture? | .x? | tonumber?) so titles whose
+    # captured group is missing or non-numeric don't crash jq via `set -e`
+    # in the calling shell. Fall back to the issue's GitHub number for
+    # ordering instead. Without this, a single issue whose title doesn't
+    # match TITLE_NUM_RE silently empties the entire candidate list and
+    # the worker prints "no eligible issue (remaining=N)" forever.
     candidates=$(echo "$open_json" \
       | TITLE_REGEX="$TITLE_REGEX" TITLE_NUM_RE="$TITLE_NUM_RE" jq -r '
           [ .[]
             | select(.title | test(env.TITLE_REGEX))
-            | . + {n: (.title | capture(env.TITLE_NUM_RE).x | tonumber)} ]
+            | . + {n: ((.title | capture(env.TITLE_NUM_RE)? | .x? | tonumber?) // .number)} ]
           | sort_by(.n)
           | .[]
           | @base64
