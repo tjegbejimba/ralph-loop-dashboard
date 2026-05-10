@@ -213,7 +213,11 @@ parse_blockers() {
   if printf '%s' "$section" | grep -qiE '^[[:space:]]*-?[[:space:]]*none\b'; then
     return 0
   fi
-  printf '%s' "$section" | grep -oE '#[0-9]+' | tr -d '#' | sort -u
+  # `grep -oE` exits 1 with no matches; under set -e+pipefail in the caller,
+  # an empty/missing "## Blocked by" section would propagate that non-zero
+  # status through the `$(parse_blockers ...)` capture and silently kill the
+  # worker. `|| true` keeps the function exit clean for the no-blockers case.
+  printf '%s' "$section" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true
 }
 
 # Check whether an issue is closed by a *merged PR* — the same predicate the

@@ -140,3 +140,47 @@ esac
   assert.equal(r.status, 0, r.stderr);
   assert.equal(r.stdout.trim(), "0");
 });
+
+// parse_blockers must succeed (exit 0) on bodies with no "## Blocked by"
+// section. The function is invoked from ralph.sh as `blockers=$(parse_blockers
+// "$body")` under set -e + pipefail; any non-zero exit silently kills the
+// worker. Regression test for the empty-section / no-matches case.
+function runParseBlockers(body) {
+  return spawnSync(
+    "bash",
+    [
+      "-c",
+      `set -euo pipefail; LOG_DIR=/tmp; . ${JSON.stringify(lib)}; parse_blockers "$1"`,
+      "_",
+      body,
+    ],
+    { encoding: "utf8" },
+  );
+}
+
+test("parse_blockers exits 0 when body has no '## Blocked by' section", () => {
+  const r = runParseBlockers("## Problem Statement\n\nNo blocked-by here.\n");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "");
+});
+
+test("parse_blockers exits 0 when section is present but lists no #refs", () => {
+  const r = runParseBlockers("## Blocked by\n\nSomething narrative.\n\n## Next");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "");
+});
+
+test("parse_blockers extracts numeric refs from '## Blocked by' section", () => {
+  const r = runParseBlockers("## Blocked by\n\n- #42\n- #7 (note)\n\n## Next");
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(
+    r.stdout.trim().split("\n").sort(),
+    ["42", "7"].sort(),
+  );
+});
+
+test("parse_blockers short-circuits on 'None'", () => {
+  const r = runParseBlockers("## Blocked by\n\nNone — can start.\n\n## Next");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "");
+});
