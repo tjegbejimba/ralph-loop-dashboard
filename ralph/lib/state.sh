@@ -213,7 +213,7 @@ parse_blockers() {
   if printf '%s' "$section" | grep -qiE '^[[:space:]]*-?[[:space:]]*none\b'; then
     return 0
   fi
-  printf '%s' "$section" | grep -oE '#[0-9]+' | tr -d '#' | sort -u
+  printf '%s' "$section" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true
 }
 
 # Check whether an issue is closed by a *merged PR* — the same predicate the
