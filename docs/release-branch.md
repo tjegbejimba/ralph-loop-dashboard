@@ -72,4 +72,6 @@ exception in its "Release-branch override" section.
 
 ## Related
 
+- [`docs/manually-closed-blockers.md`](manually-closed-blockers.md) — sibling escape hatch for blockers that were closed manually without a PR linkage. Both flags relax the strict "code landed via merged PR with closing keyword" predicate in different ways.
 - Issue [#55](https://github.com/tjegbejimba/ralph-loop-dashboard/issues/55) — original feature request and design discussion.
+- Issue [#65](https://github.com/tjegbejimba/ralph-loop-dashboard/issues/65) — manually-closed blocker fallback (sibling case).

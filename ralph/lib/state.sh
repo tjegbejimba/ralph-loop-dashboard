@@ -224,36 +224,78 @@ parse_blockers() {
 # loop to avoid O(N) gh calls per blocker per worker.
 is_issue_satisfied() {
   local n="$1"
-  local closure state pr_numbers pr merged_at
+  local detail
+  detail=$(issue_satisfaction_detail "$n")
+  # detail is "<satisfied>|<state>|<reason>|<prs>"; emit just the first field.
+  printf '%s\n' "${detail%%|*}"
+}
+
+# issue_satisfaction_detail N
+# Like is_issue_satisfied, but emits a single delimited line that the caller
+# can cache and split for diagnostic messages without a second gh call:
+#   "<satisfied>|<state>|<stateReason>|<prs-csv>"
+# where <satisfied> is 0|1, <state> is the GitHub state string (OPEN/CLOSED),
+# <stateReason> is the GitHub stateReason enum or empty, and <prs-csv> is a
+# comma-joined list of PR numbers referenced by closedByPullRequestsReferences
+# (empty when none). Empty fields keep the pipe count stable so callers can
+# split with `IFS='|' read`.
+issue_satisfaction_detail() {
+  local n="$1"
+  local closure state state_reason prs_csv pr_numbers pr merged_at satisfied
   closure=$(gh issue view "$n" --repo "$REPO" \
-    --json state,closedByPullRequestsReferences 2>/dev/null || echo "")
-  [[ -z "$closure" ]] && { echo 0; return; }
-  state=$(echo "$closure" | jq -r .state)
-  [[ "$state" != "CLOSED" ]] && { echo 0; return; }
-  pr_numbers=$(echo "$closure" | jq -r '(.closedByPullRequestsReferences // [])[].number')
-  for pr in $pr_numbers; do
-    merged_at=$(gh pr view "$pr" --repo "$REPO" --json mergedAt -q .mergedAt 2>/dev/null || echo "")
-    if [[ -n "$merged_at" && "$merged_at" != "null" ]]; then
-      echo 1
-      return
-    fi
-  done
-  # Release-branch fallback: GitHub does not populate
-  # closedByPullRequestsReferences for PRs whose base != default branch.
-  # When RALPH_RELEASE_BRANCH is set, accept state=CLOSED + a merged PR with
-  # closing-keyword body match into the release branch as satisfied. See
-  # docs/release-branch.md.
-  if [[ -n "${RALPH_RELEASE_BRANCH:-}" ]]; then
-    local found
-    found=$(gh pr list --repo "$REPO" --state merged --base "$RALPH_RELEASE_BRANCH" \
-      --search "in:body \"Closes #${n}\" OR in:body \"Fixes #${n}\" OR in:body \"Resolves #${n}\"" \
-      --json number -q '.[0].number' 2>/dev/null || echo "")
-    if [[ -n "$found" && "$found" != "null" ]]; then
-      echo 1
+    --json state,stateReason,closedByPullRequestsReferences 2>/dev/null || echo "")
+  if [[ -z "$closure" ]]; then
+    # Older `gh` (<2.13, pre-April 2022) doesn't recognise stateReason on
+    # the --json flag and fails the whole call. Retry without it so the
+    # strict merged-PR check keeps working; the manual-close fallback
+    # simply won't fire because state_reason stays empty.
+    closure=$(gh issue view "$n" --repo "$REPO" \
+      --json state,closedByPullRequestsReferences 2>/dev/null || echo "")
+    if [[ -z "$closure" ]]; then
+      printf '0|||\n'
       return
     fi
   fi
-  echo 0
+  state=$(echo "$closure" | jq -r '.state // ""')
+  state_reason=$(echo "$closure" | jq -r '.stateReason // ""')
+  prs_csv=$(echo "$closure" | jq -r '[(.closedByPullRequestsReferences // [])[].number] | join(",")')
+  pr_numbers=$(echo "$closure" | jq -r '(.closedByPullRequestsReferences // [])[].number')
+  satisfied=0
+  if [[ "$state" == "CLOSED" ]]; then
+    for pr in $pr_numbers; do
+      merged_at=$(gh pr view "$pr" --repo "$REPO" --json mergedAt -q .mergedAt 2>/dev/null || echo "")
+      if [[ -n "$merged_at" && "$merged_at" != "null" ]]; then
+        satisfied=1
+        break
+      fi
+    done
+    # Release-branch fallback: GitHub does not populate
+    # closedByPullRequestsReferences for PRs whose base != default branch.
+    # When RALPH_RELEASE_BRANCH is set, accept state=CLOSED + a merged PR with
+    # closing-keyword body match into the release branch as satisfied. See
+    # docs/release-branch.md.
+    if [[ "$satisfied" -eq 0 && -n "${RALPH_RELEASE_BRANCH:-}" ]]; then
+      local found
+      found=$(gh pr list --repo "$REPO" --state merged --base "$RALPH_RELEASE_BRANCH" \
+        --search "in:body \"Closes #${n}\" OR in:body \"Fixes #${n}\" OR in:body \"Resolves #${n}\"" \
+        --json number -q '.[0].number' 2>/dev/null || echo "")
+      if [[ -n "$found" && "$found" != "null" ]]; then
+        satisfied=1
+      fi
+    fi
+    # Manually-closed fallback: when RALPH_ACCEPT_MANUALLY_CLOSED is exactly
+    # "1" (canonical form produced by ralph.sh's normalize_bool), accept
+    # stateReason=COMPLETED as satisfied even without a PR linkage. Strict
+    # "1" match instead of `-n` so direct callers that set the variable to
+    # "false" or "0" don't accidentally enable the fallback. Rejects
+    # NOT_PLANNED/DUPLICATE and missing stateReason so wontfix closures
+    # still act as blockers. See docs/manually-closed-blockers.md.
+    if [[ "$satisfied" -eq 0 && "${RALPH_ACCEPT_MANUALLY_CLOSED:-}" == "1" \
+          && "$state_reason" == "COMPLETED" ]]; then
+      satisfied=1
+    fi
+  fi
+  printf '%s|%s|%s|%s\n' "$satisfied" "$state" "$state_reason" "$prs_csv"
 }
 
 # Backward-compat alias for code that just wants the loose "issue is CLOSED"
@@ -264,4 +306,40 @@ is_issue_closed() {
   local state
   state=$(gh issue view "$n" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")
   [[ "$state" == "CLOSED" ]] && echo 1 || echo 0
+}
+
+# normalize_bool VALUE
+# Map common boolean-ish strings to a canonical form. Truthy values
+# (1|true|yes|on, case-insensitive) print "1". Falsy values (0|false|no|off
+# and the empty string) print nothing. Any other value is rejected with a
+# diagnostic on stderr and a non-zero exit code so a typo in config.json or
+# an env var never silently flips the wrong way.
+normalize_bool() {
+  local v="${1-}"
+  local lower="${v,,}"
+  case "$lower" in
+    1|true|yes|on) echo 1 ;;
+    0|false|no|off|"") : ;;
+    *)
+      echo "normalize_bool: unrecognised boolean value '$v' (expected 1|true|yes|on or 0|false|no|off)" >&2
+      return 1
+      ;;
+  esac
+}
+
+# count_claimed_issues
+# Read newline-separated claimed issue numbers from stdin and print the count.
+# Whitespace-only and empty input → 0. Each non-empty, all-digit line counts
+# as one claimed issue. Used by the worker idle message so an empty
+# claimed_set reports `claimed=0` (was `1` because `echo "" | wc -l` returns
+# 1). Reads from stdin (not args) so multi-line input doesn't get mangled by
+# shell quoting.
+count_claimed_issues() {
+  local set
+  set=$(cat)
+  if [[ -z "${set//[[:space:]]/}" ]]; then
+    echo 0
+    return
+  fi
+  printf '%s\n' "$set" | grep -cE '^[0-9]+$' || true
 }

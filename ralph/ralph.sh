@@ -86,6 +86,25 @@ if ! [[ "$IDLE_EXIT_POLLS" =~ ^[0-9]+$ ]]; then
 fi
 unset _cfg_idle
 
+# Source state.sh early so the boolean-normalisation helper is available
+# before we resolve the verbose / acceptManuallyClosed flags below.
+# state_init() (which has side effects) is invoked further down after cd.
+# shellcheck source=lib/state.sh
+. "$SCRIPT_DIR/lib/state.sh"
+
+# Manually-closed blocker fallback (opt-in). When enabled, is_issue_satisfied
+# accepts CLOSED + stateReason=COMPLETED as satisfied even without a PR
+# linkage. See docs/manually-closed-blockers.md.
+_cfg_accept_manual=$(config_get '.worker.acceptManuallyClosed')
+RALPH_ACCEPT_MANUALLY_CLOSED=$(normalize_bool "${RALPH_ACCEPT_MANUALLY_CLOSED:-${_cfg_accept_manual:-}}") || exit 1
+unset _cfg_accept_manual
+
+# Verbose diagnostics. When enabled, the candidate-selection loop emits a
+# per-rejection skip line so a stalled worker is debuggable in seconds.
+_cfg_verbose=$(config_get '.worker.verbose')
+RALPH_VERBOSE=$(normalize_bool "${RALPH_VERBOSE:-${_cfg_verbose:-}}") || exit 1
+unset _cfg_verbose
+
 # Parse --run-id flag (overrides RALPH_RUN_ID env var)
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -117,9 +136,8 @@ fi
 cd "$(git rev-parse --show-toplevel)"
 mkdir -p "$LOG_DIR" "$SCRIPT_DIR/lock"
 
-# Coordination helpers (state.json, blocker parsing, claim management).
-# shellcheck source=lib/state.sh
-. "$SCRIPT_DIR/lib/state.sh"
+# state.sh was sourced earlier so normalize_bool was available during config
+# resolution; now that cwd and LOG_DIR are settled, initialise state.json.
 state_init
 
 # Per-run status tracking (status.json). Only needed in run-aware mode.
@@ -357,17 +375,27 @@ while true; do
     # Memoize blocker satisfaction across this selection round so M candidates
     # × K blockers don't translate into M×K `gh issue view`/`gh pr view` calls.
     # Cache lives only until the next polling cycle to stay fresh.
+    #
+    # BLOCKER_CACHE stores the structured detail line from
+    # issue_satisfaction_detail (`<satisfied>|<state>|<reason>|<prs>`) so the
+    # verbose skip diagnostic can read state/reason/prs without a second gh
+    # round-trip. `blocker_satisfied` returns just field 1.
     declare -A BLOCKER_CACHE=()
-    blocker_satisfied() {
+    blocker_detail() {
       local b="$1"
       if [[ -n "${BLOCKER_CACHE[$b]+x}" ]]; then
         printf '%s' "${BLOCKER_CACHE[$b]}"
         return
       fi
       local v
-      v=$(is_issue_satisfied "$b")
+      v=$(issue_satisfaction_detail "$b")
       BLOCKER_CACHE[$b]="$v"
       printf '%s' "$v"
+    }
+    blocker_satisfied() {
+      local detail
+      detail=$(blocker_detail "$1")
+      printf '%s' "${detail%%|*}"
     }
 
     num=""; title=""; body=""; chosen_blockers=""
@@ -380,6 +408,7 @@ while true; do
 
       # Skip issues other workers have claimed.
       if printf '%s\n' "$claimed_set" | grep -qx "$cand_num"; then
+        [[ -n "${RALPH_VERBOSE:-}" ]] && echo "  ↳ skipping #$cand_num: claimed by another worker"
         continue
       fi
 
@@ -389,13 +418,20 @@ while true; do
       # downstream slices whose code never landed).
       blockers=$(parse_blockers "$cand_body")
       all_satisfied=1
+      unsatisfied_blocker=""
       for b in $blockers; do
         if [[ "$(blocker_satisfied "$b")" != "1" ]]; then
           all_satisfied=0
+          unsatisfied_blocker="$b"
           break
         fi
       done
       if [[ "$all_satisfied" -ne 1 ]]; then
+        if [[ -n "${RALPH_VERBOSE:-}" ]]; then
+          # Cache hit guaranteed because blocker_satisfied just populated it.
+          IFS='|' read -r _bs _bstate _breason _bprs <<<"$(blocker_detail "$unsatisfied_blocker")"
+          echo "  ↳ skipping #$cand_num: blocker #$unsatisfied_blocker not satisfied (state=$_bstate reason=$_breason prs=$_bprs)"
+        fi
         continue
       fi
 
@@ -417,7 +453,12 @@ while true; do
         echo "✅ Worker $WORKER_ID: no open issues match \"$TITLE_REGEX\". Done."
         exit 0
       fi
-      echo "⏸  Worker $WORKER_ID: no eligible issue (remaining=$remaining, claimed=$(echo "$claimed_set" | wc -l | tr -d ' ')); sleeping ${POLL_SEC}s."
+      claimed_n=$(count_claimed_issues <<<"$claimed_set")
+      echo "⏸  Worker $WORKER_ID: no eligible issue (remaining=$remaining, claimed=$claimed_n); sleeping ${POLL_SEC}s."
+      if [[ -z "${RALPH_VERBOSE:-}" && -z "${_idle_hint_shown:-}" ]]; then
+        echo "   (Set RALPH_VERBOSE=1 — or .worker.verbose:true in .ralph/config.json — to see per-candidate skip reasons.)"
+        _idle_hint_shown=1
+      fi
       _idle_polls=$((_idle_polls + 1))
       if [[ "$IDLE_EXIT_POLLS" -gt 0 && "$_idle_polls" -ge "$IDLE_EXIT_POLLS" ]]; then
         echo "⏸  Worker $WORKER_ID: idle for $_idle_polls polls, exiting."
