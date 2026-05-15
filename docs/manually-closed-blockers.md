@@ -120,11 +120,14 @@ without having to remember to set the flag ahead of time.
 
 The fallback reads the `stateReason` field from `gh issue view`. GitHub
 CLI has supported that field on the `--json` flag since v2.13 (April
-2022). If your `gh` is older the verifier automatically retries the call
-without `stateReason` — the strict merged-PR satisfaction path keeps
-working unchanged, but the manual-closed fallback can't fire because the
-`stateReason` value isn't reachable. Bumping `gh` is the only way to
-enable the fallback on those installations.
+2022). If the first `gh issue view` call fails for any reason — older
+`gh` rejecting the field, transient network errors, rate-limiting — the
+verifier retries the same call once without `stateReason`. The strict
+merged-PR satisfaction path keeps working on the retry, but the
+manual-close fallback can't fire because the `stateReason` value isn't
+reachable. Bumping `gh` is the only way to enable the fallback on
+installations older than v2.13; transient failures resolve themselves on
+the next polling cycle.
 
 ## Related
 
