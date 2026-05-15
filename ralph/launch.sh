@@ -134,6 +134,16 @@ LOG_DIR="$MAIN_REPO/.ralph/logs"
 mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
 # shellcheck source=lib/state.sh
 . "$MAIN_REPO/.ralph/lib/state.sh"
+# shellcheck source=lib/preflight.sh
+# Preflight library is optional in older installs; only source if present so a
+# stale installer doesn't break --enqueue/--status (operator gets a hint to
+# re-run install.sh).
+_preflight_lib="$MAIN_REPO/.ralph/lib/preflight.sh"
+if [[ -f "$_preflight_lib" ]]; then
+  # shellcheck disable=SC1090
+  . "$_preflight_lib"
+fi
+unset _preflight_lib
 
 # Keep-awake (macOS): per-worker caffeinate processes are tracked in
 # .ralph/lock/caffeinate-<N>.pid so --status, --stop, and --cleanup can
@@ -177,7 +187,15 @@ stop_all_caffeinate() {
 }
 
 scoped_ralph_processes() {
-  ps -axww -o pid=,ppid=,command= | awk -v script="$RALPH_SCRIPT" '
+  # macOS/Linux use `ps -axww`; Cygwin/MSYS ps doesn't accept the BSD flags
+  # and exits non-zero, which would abort callers under `set -euo pipefail`.
+  # Fall back to an empty list when ps can't run our query so --status/--stop
+  # stay usable in any shell environment.
+  local ps_out
+  if ! ps_out=$(ps -axww -o pid=,ppid=,command= 2>/dev/null); then
+    return 0
+  fi
+  printf '%s\n' "$ps_out" | awk -v script="$RALPH_SCRIPT" '
     {
       pid=$1
       ppid=$2
@@ -307,6 +325,12 @@ if [[ "${1:-}" == "--status" ]]; then
       fi
     done
   fi
+  if declare -F preflight_run >/dev/null 2>&1; then
+    echo
+    # --status always exits 0 — preflight returns non-zero on blockers, but
+    # operators use --status to inspect rather than gate; absorb the rc.
+    preflight_run || true
+  fi
   exit 0
 fi
 
@@ -422,7 +446,15 @@ if [[ "${1:-}" == "--enqueue" ]]; then
   done
   unset _n _s _seen_enq
   do_enqueue "$MAIN_REPO/.ralph/config.json" "$@"
-  exit $?
+  enq_rc=$?
+  if [[ "$enq_rc" -ne 0 ]]; then
+    exit "$enq_rc"
+  fi
+  if declare -F preflight_run >/dev/null 2>&1; then
+    echo
+    preflight_run || true
+  fi
+  exit 0
 fi
 
 # --enqueue-prd <N>: resolve PRD child slices, enqueue them, update RALPH.md
@@ -530,6 +562,11 @@ NODEEOF
   _afk_count=${#_afk_numbers[@]}
   _issues_display=$(printf '#%s ' "${_afk_numbers[@]}" | sed 's/ $//')
   echo "Enqueued PRD #${_prd_n} (${_afk_count} AFK slices, ${_hitl_count} HITL skipped, ${_blocker_count} unresolved blockers): ${_issues_display}"
+
+  if declare -F preflight_run >/dev/null 2>&1; then
+    echo
+    preflight_run || true
+  fi
   exit 0
 fi
 
