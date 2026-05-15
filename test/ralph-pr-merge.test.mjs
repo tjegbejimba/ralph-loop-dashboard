@@ -179,7 +179,11 @@ case "$1 $2" in
     printf 'mu-13-something\\n'
     ;;
   "api repos/owner/repo/branches/mu-13-something")
-    printf 'abc123\\n'
+    if [[ "$*" == *committer.date* ]]; then
+      printf '2024-01-01T00:00:00Z\\n'
+    else
+      printf 'abc123\\n'
+    fi
     ;;
   "api repos/owner/repo/commits/abc123")
     printf 'feat: do the thing\\n'
@@ -233,4 +237,46 @@ esac
 
   assert.equal(result.status, 1, result.stderr);
   assert.doesNotMatch(calls, /pr create/);
+});
+
+test("branch-only fallback picks the most recently committed matching branch", () => {
+  const { result, calls } = runHelper(
+    `
+case "$1 $2" in
+  "api repos/owner/repo/branches")
+    # Two matching branches; stale one sorts first (mimics API/alphabetical order).
+    printf 'mu-13-old\\nmu-13-new\\n'
+    ;;
+  "api repos/owner/repo/branches/mu-13-old")
+    if [[ "$*" == *committer.date* ]]; then
+      printf '2024-01-01T00:00:00Z\\n'
+    else
+      printf 'oldsha\\n'
+    fi
+    ;;
+  "api repos/owner/repo/branches/mu-13-new")
+    if [[ "$*" == *committer.date* ]]; then
+      printf '2024-06-01T00:00:00Z\\n'
+    else
+      printf 'newsha\\n'
+    fi
+    ;;
+  "api repos/owner/repo/commits/newsha")
+    printf 'feat: latest work\\n'
+    ;;
+  "pr create")
+    exit 0
+    ;;
+  *)
+    echo "unexpected gh call: $*" >&2
+    exit 2
+    ;;
+esac
+`,
+    "ralph_open_pr_for_pushed_branch 13 multi-user mu-",
+  );
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(calls, /pr create --repo owner\/repo --base multi-user --head mu-13-new/);
+  assert.doesNotMatch(calls, /--head mu-13-old/);
 });

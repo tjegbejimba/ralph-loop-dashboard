@@ -105,8 +105,24 @@ ralph_open_pr_for_pushed_branch() {
 
   [[ -n "$release_branch" && -n "$branch_prefix" ]] || return 1
 
-  branch=$(gh api "repos/$REPO/branches" --paginate \
-    --jq ".[] | select(.name | startswith(\"${branch_prefix}${issue}-\")) | .name" 2>/dev/null | head -1)
+  local candidates candidate date best_date
+  candidates=$(gh api "repos/$REPO/branches" --paginate \
+    --jq ".[] | select(.name | startswith(\"${branch_prefix}${issue}-\")) | .name" 2>/dev/null)
+  [[ -n "$candidates" ]] || return 1
+
+  # Tie-break by latest commit date (ISO 8601 sorts lexicographically as dates)
+  # so a stale older branch can't beat a freshly pushed one.
+  branch=""
+  best_date=""
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    date=$(gh api "repos/$REPO/branches/$candidate" --jq '.commit.commit.committer.date' 2>/dev/null || echo "")
+    [[ -n "$date" ]] || continue
+    if [[ -z "$best_date" || "$date" > "$best_date" ]]; then
+      best_date="$date"
+      branch="$candidate"
+    fi
+  done <<<"$candidates"
   [[ -n "$branch" ]] || return 1
 
   sha=$(gh api "repos/$REPO/branches/$branch" --jq '.commit.sha' 2>/dev/null || echo "")
