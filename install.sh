@@ -229,12 +229,27 @@ install_scripts() {
     echo "📋 Copying loop scripts -> $ralph_dir"
   fi
 
+  # Hide .ralph/ from the target repo's porcelain so subsequent --enqueue
+  # writes to config.json (or runtime state under .ralph/) do not dirty the
+  # working tree and trip up the worker preflight that aborts on a non-clean
+  # tree. The launcher does this lazily during its setup phase, but we need
+  # it earlier so `--enqueue` / `--status` work cleanly from a fresh install.
+  if [[ -d "$target/.git" ]]; then
+    mkdir -p "$target/.git/info"
+    local exclude_file="$target/.git/info/exclude"
+    if ! grep -qxF ".ralph" "$exclude_file" 2>/dev/null; then
+      echo ".ralph" >> "$exclude_file"
+      echo "🙈 Added .ralph to $exclude_file (keeps runtime state out of git porcelain)"
+    fi
+  fi
+
   mkdir -p "$ralph_dir/lib"
   cp "$REPO_DIR/ralph/ralph.sh" "$ralph_dir/ralph.sh"
   cp "$REPO_DIR/ralph/launch.sh" "$ralph_dir/launch.sh"
   cp "$REPO_DIR/ralph/lib/state.sh" "$ralph_dir/lib/state.sh"
   cp "$REPO_DIR/ralph/lib/status.sh" "$ralph_dir/lib/status.sh"
   cp "$REPO_DIR/ralph/lib/pr-merge.sh" "$ralph_dir/lib/pr-merge.sh"
+  cp "$REPO_DIR/ralph/lib/preflight.sh" "$ralph_dir/lib/preflight.sh"
   rm -rf "$ralph_dir/profiles"
   cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
   chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
@@ -250,6 +265,8 @@ install_scripts() {
     echo "   gh label create ready-for-agent --color 0075CA --description 'Safe for AFK Ralph workers to pick up'"
     echo "   gh label create hitl            --color B60205 --description 'Requires human interaction; not safe for AFK Ralph workers'"
     echo "   See docs/labels.md for full label vocabulary."
+    echo ""
+    print_dirty_tree_warning "$target"
     return 0
   fi
 
@@ -287,6 +304,35 @@ EOF
   echo "   gh label create ready-for-agent --color 0075CA --description 'Safe for AFK Ralph workers to pick up'"
   echo "   gh label create hitl            --color B60205 --description 'Requires human interaction; not safe for AFK Ralph workers'"
   echo "   See docs/labels.md for full label vocabulary."
+  echo ""
+  print_dirty_tree_warning "$target"
+}
+
+# Emit a stronger dirty-tree reminder. Workers abort on a dirty working tree
+# (see ralph.sh preflight), so a fresh install that left files staged or
+# unstaged would silently halt the loop on first launch. Surface this as
+# soon as we know about it (issue #64 follow-up #1).
+#
+# Note: `.ralph/` is already added to `.git/info/exclude` above, so the only
+# files that should still show as dirty are the ones the operator IS meant
+# to commit (notably `.github/copilot-instructions.md`).
+print_dirty_tree_warning() {
+  local target="$1"
+  local porcelain
+  porcelain=$(git -C "$target" status --porcelain 2>/dev/null || echo "")
+  if [[ -z "$porcelain" ]]; then
+    return 0
+  fi
+  echo "⚠️  Target repo is dirty after install. Ralph workers abort on a"
+  echo "    dirty working tree, so commit these files before launching:"
+  echo
+  printf '%s\n' "$porcelain" | sed 's/^/      /'
+  echo
+  echo "    git -C \"$target\" add .github/copilot-instructions.md"
+  echo "    git -C \"$target\" commit -m 'Install Ralph loop scripts'"
+  echo
+  echo "    (.ralph/ is excluded via .git/info/exclude so its runtime files"
+  echo "     and config.json are kept out of git porcelain automatically.)"
 }
 
 install_extension() {

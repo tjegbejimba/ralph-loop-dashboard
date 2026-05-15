@@ -29,6 +29,7 @@ import {
   buildHeaderText,
   fetchPrdTitle,
 } from "./lib/header.mjs";
+import { filterScopedRalphProcesses } from "./lib/process-scope.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
 
@@ -179,20 +180,13 @@ async function getLoopProcess() {
   try {
     // Use ps -ax with full command output for cross-platform support
     // (macOS pgrep -a doesn't print command lines like Linux pgrep -a does).
-    const { stdout } = await execFileAsync("ps", ["-axww", "-o", "pid=,command="], {
+    // Include ppid so we can scope `copilot -p` children to their ralph.sh
+    // parent's repo — see filterScopedRalphProcesses for the rationale
+    // (issue #64 follow-up #3).
+    const { stdout } = await execFileAsync("ps", ["-axww", "-o", "pid=,ppid=,command="], {
       timeout: 3000,
     });
-    const lines = stdout.split("\n").filter((l) => {
-      if (!l.trim()) return false;
-      if (l.includes("ps -axww")) return false;
-      if (l.includes("ralph_dashboard") || l.includes("ralph-dashboard")) return false;
-      return /ralph\.sh|copilot -p/.test(l);
-    });
-    return lines.map((l) => {
-      const trimmed = l.trim();
-      const sp = trimmed.indexOf(" ");
-      return { pid: Number(trimmed.slice(0, sp)), cmd: trimmed.slice(sp + 1) };
-    });
+    return filterScopedRalphProcesses(stdout, REPO_ROOT);
   } catch {
     return [];
   }

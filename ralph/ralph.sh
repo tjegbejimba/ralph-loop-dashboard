@@ -51,6 +51,21 @@ TITLE_REGEX="${TITLE_REGEX:-^Slice [0-9]+:}"
 TITLE_NUM_RE="${RALPH_TITLE_NUM_REGEX:-$(config_get '.issue.titleNumRegex')}"
 TITLE_NUM_RE="${TITLE_NUM_RE:-^Slice (?<x>[0-9]+):}"
 ISSUE_SEARCH="${RALPH_ISSUE_SEARCH:-$(config_get '.issue.issueSearch')}"
+
+# Direct-numbers queue. When `.issue.numbers` is non-empty and no RUN_ID is
+# set, the worker treats this list as the candidate set instead of running an
+# issueSearch. Closes the "--enqueue wrote config that workers ignore" gap
+# reported in issue #64: previously, operators ran `launch.sh --enqueue 5 6 7`,
+# saw the numbers in config.json, and assumed workers would pick them up — but
+# the legacy code path only ran `gh issue list --search "$ISSUE_SEARCH"` and
+# silently ignored `.issue.numbers` entirely.
+NUMBERS_QUEUE=()
+if [[ -f "$CONFIG_FILE" ]] && command -v jq >/dev/null 2>&1; then
+  while IFS= read -r _n; do
+    [[ -n "$_n" && "$_n" =~ ^[0-9]+$ ]] && NUMBERS_QUEUE+=("$_n")
+  done < <(jq -r '(.issue.numbers // [])[]' "$CONFIG_FILE" 2>/dev/null | tr -d '\r' || true)
+  unset _n
+fi
 if ! jq -nr --arg re "$TITLE_REGEX" '"" | test($re)' >/dev/null 2>&1; then
   echo "⚠️  Invalid issue.titleRegex \"$TITLE_REGEX\"; using default Slice pattern." >&2
   TITLE_REGEX="^Slice [0-9]+:"
@@ -338,6 +353,114 @@ while true; do
       sleep "$POLL_SEC"
       continue
     fi
+  elif [[ ${#NUMBERS_QUEUE[@]} -gt 0 ]]; then
+    # Direct-numbers mode (issue #64): consume the configured `.issue.numbers`
+    # list when no RUN_ID is active. Honors the same AFK guard as legacy
+    # issueSearch — must be OPEN, `ready-for-agent`, not `hitl`, and all
+    # blockers satisfied — so this mode is safe to enable by default.
+    state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+    state_reap_stale
+    claimed_set="$(state_claimed_issues | sort -u)"
+    state_unlock
+
+    declare -A NUMBER_BLOCKER_CACHE=()
+    _nq_blocker_satisfied() {
+      local b="$1"
+      if [[ -n "${NUMBER_BLOCKER_CACHE[$b]+x}" ]]; then
+        printf '%s' "${NUMBER_BLOCKER_CACHE[$b]}"
+        return
+      fi
+      local v
+      v=$(is_issue_satisfied "$b")
+      NUMBER_BLOCKER_CACHE[$b]="$v"
+      printf '%s' "$v"
+    }
+
+    # Sort ascending so workers pick the lowest-numbered eligible issue first
+    # (matches legacy slice-N ordering when numbers correspond to slice order).
+    sorted_numbers=()
+    while IFS= read -r _qn; do
+      [[ -z "$_qn" ]] && continue
+      sorted_numbers+=("$_qn")
+    done < <(printf '%s\n' "${NUMBERS_QUEUE[@]}" | sort -n)
+
+    num=""; title=""; body=""; chosen_blockers=""
+    skip_reasons=()
+    for cand_num in "${sorted_numbers[@]}"; do
+      # Skip already-claimed by another worker.
+      if printf '%s\n' "$claimed_set" | grep -qx "$cand_num"; then
+        continue
+      fi
+
+      record=$(gh issue view "$cand_num" --repo "$REPO" \
+        --json number,state,title,labels,body 2>/dev/null | tr -d '\r' || echo "")
+      if [[ -z "$record" ]]; then
+        skip_reasons+=("#${cand_num}: lookup failed")
+        continue
+      fi
+      cand_state=$(echo "$record" | jq -r .state)
+      cand_title=$(echo "$record" | jq -r .title)
+      cand_body=$(echo "$record" | jq -r '.body // ""')
+      cand_labels=$(echo "$record" | jq -r '[.labels[].name] | join(",")')
+
+      if [[ "$cand_state" != "OPEN" ]]; then
+        skip_reasons+=("#${cand_num}: not open (${cand_state})")
+        continue
+      fi
+      if [[ ",${cand_labels}," != *",ready-for-agent,"* ]]; then
+        skip_reasons+=("#${cand_num}: missing ready-for-agent")
+        continue
+      fi
+      if [[ ",${cand_labels}," == *",hitl,"* ]]; then
+        skip_reasons+=("#${cand_num}: hitl")
+        continue
+      fi
+      if [[ ",${cand_labels}," == *",needs-triage,"* ]]; then
+        # ready-for-agent and needs-triage can coexist if the operator forgot
+        # to remove the triage marker. The AFK contract is "human reviewed
+        # AND scoped"; needs-triage says "not yet reviewed". Reject when both
+        # are present so the worker matches what preflight already flags.
+        skip_reasons+=("#${cand_num}: still needs-triage")
+        continue
+      fi
+
+      blockers=$(parse_blockers "$cand_body")
+      all_satisfied=1
+      for b in $blockers; do
+        if [[ "$(_nq_blocker_satisfied "$b")" != "1" ]]; then
+          all_satisfied=0
+          break
+        fi
+      done
+      if [[ "$all_satisfied" -ne 1 ]]; then
+        skip_reasons+=("#${cand_num}: unresolved blockers")
+        continue
+      fi
+
+      num="$cand_num"
+      title="$cand_title"
+      body="$cand_body"
+      chosen_blockers="$blockers"
+      break
+    done
+
+    if [[ -z "$num" ]]; then
+      total=${#NUMBERS_QUEUE[@]}
+      echo "⏸  Worker $WORKER_ID: no eligible issue in direct-numbers queue (size=$total)."
+      if [[ "${#skip_reasons[@]}" -gt 0 ]]; then
+        for _r in "${skip_reasons[@]}"; do
+          echo "    - $_r"
+        done
+        unset _r
+      fi
+      _idle_polls=$((_idle_polls + 1))
+      if [[ "$IDLE_EXIT_POLLS" -gt 0 && "$_idle_polls" -ge "$IDLE_EXIT_POLLS" ]]; then
+        echo "⏸  Worker $WORKER_ID: idle for $_idle_polls polls, exiting."
+        exit 0
+      fi
+      sleep "$POLL_SEC"
+      continue
+    fi
   else
     # Legacy mode: search GitHub for issues matching TITLE_REGEX
     # Fetch open issues matching the title regex along with their bodies so we
@@ -478,8 +601,11 @@ while true; do
   : >"$log_file"
 
   # Atomic claim: re-acquire lock, re-check that nobody else grabbed this
-  # issue between selection and now, AND re-validate blockers (a blocker
-  # could have been reopened, or the issue itself could have been closed).
+  # issue between selection and now, AND re-validate state/labels/blockers
+  # against a fresh fetch. The selection-time snapshot can go stale: an
+  # operator may have removed `ready-for-agent`, added `hitl`, added a new
+  # `## Blocked by`, or closed the issue between scan and claim. Re-fetch
+  # everything and re-validate before committing the claim.
   state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
   state_reap_stale
   if state_claimed_issues | grep -qx "$num"; then
@@ -487,16 +613,50 @@ while true; do
     echo "↪️  Worker $WORKER_ID: #$num was claimed by another worker between selection and claim; retrying."
     continue
   fi
-  # Re-fetch this issue's state and re-check blockers under the lock. If
-  # anything changed, drop the candidate and re-poll.
-  current_state=$(gh issue view "$num" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")
+  # Re-fetch state + labels + body so we can re-validate the AFK guard and
+  # re-parse blockers from the freshest body, not the stale chosen_blockers.
+  fresh_record=$(gh issue view "$num" --repo "$REPO" \
+    --json state,title,labels,body 2>/dev/null | tr -d '\r' || echo "")
+  if [[ -z "$fresh_record" ]]; then
+    state_unlock
+    echo "↪️  Worker $WORKER_ID: #$num lookup failed during claim re-check; retrying."
+    continue
+  fi
+  current_state=$(echo "$fresh_record" | jq -r .state)
   if [[ "$current_state" != "OPEN" ]]; then
     state_unlock
     echo "↪️  Worker $WORKER_ID: #$num is no longer OPEN (state=$current_state); retrying."
     continue
   fi
+  # Only re-validate labels for direct-numbers mode. Legacy issueSearch mode
+  # already filters via the gh search predicate so an issue that came back
+  # via the search must have matched the AFK guard at scan time; legacy users
+  # who manually crafted custom `issueSearch` queries may not want the
+  # `ready-for-agent`/`hitl`/`needs-triage` triple enforced here.
+  if [[ -z "$RUN_ID" && ${#NUMBERS_QUEUE[@]} -gt 0 ]]; then
+    fresh_labels=$(echo "$fresh_record" | jq -r '[.labels[].name] | join(",")')
+    if [[ ",${fresh_labels}," != *",ready-for-agent,"* ]]; then
+      state_unlock
+      echo "↪️  Worker $WORKER_ID: #$num lost ready-for-agent during selection; retrying."
+      continue
+    fi
+    if [[ ",${fresh_labels}," == *",hitl,"* ]]; then
+      state_unlock
+      echo "↪️  Worker $WORKER_ID: #$num gained hitl during selection; retrying."
+      continue
+    fi
+    if [[ ",${fresh_labels}," == *",needs-triage,"* ]]; then
+      state_unlock
+      echo "↪️  Worker $WORKER_ID: #$num gained needs-triage during selection; retrying."
+      continue
+    fi
+  fi
+  # Re-parse blockers from the fresh body so newly-added `## Blocked by`
+  # entries are honored.
+  fresh_body=$(echo "$fresh_record" | jq -r '.body // ""')
+  fresh_blockers=$(parse_blockers "$fresh_body")
   blockers_still_satisfied=1
-  for b in $chosen_blockers; do
+  for b in $fresh_blockers; do
     if [[ "$(is_issue_satisfied "$b")" != "1" ]]; then
       blockers_still_satisfied=0
       break
@@ -515,6 +675,16 @@ while true; do
     status_update_item "$num" "claimed" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
   fi
   state_unlock
+
+  # Use the freshest title/body for the prompt — the selection-time snapshot
+  # may be stale if the operator edited the issue between scan and claim.
+  fresh_title=$(echo "$fresh_record" | jq -r .title)
+  if [[ -n "$fresh_title" && "$fresh_title" != "null" ]]; then
+    title="$fresh_title"
+  fi
+  if [[ -n "$fresh_body" ]]; then
+    body="$fresh_body"
+  fi
 
   default_branch=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
   if ralph_merge_ready_open_pr_for_issue "$num" "$default_branch"; then

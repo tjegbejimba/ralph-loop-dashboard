@@ -148,9 +148,9 @@ After `to-issues` has filed the slice issues, invoke the `to-ralph` skill:
 
 The skill will:
 1. Identify the PRD issue number from context (or ask if unclear).
-2. Run `.ralph/launch.sh --enqueue <N>` to write issue numbers into `.ralph/config.json`.
-3. Run `.ralph/launch.sh --status` and parse preflight warnings.
-4. Print either a ✅ **Ready to launch** summary or a ⚠️ list of blockers to fix.
+2. Run `.ralph/launch.sh --enqueue-prd <N>` (for AFK-labelled PRDs) or `.ralph/launch.sh --enqueue <N> [<N>...]` (for explicit child issues) to write issue numbers into `.ralph/config.json`.
+3. Read the preflight report `launch.sh` prints automatically after the enqueue — it covers repo cleanliness, `RALPH.md` PRD reference, queue mode, per-issue label/state/blocker warnings, and a final `✅ Ready to launch | ⚠️ preflight blockers found` verdict.
+4. Print either a ✅ **Ready to launch** summary or a ⚠️ list of blockers paired with exact `gh issue edit` / `git commit` commands the operator can copy.
 
 It will **never** start workers — that remains a human decision.
 
@@ -183,13 +183,31 @@ Each issue body should describe the slice's intent + acceptance criteria. The lo
 ```bash
 .ralph/launch.sh                     # background, logs to .ralph/loop.out
 .ralph/launch.sh --foreground        # attached (single-worker only)
-.ralph/launch.sh --status            # active workers + claims
+.ralph/launch.sh --status            # active workers + claims + preflight
 .ralph/launch.sh --stop              # SIGTERM all workers
 .ralph/launch.sh --cleanup           # stop workers + remove clean worker worktrees
-.ralph/launch.sh --enqueue <N>...    # write issue numbers to config.json
-.ralph/launch.sh --enqueue-prd <N>   # resolve PRD slices and enqueue them
+.ralph/launch.sh --enqueue <N>...    # write issue numbers to config.json + preflight
+.ralph/launch.sh --enqueue-prd <N>   # resolve PRD slices + enqueue + preflight
 .ralph/launch.sh --help | -h         # print flag list and exit
 ```
+
+`--status`, `--enqueue`, and `--enqueue-prd` all emit a structured **Preflight**
+section before exiting. It surfaces a working-tree-dirty warning, RALPH.md PRD
+reference state, the active queue mode (direct-numbers vs. issueSearch),
+per-issue label/state/blocker warnings, and a final `✅ Ready to launch | ⚠️
+preflight blockers found` verdict so you can spot a broken setup before
+launching any worker.
+
+### Selection modes
+
+The worker selects issues from one of three sources, in priority order:
+
+1. **Run-aware** — when `RALPH_RUN_ID` is set, consume `.ralph/runs/<RUN_ID>/queue.json`.
+2. **Direct-numbers** — when `.issue.numbers` in `.ralph/config.json` is non-empty (populated by `--enqueue` or `--enqueue-prd`), iterate that list. AFK guard (must be open, `ready-for-agent`, not `hitl`, blockers satisfied) still applies.
+3. **Title-search** — fall back to `gh issue list --search "<issue.issueSearch>"` and filter by `issue.titleRegex`.
+
+Direct-numbers mode is what makes `--enqueue 5 6 7` actually drive workers
+without operators having to also configure a matching `issueSearch` query.
 
 ### Parallel workers
 

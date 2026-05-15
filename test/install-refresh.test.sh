@@ -77,4 +77,45 @@ if ! grep -q "# Local agent note" "$instructions_file"; then
   exit 1
 fi
 
+# Verify the installer also installs preflight.sh — needed for launch.sh's
+# preflight feature (issue #64). Refreshing should keep it in sync.
+if ! cmp -s "$REPO_ROOT/ralph/lib/preflight.sh" "$TARGET/.ralph/lib/preflight.sh"; then
+  echo "FAIL: installer should install/refresh lib/preflight.sh"
+  exit 1
+fi
+
+# Verify the installer surfaces a dirty-tree warning + copy-pasteable commit
+# hint when the freshly installed files would otherwise leave the working
+# tree dirty (issue #64 follow-up #1).
+fresh_target="$TEST_ROOT/target-dirty"
+git init -q "$fresh_target"
+( cd "$fresh_target" \
+  && git checkout -qb main \
+  && git config user.email "test@example.com" \
+  && git config user.name "Test" \
+  && echo seed > README.md \
+  && git add README.md \
+  && git commit -qm seed )
+
+install_out=$("$REPO_ROOT/install.sh" "$fresh_target" --scripts-only --profile generic 2>&1)
+if ! echo "$install_out" | grep -qF "Target repo is dirty after install"; then
+  echo "FAIL: installer should warn when post-install tree is dirty"
+  echo "--- install output ---"
+  echo "$install_out"
+  echo "----------------------"
+  exit 1
+fi
+if ! echo "$install_out" | grep -qF "git -C \"$fresh_target\" commit -m 'Install Ralph loop scripts'"; then
+  echo "FAIL: installer should print a copy-pasteable commit one-liner"
+  exit 1
+fi
+
+# Verify the installer adds `.ralph` to `.git/info/exclude` so subsequent
+# --enqueue mutations to config.json don't dirty the working tree (issue #64
+# follow-up #1 — the real cause of the dirty-tree footgun).
+if ! grep -qxF ".ralph" "$fresh_target/.git/info/exclude"; then
+  echo "FAIL: installer should add .ralph to .git/info/exclude"
+  exit 1
+fi
+
 echo "PASS: install.sh refreshes scripts without clobbering prompt/config"
