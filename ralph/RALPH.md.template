@@ -25,6 +25,12 @@ You are running headless inside an automation loop with **no human at the keyboa
 5. Check whether an open PR already references this issue:
    `gh pr list --repo {{REPO}} --state open --search "Closes #<N>"`.
    If one exists, **resume it** — check out its branch, do not open a duplicate.
+6. **Resume hint (RALPH_RESUME).** If the env var `RALPH_RESUME=1` is set, this iteration is continuing a prior one that ended without a merged PR (commonly: the autopilot-continues cap was hit mid-implementation). The previous branch is `$RALPH_RESUME_BRANCH` (already pushed to origin). Do NOT re-plan or open a new branch:
+   ```
+   git fetch origin && git checkout "$RALPH_RESUME_BRANCH"
+   git log --oneline -10
+   ```
+   Inspect existing commits to understand what's done, finish the remaining work, run validation, push, and merge.
 
 ## Workflow (TDD — strict)
 

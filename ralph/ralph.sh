@@ -88,7 +88,31 @@ RUN_ID="${RALPH_RUN_ID:-}"
 # and may call `gh pr merge` + `gh issue close` itself if copilot left a green
 # PR open or pushed a branch without opening a PR. See docs/release-branch.md.
 RELEASE_BRANCH="${RALPH_RELEASE_BRANCH:-}"
-BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-}"
+BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-$(config_get '.issue.branchPrefix')}"
+
+# Source state.sh early so the boolean-normalisation helper is available
+# before we resolve the verbose / acceptManuallyClosed / resume flags below.
+# state_init() (which has side effects) is invoked further down after cd.
+# shellcheck source=lib/state.sh
+. "$SCRIPT_DIR/lib/state.sh"
+
+# Resume-incomplete-iterations feature (issue #60). Maximum retries per issue
+# when copilot exits 0 but no merged PR is produced (most often: autopilot
+# continues exhausted mid-implementation). Set to 0 to disable resume.
+_cfg_resume_max=$(config_get '.worker.resumeMax')
+RESUME_MAX="${RALPH_RESUME_MAX:-${_cfg_resume_max:-2}}"
+if ! [[ "$RESUME_MAX" =~ ^[0-9]+$ ]]; then
+  echo "❌ RALPH_RESUME_MAX must be a non-negative integer (got: $RESUME_MAX)" >&2
+  exit 1
+fi
+unset _cfg_resume_max
+
+# Opt-in: resume even when an open PR exists for the slice branch. Default
+# off — when humans are reviewing a PR, Ralph should not keep pushing.
+_cfg_resume_open_pr=$(config_get '.worker.resumeOnOpenPR')
+RALPH_RESUME_ON_OPEN_PR=$(normalize_bool "${RALPH_RESUME_ON_OPEN_PR:-${_cfg_resume_open_pr:-}}") || exit 1
+unset _cfg_resume_open_pr
+
 ONCE=0
 
 # Idle-exit threshold: number of consecutive "no claimable issue" polls before
@@ -100,12 +124,6 @@ if ! [[ "$IDLE_EXIT_POLLS" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 unset _cfg_idle
-
-# Source state.sh early so the boolean-normalisation helper is available
-# before we resolve the verbose / acceptManuallyClosed flags below.
-# state_init() (which has side effects) is invoked further down after cd.
-# shellcheck source=lib/state.sh
-. "$SCRIPT_DIR/lib/state.sh"
 
 # Manually-closed blocker fallback (opt-in). When enabled, is_issue_satisfied
 # accepts CLOSED + stateReason=COMPLETED as satisfied even without a PR
@@ -161,9 +179,19 @@ state_init
 # PR merge fallback helpers.
 # shellcheck source=lib/pr-merge.sh
 . "$SCRIPT_DIR/lib/pr-merge.sh"
+# Resume-incomplete-iterations helpers (issue #60).
+# shellcheck source=lib/resume.sh
+. "$SCRIPT_DIR/lib/resume.sh"
 if [[ -n "$RUN_ID" ]]; then
   status_init
 fi
+
+# Record the worker's "home" branch — the one we want to be on when
+# sync_to_origin_main runs. Normally this is the dedicated worker branch
+# created by launch.sh (e.g. ralph-loop-1). Allows the preflight
+# dirty-tree rescue to return here before the hard-reset in
+# sync_to_origin_main wipes a slice branch.
+INITIAL_BRANCH="${RALPH_INITIAL_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 
 # Sync the current branch to origin/main. Works both when run on `main` itself
 # (legacy single-checkout mode) and in a dedicated worktree on a non-main branch
@@ -262,11 +290,89 @@ wait_for_issue_closed_by_merged_pr() {
 _idle_polls=0
 
 while true; do
-  # Preflight: clean tree, on main, up to date
+  # Resume short-circuit (issue #60). When the previous iteration detected
+  # a resumable state (copilot exited 0 but no merged PR + slice branch has
+  # commits since iter_start_ts), it set RESUME_NUM and `continue`d. Here we
+  # bypass preflight/sync/selection/claim entirely — the claim is already
+  # held, status is `running`, and we just need to relaunch copilot for the
+  # same issue, telling it to continue from the existing branch.
+  if [[ -n "${RESUME_NUM:-}" ]]; then
+    num="$RESUME_NUM"
+    _iter_resume_attempt="$RESUME_ATTEMPT"
+    _iter_resume_branch="$RESUME_BRANCH"
+
+    # Re-fetch title+body — the human may have edited the issue body to
+    # add steering between attempts.
+    _resume_json=$(gh issue view "$num" --repo "$REPO" --json title,body 2>/dev/null || echo '{}')
+    _refreshed_title=$(printf '%s' "$_resume_json" | jq -r '.title // empty')
+    if [[ -n "$_refreshed_title" ]]; then
+      title="$_refreshed_title"
+      body=$(printf '%s' "$_resume_json" | jq -r '.body // ""')
+    else
+      title="${RESUME_TITLE:-$title}"
+      body="${RESUME_BODY:-$body}"
+    fi
+    chosen_blockers=""
+    iter_start_ts=$(date -u +%FT%TZ)
+    ts="$(date +%Y%m%d-%H%M%S)"
+    log_file="$LOG_DIR/iter-${ts}-w${WORKER_ID}-issue-${num}.log"
+    : >"$log_file"
+    CURRENT_CLAIM="$num"
+    _iter_resume_active=1
+    unset RESUME_NUM RESUME_TITLE RESUME_BODY RESUME_BRANCH RESUME_ATTEMPT
+
+    if [[ -n "$RUN_ID" ]]; then
+      state_lock || true
+      # Status stays `running` (not `failed`) — this is what differentiates
+      # a resumable iteration from a terminal halt.
+      status_update_item "$num" "running" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+      state_unlock || true
+    fi
+  else
+    _iter_resume_active=0
+  # Preflight: clean tree, on main, up to date.
+  #
+  # If the tree is dirty AND we're on a recognised slice branch
+  # (BRANCH_PREFIX-prefixed), rescue the leftovers as a wip commit, push,
+  # then return to the worker branch — sync_to_origin_main below does a
+  # hard reset on the current branch which would otherwise orphan the
+  # rescue commit. See docs/resume-incomplete-iterations.md.
   if [[ -n "$(git status --porcelain)" ]]; then
-    echo "⚠️  Working tree is dirty. Halting." >&2
-    git status --short
-    exit 1
+    _cur_branch=$(git rev-parse --abbrev-ref HEAD)
+    if should_auto_commit_dirty "$_cur_branch" "$BRANCH_PREFIX"; then
+      _porcelain=$(git status --porcelain)
+      _sensitive=$(printf '%s\n' "$_porcelain" | any_sensitive_in_porcelain || true)
+      if [[ -n "$_sensitive" ]]; then
+        echo "⚠️  Refusing to auto-commit dirty tree on $_cur_branch: sensitive paths detected." >&2
+        printf '   %s\n' $_sensitive >&2
+        git status --short >&2
+        exit 1
+      fi
+      echo "🧹 Auto-committing dirty tree on $_cur_branch before resume..." >&2
+      git status --short >&2
+      git add -A
+      git commit -q -m "wip: ralph auto-commit before resume" \
+        --trailer "Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>"
+      if ! git push -q -u origin "$_cur_branch"; then
+        # Push failed (network / auth / non-FF). Undo our local commit so
+        # the working tree returns to its dirty state — that way, on
+        # operator-driven restart, the same dirty-tree-rescue path fires
+        # again instead of sync_to_origin_main's hard reset silently
+        # orphaning our local-only WIP commit.
+        git reset --quiet --mixed HEAD~1 || true
+        echo "⚠️  Push of wip commit to origin/$_cur_branch failed; reverted local commit so dirty state is preserved. Halting." >&2
+        exit 1
+      fi
+      if [[ -n "$INITIAL_BRANCH" && "$INITIAL_BRANCH" != "$_cur_branch" ]] \
+          && git show-ref --verify --quiet "refs/heads/$INITIAL_BRANCH"; then
+        git checkout -q "$INITIAL_BRANCH"
+      fi
+      echo "✅ Auto-committed leftover changes on $_cur_branch; returning to $(git rev-parse --abbrev-ref HEAD) for sync." >&2
+    else
+      echo "⚠️  Working tree is dirty. Halting." >&2
+      git status --short
+      exit 1
+    fi
   fi
   sync_to_origin_main
 
@@ -706,9 +812,15 @@ while true; do
     fi
   fi
 
+  fi  # end of resume-short-circuit if/else (issue #60)
+
   echo ""
   echo "============================================================"
-  echo "▶️  $(date -u +%FT%TZ)  Worker $WORKER_ID — #$num: $title"
+  if [[ "$_iter_resume_active" == "1" ]]; then
+    echo "🔁 $(date -u +%FT%TZ)  Worker $WORKER_ID — Resuming #$num (attempt $_iter_resume_attempt/$RESUME_MAX, branch=$_iter_resume_branch): $title"
+  else
+    echo "▶️  $(date -u +%FT%TZ)  Worker $WORKER_ID — #$num: $title"
+  fi
   echo "    log: $log_file"
   echo "    model: $MODEL    timeout: ${TIMEOUT_SEC}s"
   echo "============================================================"
@@ -724,6 +836,28 @@ ${body}"
 ISSUE #${num}
 ---
 ${issue_text}"
+
+  if [[ "$_iter_resume_active" == "1" ]]; then
+    full_prompt="${full_prompt}
+
+---
+RALPH_RESUME
+---
+A prior iteration on this issue ended without producing a merged PR.
+Your previous work is preserved on branch '${_iter_resume_branch}' (already pushed to origin).
+This is resume attempt ${_iter_resume_attempt} of ${RESUME_MAX}.
+
+DO NOT re-plan or open a new branch. Instead:
+  1. \`git fetch origin && git checkout ${_iter_resume_branch}\`
+  2. Inspect existing commits to understand what's done.
+  3. Finish the remaining implementation work.
+  4. Run lints/tests, then push.
+  5. Open a PR (if not already open) and merge once green.
+"
+    export RALPH_RESUME=1 RALPH_RESUME_ATTEMPT="$_iter_resume_attempt" RALPH_RESUME_BRANCH="$_iter_resume_branch"
+  else
+    unset RALPH_RESUME RALPH_RESUME_ATTEMPT RALPH_RESUME_BRANCH || true
+  fi
 
   # Update status to "running" before calling copilot (run-aware mode only)
   if [[ -n "$RUN_ID" ]]; then
@@ -849,6 +983,63 @@ ${issue_text}"
   fi
 
   if [[ "$merged_count" -lt 1 ]]; then
+    # Resume-incomplete-iterations (issue #60). Before marking the issue as
+    # terminally failed, check whether this iteration left commits on a
+    # slice branch. If so, we likely just hit the autopilot-continues cap
+    # mid-implementation — relaunch copilot on the same issue and tell it
+    # to finish from the existing branch.
+    if [[ -n "$BRANCH_PREFIX" && "$RESUME_MAX" -gt 0 ]]; then
+      # Resume counter persists on the state.json claim record. The claim
+      # is created in both run-aware and legacy modes, so this works in
+      # both. Status updates remain run-aware-only.
+      state_lock || true
+      _current_attempt=$(state_get_resume_attempt "$num" 2>/dev/null || echo 0)
+      state_unlock || true
+      _next_attempt=$((_current_attempt + 1))
+
+      _resume_branch=$(resume_branch_for_issue "$num" "$BRANCH_PREFIX" || true)
+      _resume_eligible=0
+      _resume_reason=""
+
+      if [[ -z "$_resume_branch" ]]; then
+        _resume_reason="no slice branch matching ${BRANCH_PREFIX}${num}-* found"
+      elif ! resume_branch_ahead_of_base "$_resume_branch" "$default_branch"; then
+        _resume_reason="branch '$_resume_branch' has no new commits vs $default_branch"
+      elif ! resume_branch_head_after "$_resume_branch" "$iter_start_ts"; then
+        _resume_reason="branch '$_resume_branch' HEAD predates this iteration (stale from prior run)"
+      else
+        _open_pr=$(open_pr_for_branch "$REPO" "$_resume_branch" || true)
+        if [[ -n "$_open_pr" && "$RALPH_RESUME_ON_OPEN_PR" != "1" ]]; then
+          _resume_reason="open PR #$_open_pr exists on '$_resume_branch' — human review required (set RALPH_RESUME_ON_OPEN_PR=1 to override)"
+        elif [[ "$_next_attempt" -gt "$RESUME_MAX" ]]; then
+          _resume_reason="resume cap exhausted ($_current_attempt/$RESUME_MAX)"
+        else
+          _resume_eligible=1
+        fi
+      fi
+
+      if [[ "$_resume_eligible" == "1" ]]; then
+        state_lock || true
+        state_set_resume_attempt "$num" "$_next_attempt" "$_resume_branch" || true
+        if [[ -n "$RUN_ID" ]]; then
+          # Keep status `running` (not `failed`) so this issue isn't skipped
+          # as terminal on the next selection pass.
+          status_update_item "$num" "running" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+        fi
+        state_unlock || true
+        format_resume_log "$_next_attempt" "$RESUME_MAX" "$_resume_branch" "$num" >&2
+        # Stash resume context for the loop-top short-circuit.
+        export RESUME_NUM="$num"
+        export RESUME_TITLE="$title"
+        export RESUME_BODY="$body"
+        export RESUME_BRANCH="$_resume_branch"
+        export RESUME_ATTEMPT="$_next_attempt"
+        continue
+      else
+        echo "ℹ️  Not resuming #$num: $_resume_reason" >&2
+      fi
+    fi
+
     # Mark as failed in status.json (run-aware mode only)
     if [[ -n "$RUN_ID" ]]; then
       state_lock || true
