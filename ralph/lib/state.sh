@@ -192,6 +192,42 @@ state_release() {
     && mv "$tmp" "$STATE_FILE"
 }
 
+# state_set_resume_attempt ISSUE ATTEMPT BRANCH
+# Persist the in-flight resume attempt count + slice-branch name on the
+# existing claim record. The data lives under the claim so state_release
+# clears it implicitly — no separate lifecycle. Caller MUST hold the
+# state lock. No-op (with diagnostic) if no claim exists for ISSUE.
+state_set_resume_attempt() {
+  local issue="$1" attempt="$2" branch="${3-}"
+  local tmp
+  if ! jq -e --arg issue "$issue" '.claims | has($issue)' "$STATE_FILE" >/dev/null 2>&1; then
+    echo "⚠️  state_set_resume_attempt: no claim for #$issue; refusing to write resume state" >&2
+    return 1
+  fi
+  tmp=$(state_mktemp)
+  jq --arg issue "$issue" --argjson attempt "$attempt" --arg branch "$branch" '
+    .claims[$issue].resumeAttempt = $attempt
+    | .claims[$issue].resumeBranch = $branch
+  ' "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE"
+}
+
+# state_get_resume_attempt ISSUE
+# Echo the persisted resume attempt count for ISSUE (0 if absent). Safe
+# to call without the state lock for read-only checks; the worst case
+# is a stale read.
+state_get_resume_attempt() {
+  local issue="$1"
+  jq -r --arg issue "$issue" '.claims[$issue].resumeAttempt // 0' "$STATE_FILE" 2>/dev/null || echo 0
+}
+
+# state_get_resume_branch ISSUE
+# Echo the persisted slice-branch name for ISSUE's most recent resume
+# attempt, or empty if none. See state_set_resume_attempt.
+state_get_resume_branch() {
+  local issue="$1"
+  jq -r --arg issue "$issue" '.claims[$issue].resumeBranch // ""' "$STATE_FILE" 2>/dev/null || true
+}
+
 # Parse the "## Blocked by" section of an issue body and emit blocker issue
 # numbers, one per line. Empty output = no blockers.
 #

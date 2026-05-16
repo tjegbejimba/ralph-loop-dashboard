@@ -49,6 +49,7 @@ setup_repo() {
   cp "$REPO_ROOT/ralph/lib/state.sh"  .ralph/lib/state.sh
   cp "$REPO_ROOT/ralph/lib/status.sh" .ralph/lib/status.sh
   cp "$REPO_ROOT/ralph/lib/pr-merge.sh" .ralph/lib/pr-merge.sh
+  cp "$REPO_ROOT/ralph/lib/resume.sh" .ralph/lib/resume.sh
   chmod +x .ralph/ralph.sh .ralph/launch.sh
 
   cat > .ralph/RALPH.md <<'EOF'
