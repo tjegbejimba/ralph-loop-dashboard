@@ -434,6 +434,62 @@ EOF
     "status (search): echoes the configured search query"
 }
 
+# ─── Regression: config.json with CRLF line endings ───────────────────────────
+# On Windows, `jq -r '.[]'` emits CRLF line endings, which leaked through
+# preflight's numbers iterator and produced calls like
+# `gh issue view 187$'\r' ...` that real gh rejects with "lookup_failed".
+# The actual worker path in ralph.sh already stripped CR (`| tr -d '\r'`);
+# preflight was missing it. This test uses a stricter mock gh that rejects
+# any non-numeric issue number — the shared mock parses with jq --argjson,
+# which silently tolerates trailing whitespace like \r, so it cannot
+# reproduce the user-visible failure.
+{
+  repo=$(new_repo)
+  # Write a config with explicit CRLF endings to reproduce the on-Windows
+  # state of config.json after `gh`/`jq`-mediated writes on git-bash.
+  printf '{\r\n  "issue": {\r\n    "numbers": [11, 12]\r\n  },\r\n  "profile": "default"\r\n}\r\n' \
+    > "$repo/.ralph/config.json"
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+
+  bin_dir="$TEST_ROOT/bin-crlf"
+  # Strict mock: refuse to look up any issue whose number isn't purely digits.
+  # Matches real gh's behavior — it URL-encodes the path and the server 404s.
+  write_mock_gh "$bin_dir" '
+if [[ "$1" == "issue" && "$2" == "view" ]]; then
+  num="$3"
+  if ! [[ "$num" =~ ^[0-9]+$ ]]; then
+    echo "gh: not a valid issue number: $num" >&2
+    exit 1
+  fi
+  match=$(printf "%s\n" "$ISSUE_BLOB" | jq -c --argjson n "$num" "select(.number == \$n)")
+  [[ -z "$match" ]] && { echo "issue not found" >&2; exit 1; }
+  echo "$match"
+  exit 0
+fi
+[[ "$1" == "auth" && "$2" == "status" ]] && exit 0
+echo "mock gh: unhandled: $*" >&2
+exit 2
+'
+
+  blob=$(printf '%s\n%s\n' \
+    "$(issue_json 11 OPEN ready-for-agent 'CRLF-config slice.')" \
+    "$(issue_json 12 OPEN ready-for-agent 'Another CRLF-config slice.')"
+  )
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  [[ "$rc" -eq 0 ]] && pass "crlf: --status exits 0" \
+    || fail "crlf: --status exits 0 (got $rc)"
+  assert_contains     "$out" "#11"           "crlf: lists issue #11"
+  assert_contains     "$out" "#12"           "crlf: lists issue #12"
+  assert_not_contains "$out" "lookup_failed" "crlf: no lookup_failed warning"
+}
+
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo
 echo "Results: $PASS passed, $FAIL failed"

@@ -207,7 +207,7 @@ preflight_run() {
     while IFS= read -r n; do
       [[ -z "$n" ]] && continue
       _preflight_scan_issue "$n"
-    done < <(echo "$numbers_json" | jq -r '.[]')
+    done < <(echo "$numbers_json" | jq -r '.[]' | tr -d '\r')
   else
     echo "  Queue mode: issueSearch: ${issue_search}"
     if [[ -z "$issue_search" ]]; then
