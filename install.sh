@@ -111,7 +111,10 @@ if [[ "$MODE" != "--skills-only" ]]; then
     exit 1
   fi
 
-  if [[ ! -d "$TARGET/.git" ]]; then
+  # Accept both regular checkouts (.git directory) and linked worktrees
+  # (.git gitlink file). Defer to git rather than path-shape sniffing so
+  # future git layouts stay supported.
+  if ! git -C "$TARGET" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     echo "❌ Target is not a git repo: $TARGET" >&2
     exit 1
   fi
@@ -234,9 +237,21 @@ install_scripts() {
   # working tree and trip up the worker preflight that aborts on a non-clean
   # tree. The launcher does this lazily during its setup phase, but we need
   # it earlier so `--enqueue` / `--status` work cleanly from a fresh install.
-  if [[ -d "$target/.git" ]]; then
-    mkdir -p "$target/.git/info"
-    local exclude_file="$target/.git/info/exclude"
+  #
+  # Resolve the exclude file via `git rev-parse --git-path` so worktrees
+  # (where $target/.git is a gitlink file) write to the common gitdir's
+  # info/exclude instead of a non-existent path. The common exclude is
+  # shared across all worktrees of the repo — that's intentional: .ralph/
+  # should be ignored in every worktree once any worktree installs Ralph.
+  if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    local exclude_rel exclude_file
+    exclude_rel="$(git -C "$target" rev-parse --git-path info/exclude)"
+    if [[ "$exclude_rel" = /* ]]; then
+      exclude_file="$exclude_rel"
+    else
+      exclude_file="$target/$exclude_rel"
+    fi
+    mkdir -p "$(dirname "$exclude_file")"
     if ! grep -qxF ".ralph" "$exclude_file" 2>/dev/null; then
       echo ".ralph" >> "$exclude_file"
       echo "🙈 Added .ralph to $exclude_file (keeps runtime state out of git porcelain)"

@@ -35,8 +35,31 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 DEFAULT_MAIN="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 MAIN_REPO="${RALPH_MAIN_REPO:-$DEFAULT_MAIN}"
 LOOP_REPO_BASE="${RALPH_LOOP_REPO:-${MAIN_REPO}-ralph}"
-LOOP_BRANCH_BASE="${RALPH_LOOP_BRANCH:-ralph-loop}"
 PARALLELISM="${RALPH_PARALLELISM:-1}"
+
+# Compute a stable 12-char token from $MAIN_REPO's realpath. Used as the
+# default loop branch suffix so two worktrees of the same repo each get
+# their own branch (avoiding `git worktree add -B` failures on a shared
+# `ralph-loop` ref). The hash is path-derived — NOT branch-derived — so it
+# survives host worktree renames or detached-HEAD states. shasum is
+# preferred over sha256sum for macOS/Linux portability; both ship in base
+# installs and we slice the hex prefix the same way either way.
+_default_branch_token() {
+  local hash_input hash
+  hash_input="$(cd "$MAIN_REPO" && pwd -P)"
+  if command -v shasum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$hash_input" | shasum -a 256 | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$hash_input" | sha256sum | awk '{print $1}')"
+  else
+    # Worst-case fallback: a deterministic awk hash of the path. Lower
+    # entropy than sha256 but still unique enough across a handful of
+    # worktrees on one repo.
+    hash="$(printf '%s' "$hash_input" | awk '{h=0; for(i=1;i<=length($0);i++) h=(h*31+rdc(substr($0,i,1)))%1000000007; printf "%012x", h} function rdc(c){return index("abcdefghijklmnopqrstuvwxyz_-/.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ",c)+1}')"
+  fi
+  printf '%s' "${hash:0:12}"
+}
+LOOP_BRANCH_BASE="${RALPH_LOOP_BRANCH:-ralph-loop-$(_default_branch_token)}"
 
 RALPH_SCRIPT="$(cd "$MAIN_REPO/.ralph" && pwd -P)/ralph.sh"
 
@@ -615,19 +638,71 @@ unset _flag
 # Launcher-level mutex — prevents two concurrent `launch.sh` invocations from
 # both running setup (which mutates .git/info/exclude, worktrees, and branch
 # state). Workers never need to touch this lock.
+#
+# We acquire TWO locks:
+#   1. The per-.ralph SETUP_LOCK guards against double-invocation from the
+#      same .ralph/ (e.g., dashboard double-click).
+#   2. A common-gitdir setup lock guards against simultaneous launches from
+#      *different* worktrees of the same repo. Both worktrees share refs,
+#      packed-refs, and `git worktree add`'s worktree registry, so
+#      uncoordinated setup phases can race.
 SETUP_LOCK="$MAIN_REPO/.ralph/launch.lock"
 if ! acquire_lockdir "$SETUP_LOCK"; then
   echo "❌ Another launch.sh is in flight (lock at $SETUP_LOCK). Aborting." >&2
   exit 1
 fi
-trap 'release_lockdir "$SETUP_LOCK"' EXIT
+COMMON_GIT_DIR="$(git -C "$MAIN_REPO" rev-parse --git-common-dir 2>/dev/null || echo "$MAIN_REPO/.git")"
+# rev-parse returns a path relative to MAIN_REPO when the repo is a
+# regular checkout; absolutize so the lock lives in the same place
+# regardless of which worktree invoked launch.
+if [[ "$COMMON_GIT_DIR" != /* ]]; then
+  COMMON_GIT_DIR="$MAIN_REPO/$COMMON_GIT_DIR"
+fi
+COMMON_GIT_DIR="$(cd "$COMMON_GIT_DIR" 2>/dev/null && pwd -P || echo "$COMMON_GIT_DIR")"
+COMMON_SETUP_LOCK="$COMMON_GIT_DIR/ralph-launch.lock"
+if ! acquire_lockdir "$COMMON_SETUP_LOCK"; then
+  release_lockdir "$SETUP_LOCK"
+  echo "❌ Another launch.sh is in flight against this repo's common gitdir (lock at $COMMON_SETUP_LOCK). Aborting." >&2
+  exit 1
+fi
+trap 'release_lockdir "$COMMON_SETUP_LOCK"; release_lockdir "$SETUP_LOCK"' EXIT
 
 # Setup phase: create N worktrees and symlink .ralph in each.
-EXCLUDE_FILE="$MAIN_REPO/.git/info/exclude"
+# Resolve the exclude file via git so worktree targets (where MAIN_REPO/.git
+# is a gitlink file) write to the common gitdir's info/exclude. The common
+# exclude is shared across all worktrees of the repo, which is what we
+# want — .ralph/ should be ignored everywhere once any worktree opts in.
+_exclude_rel="$(git -C "$MAIN_REPO" rev-parse --git-path info/exclude 2>/dev/null || echo "")"
+if [[ -n "$_exclude_rel" ]]; then
+  if [[ "$_exclude_rel" = /* ]]; then
+    EXCLUDE_FILE="$_exclude_rel"
+  else
+    EXCLUDE_FILE="$MAIN_REPO/$_exclude_rel"
+  fi
+else
+  EXCLUDE_FILE="$MAIN_REPO/.git/info/exclude"
+fi
+unset _exclude_rel
+mkdir -p "$(dirname "$EXCLUDE_FILE")"
 if ! grep -qxF ".ralph" "$EXCLUDE_FILE" 2>/dev/null; then
   echo "🙈 Adding .ralph to $EXCLUDE_FILE"
   echo ".ralph" >> "$EXCLUDE_FILE"
 fi
+
+# Retry git fetch — independent loops from sibling worktrees share the
+# common gitdir's refs/remotes/origin/main.lock; a single collision under
+# `set -e` would abort the entire setup. Mirrors the worker-side retry
+# loop in ralph/ralph.sh::sync_to_origin_main.
+_launch_git_fetch() {
+  local repo="$1"
+  local attempt rc=1
+  for attempt in 1 2 3 4 5; do
+    git -C "$repo" fetch origin main >/dev/null 2>&1 && return 0
+    rc=$?
+    sleep "$(awk -v a="$attempt" 'BEGIN{srand(); printf "%.2f", a*(0.5+rand())}')"
+  done
+  return "$rc"
+}
 
 for ((i = 1; i <= PARALLELISM; i++)); do
   loop_repo=$(worker_repo "$i")
@@ -641,7 +716,8 @@ for ((i = 1; i <= PARALLELISM; i++)); do
   if [[ ! -d "$loop_repo" ]]; then
     echo "🌱 Worker $i: creating worktree at $loop_repo on branch $loop_branch"
     cd "$MAIN_REPO"
-    git fetch origin main
+    _launch_git_fetch "$MAIN_REPO" \
+      || { echo "❌ git fetch origin main failed after 5 attempts; aborting setup." >&2; exit 1; }
     git worktree add -B "$loop_branch" "$loop_repo" origin/main
     cd "$loop_repo"
     git branch --set-upstream-to=origin/main "$loop_branch"
@@ -653,8 +729,17 @@ for ((i = 1; i <= PARALLELISM; i++)); do
   fi
 
   cd "$loop_repo"
-  git fetch origin main
-  git checkout "$loop_branch" >/dev/null
+  _launch_git_fetch "$loop_repo" \
+    || { echo "❌ git fetch origin main failed after 5 attempts; aborting setup." >&2; exit 1; }
+  # Legacy migration: pre-existing single-worktree installs may already be
+  # checked out on the old default `ralph-loop` branch. If the expected
+  # hash-derived branch doesn't exist yet, create it from origin/main
+  # in-place rather than failing the checkout. Idempotent on re-launch.
+  if ! git rev-parse --verify --quiet "refs/heads/$loop_branch" >/dev/null; then
+    git checkout -B "$loop_branch" origin/main >/dev/null
+  else
+    git checkout "$loop_branch" >/dev/null
+  fi
   git reset --hard origin/main >/dev/null
   echo "✅ Worker $i: on $(git rev-parse --abbrev-ref HEAD) at $(git rev-parse --short HEAD)"
 done
@@ -664,6 +749,7 @@ LOG="$MAIN_REPO/.ralph/loop.out"
 
 if [[ "${1:-}" == "--foreground" ]]; then
   cd "$(worker_repo 1)"
+  release_lockdir "$COMMON_SETUP_LOCK"
   release_lockdir "$SETUP_LOCK"
   trap - EXIT
   spawn_caffeinate 1 "$$"
