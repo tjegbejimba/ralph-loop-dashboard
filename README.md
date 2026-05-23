@@ -212,8 +212,11 @@ without operators having to also configure a matching `issueSearch` query.
 ### Parallel workers
 
 Run multiple slices concurrently. Each worker gets its own git worktree
-(`<MAIN>-ralph-1`, `-2`, …) on its own branch (`ralph-loop-1`, …) and they
-coordinate via `.ralph/state.json` (file-locked).
+(`<MAIN>-ralph-1`, `-2`, …) on its own branch (`ralph-loop-<hash>-1`, …) and
+they coordinate via `.ralph/state.json` (file-locked). The `<hash>` is a
+stable 12-char digest of `MAIN_REPO`'s realpath so multiple git worktrees of
+the same repo can run independent loops side by side without colliding on a
+shared `ralph-loop` branch ref.
 
 ```bash
 RALPH_PARALLELISM=2 .ralph/launch.sh
@@ -247,6 +250,27 @@ Or use the dashboard's "Start" button (after restarting Copilot CLI):
 The loop iterates until no open matching issues remain, then exits cleanly.
 Use `--cleanup` after a run to remove worker worktrees that Ralph created. Dirty
 worktrees are left in place for inspection instead of being deleted.
+
+### Per-worktree loops
+
+You can install and run an independent Ralph loop in each git worktree of a
+repo. The default loop branch is hash-derived from the host worktree's
+realpath, so two worktrees never compete for the same `ralph-loop` branch:
+
+```bash
+# From the main checkout
+./install.sh /path/to/repo --scripts-only
+cd /path/to/repo && .ralph/launch.sh
+
+# From a separate worktree of the same repo
+./install.sh /path/to/repo-wt-feature --scripts-only
+cd /path/to/repo-wt-feature && .ralph/launch.sh   # independent loop, own state.json
+```
+
+**Hard invariant:** do not enqueue the same GitHub issue number into more than
+one Ralph loop for the same repository. Each loop's `.ralph/state.json` is
+isolated, so duplicate enqueues will race on PR creation and branch names. v1
+does not provide cross-loop claim coordination.
 
 ## Configuration
 
@@ -305,7 +329,7 @@ Environment variables still override config:
 | `RALPH_AUTOPILOT_CONTINUES` | `15` | `copilot --max-autopilot-continues` value. Copilot CLI's default is 5, which often runs out before commit/push/PR if the agent has to debug a build. Bump this if iterations halt after staging changes but before opening a PR. |
 | `RALPH_MAIN_REPO` | parent of `.ralph/` | Path to your main checkout |
 | `RALPH_LOOP_REPO` | `<MAIN>-ralph` | Base path for loop worktree(s); worker N gets `-N` suffix when parallelism>1 |
-| `RALPH_LOOP_BRANCH` | `ralph-loop` | Base branch name; worker N gets `-N` suffix when parallelism>1 |
+| `RALPH_LOOP_BRANCH` | `ralph-loop-<hash12>` | Base branch name (hash derived from `MAIN_REPO` realpath); worker N gets `-N` suffix when parallelism>1 |
 | `RALPH_PARALLELISM` | `1` | Number of concurrent workers |
 | `RALPH_WORKER_ID` | `1` | Set automatically by `launch.sh`; identifies a worker in `state.json` and log filenames |
 | `RALPH_POLL_SEC` | `30` | How long a worker sleeps when no eligible issue is available |
