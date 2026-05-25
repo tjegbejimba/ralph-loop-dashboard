@@ -239,17 +239,44 @@ state_get_resume_branch() {
 # And short-circuits on:
 #   ## Blocked by
 #   None — can start immediately.
+#   # …or…
+#   No blockers; …
+#
+# The section is bounded by `## Blocked by` and either the next `## ` header,
+# end of body, OR the first non-blank line that isn't a list item / `none`
+# line. This keeps trailing footers like `Part of #<parent-prd>` or
+# `Closes #N` (canonical output of the `to-issues` skill) from being
+# wrongly extracted as blockers — see issue #73.
+#
+# Extraction is bullet-only (`-`, `*`, or `+`): inline prose like
+# `Blocked by #123` *inside* the section is intentionally ignored. This is
+# the canonical shape Ralph emits and the safer fail-mode (over-stalling on
+# every PRD-decomposed slice is worse than skipping a hand-authored issue
+# whose blockers are documented in prose).
 parse_blockers() {
   local body="$1"
-  # Extract the section between "## Blocked by" and the next "##" header.
   local section
   section=$(printf '%s\n' "$body" \
-    | awk '/^## Blocked by/{flag=1; next} /^## /{flag=0} flag')
-  # If the section says "None", treat as no blockers.
-  if printf '%s' "$section" | grep -qiE '^[[:space:]]*-?[[:space:]]*none\b'; then
+    | awk '
+        /^## Blocked by/ { flag=1; next }
+        /^## /           { flag=0 }
+        !flag            { next }
+        /^[[:space:]]*$/                                                 { print; next }
+        /^[[:space:]]*[-*+][[:space:]]/                                  { print; next }
+        /^[[:space:]]*-?[[:space:]]*([Nn]one|[Nn]o[[:space:]]+blockers)\b/ { print; next }
+        { flag=0 }
+      ')
+  # `None` / `No blockers` short-circuit (anchored to the start of a line so a
+  # trailing `Part of #N` footer that slipped into the section by mistake
+  # can't masquerade as the short-circuit and vice versa).
+  if printf '%s' "$section" | grep -qiE '^[[:space:]]*-?[[:space:]]*(none|no[[:space:]]+blockers)\b'; then
     return 0
   fi
-  printf '%s' "$section" | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true
+  # Bullet-only extraction: only consider lines that start with a list-item
+  # marker. Belt-and-braces against any future change to the awk above.
+  printf '%s' "$section" \
+    | grep -E '^[[:space:]]*[-*+][[:space:]]+.*#[0-9]+' \
+    | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true
 }
 
 # Check whether an issue is closed by a *merged PR* — the same predicate the
