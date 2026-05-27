@@ -22,6 +22,12 @@ export function shouldUseColor(env = process.env, opts = {}) {
   if (opts.color === true) return true;
   if (env.NO_COLOR) return false;
   if (env.TERM === "dumb") return false;
+  // Default to no-color when writing to a non-TTY (pipes/files), so
+  // `.ralph/launch.sh --status > status.txt` doesn't get ANSI escapes.
+  // `isTTY` is true on a real TTY and undefined otherwise — treat anything
+  // other than strict true as non-TTY.
+  if (opts.isTTY === false) return false;
+  if (opts.isTTY == null && !(process.stdout && process.stdout.isTTY === true)) return false;
   return true;
 }
 

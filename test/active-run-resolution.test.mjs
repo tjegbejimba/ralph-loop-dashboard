@@ -102,6 +102,26 @@ test("resolveActiveRun — tolerates corrupt status.json", () => {
   }
 });
 
+test("resolveActiveRun — prefers run containing live claims over non-terminal run", () => {
+  const root = makeFixture();
+  try {
+    // Run A: has a non-terminal queued item but no live claim
+    seedRun(root, "queue-only", {
+      items: { "5": { status: "queued" } },
+    }, "2026-05-26T18:00:00Z");
+    // Run B: status items all terminal, but contains the live-claimed issue #42
+    seedRun(root, "terminal-but-live", {
+      items: { "42": { status: "merged" }, "41": { status: "merged" } },
+    }, "2026-05-26T17:00:00Z");
+
+    const r = resolveActiveRun(root, { liveIssues: [42] });
+    assert.equal(r.runId, "terminal-but-live");
+    assert.equal(r.isActive, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createStatusReader.buildLocalPayload — assembles workers + activeRun + tail", () => {
   const root = makeFixture();
   try {

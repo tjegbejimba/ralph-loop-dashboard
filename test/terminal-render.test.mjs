@@ -27,6 +27,14 @@ test("shouldUseColor — opts.color overrides env", () => {
   assert.equal(shouldUseColor({}, { color: false }), false);
 });
 
+test("shouldUseColor — defaults off when stdout is not a TTY", () => {
+  assert.equal(shouldUseColor({}, { isTTY: false }), false);
+});
+
+test("shouldUseColor — explicit color overrides non-TTY default", () => {
+  assert.equal(shouldUseColor({}, { isTTY: false, color: true }), true);
+});
+
 test("renderWorkers — empty list shows placeholder", () => {
   const out = renderWorkers([], c);
   assert.match(out, /no active workers/);

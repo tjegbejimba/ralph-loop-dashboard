@@ -46,8 +46,10 @@ function parseFlags(args) {
     } else if (a === "--worker") {
       const n = Number(args[++i]);
       if (Number.isFinite(n)) flags.worker = n;
-    } else if (/^-?\d+(\.\d+)?$/.test(a) && flags._numericPos == null) {
+    } else if (/^\d+(\.\d+)?$/.test(a) && flags._numericPos == null) {
       // Positional numeric arg — used by `watch <SEC>` and `follow <N>`.
+      // Only accepts non-negative; negative values fall through and are
+      // surfaced as unknown args by the subcommand.
       flags._numericPos = Number(a);
     }
   }
@@ -74,6 +76,10 @@ async function cmdStatus(reader, flags) {
 
 async function cmdWatch(reader, flags) {
   const interval = flags._numericPos || flags.interval;
+  if (!(Number.isFinite(interval) && interval > 0)) {
+    process.stderr.write(`Invalid --watch interval: ${interval}. Must be > 0.\n`);
+    process.exit(2);
+  }
   const useColor = shouldUseColor(process.env, { color: flags.color });
   const canClear = useColor && process.stdout.isTTY && process.env.TERM !== "dumb";
 
@@ -113,13 +119,19 @@ async function cmdFollow(reader, flags) {
     process.stderr.write(`${current.error}\n`);
     process.exit(2);
   }
+  // Once we've followed a worker, we don't exit when its claim briefly
+  // disappears — that's the normal between-slices gap. The followed worker
+  // (or the lowest-numbered active worker, when --worker isn't pinned) will
+  // come back. Track the pinned workerId so we can re-acquire it after the
+  // gap.
+  const pinnedWorkerId = workerArg ?? current.workerId;
 
   let child = null;
   let stopping = false;
-  const startTail = (logFile, issue) => {
+  let waiting = false;
+  const startTail = (logFile, issue, workerId) => {
     const logPath = join(reader.paths.LOGS_DIR, logFile);
-    process.stdout.write(`── following w${current.workerId} #${issue} · ${logFile} ──\n`);
-    // Use tail -F when available (handles rotation/recreation); fall back to -f.
+    process.stdout.write(`── following w${workerId} #${issue} · ${logFile} ──\n`);
     const args = ["-F", logPath];
     child = spawn("tail", args, { stdio: ["ignore", "inherit", "inherit"] });
     child.on("error", (err) => {
@@ -143,23 +155,34 @@ async function cmdFollow(reader, flags) {
   process.on("SIGINT", onSig);
   process.on("SIGTERM", onSig);
 
-  startTail(current.logFile, current.issue);
+  startTail(current.logFile, current.issue, current.workerId);
 
-  // Poll state.json every 2s. If the followed worker's logFile changes,
-  // print a separator and re-tail. If the worker disappears, exit cleanly.
+  // Poll state.json every 2s. Behaviour:
+  //   - logFile changed → print separator + re-tail (slice rollover).
+  //   - pinned worker disappeared → enter "waiting" mode; keep polling.
+  //   - pinned worker reappears with a new logFile → re-tail.
+  // The user must Ctrl-C to exit; follow never gives up on its own.
   while (!stopping) {
     await new Promise((r) => setTimeout(r, 2000));
-    const next = pickWorkerLog(reader, current.workerId);
+    const next = pickWorkerLog(reader, pinnedWorkerId);
     if (next.error) {
-      process.stdout.write(`\n── ${next.error} ──\n`);
-      stopTail();
-      process.exit(0);
+      if (!waiting) {
+        stopTail();
+        process.stdout.write(`\n── worker w${pinnedWorkerId} idle; waiting for next claim (Ctrl-C to exit) ──\n`);
+        waiting = true;
+      }
+      continue;
     }
-    if (next.logFile !== current.logFile) {
+    if (waiting || next.logFile !== current.logFile) {
       stopTail();
-      process.stdout.write(`\n── worker rolled to new iteration: #${next.issue} ──\n`);
+      if (waiting) {
+        process.stdout.write(`\n── worker w${next.workerId} resumed: #${next.issue} ──\n`);
+      } else {
+        process.stdout.write(`\n── worker rolled to new iteration: #${next.issue} ──\n`);
+      }
+      waiting = false;
       current = next;
-      startTail(current.logFile, current.issue);
+      startTail(current.logFile, current.issue, current.workerId);
     }
   }
 }

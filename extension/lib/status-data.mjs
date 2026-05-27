@@ -135,12 +135,24 @@ export function detectReviewStats(logBody) {
   return { gpt, opus, total: gpt + opus };
 }
 
-// Resolve the "active run" inside .ralph/runs/. Prefers a run whose status.json
-// has any non-terminal items (running/claimed/queued); falls back to the
-// newest mtime. Returns { runId, runDir, statusFile, isActive } or null.
-export function resolveActiveRun(repoRoot) {
+// Resolve the "active run" inside .ralph/runs/. Prefers (in order):
+//   1. A run whose status.json items overlap with the issues currently
+//      claimed in state.json — state.json is canonical for live workers,
+//      so if a worker is actively running an issue and that issue appears
+//      in run X's status.json, run X is the active one even if its
+//      status items have all been marked terminal (lifecycle lag).
+//   2. A run whose status.json contains any non-terminal item
+//      (running/claimed/queued).
+//   3. Newest mtime as final tiebreak.
+// Returns { runId, runDir, statusFile, statusData, isActive } or null.
+export function resolveActiveRun(repoRoot, opts = {}) {
   const runsDir = join(repoRoot, ".ralph", "runs");
   if (!existsSync(runsDir)) return null;
+
+  // Caller may pass currently-claimed issue numbers (typically derived from
+  // state.json) so we can prefer the run that owns those live claims.
+  const liveIssues = new Set((opts.liveIssues || []).map(Number));
+
   let entries;
   try {
     entries = readdirSync(runsDir, { withFileTypes: true })
@@ -159,21 +171,26 @@ export function resolveActiveRun(repoRoot) {
           }
         } catch {}
         const items = statusData?.items || {};
-        let active = false;
-        for (const v of Object.values(items)) {
+        let hasNonTerminal = false;
+        let containsLiveClaim = false;
+        for (const [issueKey, v] of Object.entries(items)) {
           if (v && (v.status === "running" || v.status === "claimed" || v.status === "queued")) {
-            active = true;
-            break;
+            hasNonTerminal = true;
+          }
+          if (liveIssues.has(Number(issueKey))) {
+            containsLiveClaim = true;
           }
         }
-        return { runId: e.name, runDir, statusFile, mtime, active, statusData };
+        return { runId: e.name, runDir, statusFile, mtime, hasNonTerminal, containsLiveClaim, statusData };
       });
   } catch {
     return null;
   }
   if (entries.length === 0) return null;
+
   entries.sort((a, b) => {
-    if (a.active !== b.active) return a.active ? -1 : 1;
+    if (a.containsLiveClaim !== b.containsLiveClaim) return a.containsLiveClaim ? -1 : 1;
+    if (a.hasNonTerminal !== b.hasNonTerminal) return a.hasNonTerminal ? -1 : 1;
     return b.mtime - a.mtime;
   });
   const chosen = entries[0];
@@ -182,7 +199,7 @@ export function resolveActiveRun(repoRoot) {
     runDir: chosen.runDir,
     statusFile: chosen.statusFile,
     statusData: chosen.statusData,
-    isActive: chosen.active,
+    isActive: chosen.containsLiveClaim || chosen.hasNonTerminal,
   };
 }
 
@@ -579,7 +596,10 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
       ...it,
       cumulativeTokens: getWorkerCumulativeTokens(it.workerId),
     }));
-    const activeRun = resolveActiveRun(repoRoot);
+    // Pass live issue numbers from state.json claims so resolveActiveRun
+    // can prefer the run that owns the currently-running work.
+    const liveIssues = iterations.map((it) => it.issue).filter((n) => Number.isFinite(n));
+    const activeRun = resolveActiveRun(repoRoot, { liveIssues });
     return {
       timestamp: new Date().toISOString(),
       repoRoot,
@@ -641,6 +661,13 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
 
     return {
       timestamp: new Date().toISOString(),
+      // On POSIX, loopRunning is true when any scoped ralph.sh process is
+      // visible to `ps`. On Windows we don't have a usable `ps` contract,
+      // so we trust the pidfile entry getLoopProcess() returns. This makes
+      // the Windows dashboard's loopRunning flag agree with startLoop()'s
+      // "alreadyRunning" check, which already uses procs.length > 0 on
+      // Windows — fixes a latent bug where the dashboard showed "idle"
+      // even while a Windows loop was running.
       loopRunning: procs.some((p) => p.cmd.includes("ralph.sh")) || (IS_WINDOWS && procs.length > 0),
       processes: procs,
       workers: workerPanels,
@@ -684,7 +711,7 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
     getCurrentPr,
     getCumulativeStats,
     getConfigSummary,
-    resolveActiveRun: () => resolveActiveRun(repoRoot),
+    resolveActiveRun: (opts) => resolveActiveRun(repoRoot, opts),
     buildLocalPayload,
     buildStatusPayload,
   };

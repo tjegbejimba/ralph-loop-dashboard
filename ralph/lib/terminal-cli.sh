@@ -19,9 +19,12 @@ resolve_terminal_cli() {
     printf '%s' "$user_cli"
     return 0
   fi
-  # Source-checkout fallback. SCRIPT_DIR is exported by launch.sh and points
-  # at .../<repo>/.ralph for installed targets, or .../ralph-loop-dashboard/ralph
-  # for in-source runs. The latter has the extension next to it.
+  # Source-checkout fallback. SCRIPT_DIR is set by launch.sh before this
+  # helper is sourced; it's visible inside this function's $(...) subshell
+  # because bash command substitutions inherit non-exported variables.
+  # SCRIPT_DIR points at .../<repo>/.ralph for installed targets, or
+  # .../ralph-loop-dashboard/ralph for in-source runs. The latter has the
+  # extension next to it.
   local src_cli
   src_cli="$(cd "${SCRIPT_DIR}/../extension" 2>/dev/null && pwd -P)/cli.mjs"
   if [[ -f "$src_cli" ]]; then
