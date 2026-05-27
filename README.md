@@ -4,6 +4,7 @@ A self-driving TDD loop for [Copilot CLI](https://github.com/github/copilot-cli)
 
 1. **Runs Copilot headless** through GitHub issues one at a time, enforcing red-green-refactor TDD with mandatory dual-model code review (`gpt-5.5` + `claude-opus-4.7`).
 2. **Ships a desktop dashboard** (Copilot CLI extension) showing live loop status — current iteration, stage, PR/CI status, queue, history, and start/stop controls.
+3. **Works from the terminal alone** when the extension isn't loadable (e.g., GitHub Copilot inside the desktop app): `.ralph/launch.sh --status | --watch | --follow` exposes the same data via the same JS layer the dashboard reads — see [Tracking a run from the terminal](#tracking-a-run-from-the-terminal).
 
 > Inspired by [Geoff Huntley's "Ralph Wiggum as a software engineer"](https://ghuntley.com/ralph/) — a single agent looping on `cat PROMPT.md | claude --dangerously-skip-permissions` until the work is done.
 
@@ -440,6 +441,16 @@ When the extension is loaded, these tools are available to any Copilot agent in 
 - `ralph_dashboard_close` — close the window
 
 And via the agent's tool surface: `getStatus`, `startLoop`, `stopLoop`, `getPrDetail`, `getIssueDetail`.
+
+If the extension isn't loaded (GitHub Copilot inside the desktop app doesn't load CLI extensions), use the terminal commands instead — they read the same data layer:
+
+```bash
+.ralph/launch.sh --status            # rich one-shot snapshot
+.ralph/launch.sh --watch             # live local-only refresh (2s default)
+.ralph/launch.sh --follow            # tail the active worker's iteration log
+```
+
+See [Tracking a run from the terminal](#tracking-a-run-from-the-terminal) for the full breakdown.
 
 ## Caveats
 
