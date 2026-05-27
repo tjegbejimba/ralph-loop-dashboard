@@ -41,7 +41,7 @@ if [[ "$status" -ne 0 ]]; then
   echo "$output"
   exit 1
 fi
-for flag in "--status" "--stop" "--cleanup" "--enqueue" "--enqueue-prd" "--foreground"; do
+for flag in "--status" "--stop" "--cleanup" "--enqueue" "--enqueue-prd" "--foreground" "--watch" "--follow"; do
   if ! grep -qF -- "$flag" <<<"$output"; then
     echo "FAIL: --help output should mention $flag"
     echo "$output"

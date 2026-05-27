@@ -183,7 +183,9 @@ Each issue body should describe the slice's intent + acceptance criteria. The lo
 ```bash
 .ralph/launch.sh                     # background, logs to .ralph/loop.out
 .ralph/launch.sh --foreground        # attached (single-worker only)
-.ralph/launch.sh --status            # active workers + claims + preflight
+.ralph/launch.sh --status            # active workers + claims + preflight + rich snapshot
+.ralph/launch.sh --watch [SEC]       # live local-only refresh (default 2s, Ctrl-C to exit)
+.ralph/launch.sh --follow [N]        # tail worker N's iteration log (worker 1 by default)
 .ralph/launch.sh --stop              # SIGTERM all workers
 .ralph/launch.sh --cleanup           # stop workers + remove clean worker worktrees
 .ralph/launch.sh --enqueue <N>...    # write issue numbers to config.json + preflight
@@ -197,6 +199,29 @@ reference state, the active queue mode (direct-numbers vs. issueSearch),
 per-issue label/state/blocker warnings, and a final `✅ Ready to launch | ⚠️
 preflight blockers found` verdict so you can spot a broken setup before
 launching any worker.
+
+### Tracking a run from the terminal
+
+When the dashboard extension isn't available (e.g., you're using GitHub Copilot
+inside the desktop app, which doesn't load CLI extensions), the same data layer
+powers a terminal experience via three flags:
+
+- `.ralph/launch.sh --status` — one-shot snapshot. Existing sections (parallelism,
+  workers from `ps`, claims, caffeinate, preflight) are preserved, then a rich
+  block is appended showing per-worker iteration with stage, runtime, idle age,
+  cumulative tokens, plus queue progress (counts + inline `error` for failed
+  items + stale-claim hints) and a `loop.out` tail.
+- `.ralph/launch.sh --watch [SEC]` — live local-only refresh, default 2 seconds.
+  No `gh` API calls, so it's instant and free. Respects `NO_COLOR` and
+  `TERM=dumb`. Ctrl-C exits cleanly.
+- `.ralph/launch.sh --follow [N]` — `tail -F` the active worker's current
+  iteration log. With no argument, picks the lowest-numbered active worker.
+  Automatically re-tails when the worker rolls to a new iteration, so you can
+  leave it running across slice boundaries.
+
+These delegate to `extension/cli.mjs` from the installed extension at
+`~/.copilot/extensions/ralph-dashboard/`. Set `RALPH_TERMINAL_CLI=/path/to/cli.mjs`
+to override (e.g., when developing the dashboard from a source checkout).
 
 ### Selection modes
 

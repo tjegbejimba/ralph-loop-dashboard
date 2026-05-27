@@ -168,6 +168,16 @@ if [[ -f "$_preflight_lib" ]]; then
 fi
 unset _preflight_lib
 
+# Terminal CLI helper (optional). Provides resolve_terminal_cli /
+# invoke_terminal_cli for --status augmentation and the new --watch / --follow
+# commands. Sourcing is conditional so older installs still work.
+_terminal_cli_lib="$MAIN_REPO/.ralph/lib/terminal-cli.sh"
+if [[ -f "$_terminal_cli_lib" ]]; then
+  # shellcheck disable=SC1090
+  . "$_terminal_cli_lib"
+fi
+unset _terminal_cli_lib
+
 # Keep-awake (macOS): per-worker caffeinate processes are tracked in
 # .ralph/lock/caffeinate-<N>.pid so --status, --stop, and --cleanup can
 # manage them explicitly. Defense-in-depth against PID-reuse and missed
@@ -262,7 +272,9 @@ print_usage() {
 Usage:
   .ralph/launch.sh                          # background, logs to .ralph/logs/
   .ralph/launch.sh --foreground             # attached (parallelism=1 only)
-  .ralph/launch.sh --status                 # show running workers + claims
+  .ralph/launch.sh --status                 # show running workers + claims + rich snapshot
+  .ralph/launch.sh --watch [SEC]            # live local-only refresh (default 2s, Ctrl-C to exit)
+  .ralph/launch.sh --follow [N]             # tail the active worker N's iteration log
   .ralph/launch.sh --stop                   # SIGTERM all workers
   .ralph/launch.sh --cleanup                # stop workers + remove worktrees
   .ralph/launch.sh --enqueue <N>...         # write issue numbers to config.json
@@ -281,7 +293,13 @@ Options:
       Mutually exclusive with --enqueue.
 
   --foreground    Run the worker loop in the foreground (RALPH_PARALLELISM=1 only).
-  --status        Print running workers and issue claims.
+  --status        Print running workers and issue claims, followed by a rich
+                  snapshot (current iterations, queue progress, loop.out tail).
+  --watch [SEC]   Re-render the local snapshot every SEC seconds (default 2).
+                  No gh API calls — purely reads .ralph/ state. Ctrl-C exits.
+  --follow [N]    Tail worker N's iteration log; with no arg, picks the
+                  lowest-numbered active worker. Re-tails when the worker
+                  rolls to the next iteration.
   --stop          Send SIGTERM to all scoped Ralph workers.
   --cleanup       Stop workers and remove clean loop worktrees.
   --help, -h      Print this message and exit.
@@ -300,6 +318,9 @@ Environment:
   RALPH_LOOP_BRANCH   Base branch name for loop worktree(s)
   RALPH_REPO          owner/repo slug for gh calls (auto-detected from git remote)
   RALPH_GH_BIN        Path to gh binary (default: gh)
+  RALPH_TERMINAL_CLI  Override path to the terminal CLI (extension/cli.mjs)
+                      Defaults to ~/.copilot/extensions/ralph-dashboard/cli.mjs
+                      then the source checkout next to this script.
 USAGE
 }
 
@@ -354,7 +375,38 @@ if [[ "${1:-}" == "--status" ]]; then
     # operators use --status to inspect rather than gate; absorb the rc.
     preflight_run || true
   fi
+  # Rich snapshot from the terminal CLI (current iterations, queue progress,
+  # loop.out tail). Silent fallback when node or the CLI isn't available so
+  # legacy installs still print the sections above.
+  if declare -F invoke_terminal_cli >/dev/null 2>&1; then
+    echo
+    invoke_terminal_cli status 2>/dev/null || true
+  fi
   exit 0
+fi
+
+# --watch: live local-only refresh. Delegates entirely to the terminal CLI.
+if [[ "${1:-}" == "--watch" ]]; then
+  if ! declare -F invoke_terminal_cli >/dev/null 2>&1; then
+    echo "--watch requires the Ralph terminal CLI. Re-run install.sh --both to install it, " >&2
+    echo "or set RALPH_TERMINAL_CLI to point at extension/cli.mjs." >&2
+    exit 2
+  fi
+  shift
+  invoke_terminal_cli watch "$@"
+  exit $?
+fi
+
+# --follow: tail an active worker's iteration log. Delegates to the CLI.
+if [[ "${1:-}" == "--follow" ]]; then
+  if ! declare -F invoke_terminal_cli >/dev/null 2>&1; then
+    echo "--follow requires the Ralph terminal CLI. Re-run install.sh --both to install it, " >&2
+    echo "or set RALPH_TERMINAL_CLI to point at extension/cli.mjs." >&2
+    exit 2
+  fi
+  shift
+  invoke_terminal_cli follow "$@"
+  exit $?
 fi
 
 # --stop: SIGTERM every worker for this repo.

@@ -266,6 +266,7 @@ install_scripts() {
   cp "$REPO_DIR/ralph/lib/pr-merge.sh" "$ralph_dir/lib/pr-merge.sh"
   cp "$REPO_DIR/ralph/lib/preflight.sh" "$ralph_dir/lib/preflight.sh"
   cp "$REPO_DIR/ralph/lib/resume.sh" "$ralph_dir/lib/resume.sh"
+  cp "$REPO_DIR/ralph/lib/terminal-cli.sh" "$ralph_dir/lib/terminal-cli.sh"
   rm -rf "$ralph_dir/profiles"
   cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
   chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
