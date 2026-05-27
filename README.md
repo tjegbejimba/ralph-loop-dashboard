@@ -4,6 +4,7 @@ A self-driving TDD loop for [Copilot CLI](https://github.com/github/copilot-cli)
 
 1. **Runs Copilot headless** through GitHub issues one at a time, enforcing red-green-refactor TDD with mandatory dual-model code review (`gpt-5.5` + `claude-opus-4.7`).
 2. **Ships a desktop dashboard** (Copilot CLI extension) showing live loop status — current iteration, stage, PR/CI status, queue, history, and start/stop controls.
+3. **Works from the terminal alone** when the extension isn't loadable (e.g., GitHub Copilot inside the desktop app): `.ralph/launch.sh --status | --watch | --follow` exposes the same data via the same JS layer the dashboard reads — see [Tracking a run from the terminal](#tracking-a-run-from-the-terminal).
 
 > Inspired by [Geoff Huntley's "Ralph Wiggum as a software engineer"](https://ghuntley.com/ralph/) — a single agent looping on `cat PROMPT.md | claude --dangerously-skip-permissions` until the work is done.
 
@@ -183,7 +184,9 @@ Each issue body should describe the slice's intent + acceptance criteria. The lo
 ```bash
 .ralph/launch.sh                     # background, logs to .ralph/loop.out
 .ralph/launch.sh --foreground        # attached (single-worker only)
-.ralph/launch.sh --status            # active workers + claims + preflight
+.ralph/launch.sh --status            # active workers + claims + preflight + rich snapshot
+.ralph/launch.sh --watch [SEC]       # live local-only refresh (default 2s, Ctrl-C to exit)
+.ralph/launch.sh --follow [N]        # tail worker N's iteration log (worker 1 by default)
 .ralph/launch.sh --stop              # SIGTERM all workers
 .ralph/launch.sh --cleanup           # stop workers + remove clean worker worktrees
 .ralph/launch.sh --enqueue <N>...    # write issue numbers to config.json + preflight
@@ -197,6 +200,29 @@ reference state, the active queue mode (direct-numbers vs. issueSearch),
 per-issue label/state/blocker warnings, and a final `✅ Ready to launch | ⚠️
 preflight blockers found` verdict so you can spot a broken setup before
 launching any worker.
+
+### Tracking a run from the terminal
+
+When the dashboard extension isn't available (e.g., you're using GitHub Copilot
+inside the desktop app, which doesn't load CLI extensions), the same data layer
+powers a terminal experience via three flags:
+
+- `.ralph/launch.sh --status` — one-shot snapshot. Existing sections (parallelism,
+  workers from `ps`, claims, caffeinate, preflight) are preserved, then a rich
+  block is appended showing per-worker iteration with stage, runtime, idle age,
+  cumulative tokens, plus queue progress (counts + inline `error` for failed
+  items + stale-claim hints) and a `loop.out` tail.
+- `.ralph/launch.sh --watch [SEC]` — live local-only refresh, default 2 seconds.
+  No `gh` API calls, so it's instant and free. Respects `NO_COLOR` and
+  `TERM=dumb`. Ctrl-C exits cleanly.
+- `.ralph/launch.sh --follow [N]` — `tail -F` the active worker's current
+  iteration log. With no argument, picks the lowest-numbered active worker.
+  Automatically re-tails when the worker rolls to a new iteration, so you can
+  leave it running across slice boundaries.
+
+These delegate to `extension/cli.mjs` from the installed extension at
+`~/.copilot/extensions/ralph-dashboard/`. Set `RALPH_TERMINAL_CLI=/path/to/cli.mjs`
+to override (e.g., when developing the dashboard from a source checkout).
 
 ### Selection modes
 
@@ -415,6 +441,16 @@ When the extension is loaded, these tools are available to any Copilot agent in 
 - `ralph_dashboard_close` — close the window
 
 And via the agent's tool surface: `getStatus`, `startLoop`, `stopLoop`, `getPrDetail`, `getIssueDetail`.
+
+If the extension isn't loaded (GitHub Copilot inside the desktop app doesn't load CLI extensions), use the terminal commands instead — they read the same data layer:
+
+```bash
+.ralph/launch.sh --status            # rich one-shot snapshot
+.ralph/launch.sh --watch             # live local-only refresh (2s default)
+.ralph/launch.sh --follow            # tail the active worker's iteration log
+```
+
+See [Tracking a run from the terminal](#tracking-a-run-from-the-terminal) for the full breakdown.
 
 ## Caveats
 
