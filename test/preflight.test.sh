@@ -209,7 +209,7 @@ EOF
   assert_contains "$out" "preflight blockers" "hitl: verdict is blockers"
 }
 
-# ─── closed issue is surfaced ─────────────────────────────────────────────────
+# ─── closed issue → queue drained (informational, not a blocker) ─────────────
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
@@ -228,9 +228,45 @@ EOF
     RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
     "$repo/.ralph/launch.sh" --enqueue 9 2>&1) || rc=$?
 
-  assert_contains "$out" "CLOSED"           "closed: state surfaced"
-  assert_contains "$out" "closed"           "closed: warning surfaced"
-  assert_contains "$out" "preflight blockers" "closed: verdict is blockers"
+  assert_contains     "$out" "CLOSED"          "closed: state surfaced"
+  assert_not_contains "$out" "#9 CLOSED closed" \
+    "closed: redundant 'closed' warning tag dropped (state already says CLOSED)"
+  assert_contains     "$out" "Queue drained"   "closed: verdict is queue drained"
+  assert_not_contains "$out" "preflight blockers" \
+    "closed-only queue is informational, not a blocker"
+  [[ "$rc" -eq 0 ]] && pass "closed: exits 0 (queue drained is not a blocker)" \
+    || fail "closed: exits 0 (got $rc)"
+}
+
+# ─── mixed open+closed queue → open issues drive verdict ──────────────────────
+# Regression for the "Loop is mid-run with some issues already merged" case.
+# The closed entries should not flag as blockers because the loop will just
+# skip them; the open ones are ready, so the overall verdict is Ready.
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": []}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+
+  bin_dir="$TEST_ROOT/bin-mixed"
+  write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
+  blob=$(printf '%s\n%s\n' \
+    "$(issue_json 30 CLOSED ready-for-agent 'Done.')" \
+    "$(issue_json 31 OPEN  ready-for-agent 'Pending.')"
+  )
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --enqueue 30 31 2>&1) || rc=$?
+
+  assert_contains     "$out" "Ready to launch"  "mixed: verdict is Ready (open issues remain)"
+  assert_not_contains "$out" "preflight blockers" \
+    "mixed: closed entries alongside open ones do not block"
+  [[ "$rc" -eq 0 ]] && pass "mixed: exits 0" || fail "mixed: exits 0 (got $rc)"
 }
 
 # ─── placeholder PRD reference in RALPH.md is surfaced ────────────────────────
@@ -488,6 +524,115 @@ exit 2
   assert_contains     "$out" "#11"           "crlf: lists issue #11"
   assert_contains     "$out" "#12"           "crlf: lists issue #12"
   assert_not_contains "$out" "lookup_failed" "crlf: no lookup_failed warning"
+}
+
+# ─── --status: empty state.json claims renders "(none)", not a blank section ──
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [], "issueSearch": "label:ready-for-agent -label:hitl"}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+  # state.json exists but claims map is empty (loop ran and released claims).
+  echo '{"claims": {}}' > "$repo/.ralph/state.json"
+
+  rc=0
+  out=$(RALPH_MAIN_REPO="$repo" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  # Find the "Claims (from state.json):" header and the line that follows it.
+  claims_section=$(echo "$out" | awk '/^Claims \(from state\.json\):/{flag=1; next} flag && /^[[:space:]]*$/{exit} flag{print}')
+  if echo "$claims_section" | grep -qE '^\s*\(none\)'; then
+    pass "empty claims: renders (none) instead of a blank section"
+  else
+    fail "empty claims: expected '(none)' under Claims header, got: $claims_section"
+    echo "--- output ---" >&2
+    echo "$out" >&2
+    echo "--------------" >&2
+  fi
+}
+
+# ─── --status: workers line truncates the giant copilot -p prompt ─────────────
+# Exercises the truncation logic on a synthetic ps-style worker line. The
+# regression we care about: a `--flag` example embedded inside the prompt body
+# (e.g. `gh pr list --repo …`) must NOT become the cut point for trailing
+# CLI flags. The cut MUST be at the last ` --` in the line.
+{
+  synthetic='99999 copilot -p # Ralph Loop\n\nbody with embedded gh pr list --repo example --json state and more text --allow-all --model claude-sonnet-4.5'
+  truncated=$(printf '%s\n' "$synthetic" | awk '
+    {
+      pid=$1
+      cmd=""
+      for (i=2; i<=NF; i++) cmd = cmd (i==2 ? "" : " ") $i
+      marker = "copilot -p "
+      idx = index(cmd, marker)
+      if (idx > 0) {
+        prefix = substr(cmd, 1, idx + length(marker) - 1)
+        rest   = substr(cmd, idx + length(marker))
+        n_tok = split(rest, toks, /[ \t]+/)
+        cut = n_tok + 1
+        i = n_tok
+        while (i >= 1) {
+          if (toks[i] ~ /^--[a-zA-Z]/) {
+            cut = i; i--
+          } else if (i > 1 && toks[i-1] ~ /^--[a-zA-Z]/) {
+            cut = i - 1; i -= 2
+          } else { break }
+        }
+        if (cut <= n_tok) {
+          prompt_part = ""
+          for (j = 1; j < cut; j++) prompt_part = prompt_part (j == 1 ? "" : " ") toks[j]
+          trailing = ""
+          for (j = cut; j <= n_tok; j++) trailing = trailing " " toks[j]
+        } else {
+          prompt_part = rest; trailing = ""
+        }
+        printf "  %s %s<prompt %d chars>%s\n", pid, prefix, length(prompt_part), trailing
+      } else {
+        printf "  %s %s\n", pid, cmd
+      }
+    }
+  ')
+  assert_contains     "$truncated" "<prompt "          "workers truncate: prompt replaced with placeholder"
+  assert_contains     "$truncated" "--allow-all"       "workers truncate: trailing flag preserved"
+  assert_contains     "$truncated" "--model"           "workers truncate: --model preserved"
+  assert_not_contains "$truncated" "embedded gh pr list" "workers truncate: prompt body removed"
+  # The first " --" in the prompt body (` --repo`) must NOT have been used as
+  # the cut point — regression for the first-`--` heuristic bug.
+  assert_not_contains "$truncated" "--repo example" \
+    "workers truncate: did not cut at first ' --' inside prompt body"
+}
+
+# ─── --status with active loop → "Loop in progress" verdict, dirty tree OK ────
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [50]}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+  # Mimic an in-flight loop: claim in state.json + dirty tree.
+  echo '{"claims": {"50": {"workerId": 1, "pid": 1, "logFile": "x.log"}}}' \
+    > "$repo/.ralph/state.json"
+  echo "in-progress edit" >> "$repo/README.md"
+
+  bin_dir="$TEST_ROOT/bin-loop-active"
+  write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
+  blob=$(issue_json 50 OPEN ready-for-agent 'Slice in flight.')
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  [[ "$rc" -eq 0 ]] && pass "loop-active: --status exits 0" \
+    || fail "loop-active: --status exits 0 (got $rc)"
+  assert_contains     "$out" "Loop in progress"   "loop-active: verdict is Loop in progress"
+  assert_not_contains "$out" "preflight blockers" "loop-active: dirty tree is not flagged as blocker"
+  assert_contains     "$out" "Repo: dirty"        "loop-active: still surfaces the dirty repo state"
 }
 
 # ─── Summary ──────────────────────────────────────────────────────────────────

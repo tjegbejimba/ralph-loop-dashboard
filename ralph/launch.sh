@@ -336,18 +336,78 @@ if [[ "${1:-}" == "--status" ]]; then
   echo
   echo "Workers for $MAIN_REPO (from ps):"
   workers="$(scoped_ralph_processes)"
+  workers_live=0
   if [[ -n "$workers" ]]; then
-    echo "$workers"
+    # Truncate the giant `copilot -p '<RALPH.md prompt>'` argv to a single-line
+    # readable form. The prompt is enormous (~10 KB) and full of escaped
+    # newlines, drowning the rest of the status output in noise. We keep PID
+    # and command name, replace the prompt argv with `<prompt N chars>`, and
+    # preserve any trailing CLI flag run (e.g. `--allow-all --model …`).
+    #
+    # The trailing-flag region is detected by tokenising from the right and
+    # walking left as long as we keep seeing flag tokens (`--foo`) or their
+    # immediate values. The prompt body itself contains many literal `--flag`
+    # strings (e.g. `gh pr list --repo`) so neither the first nor last ` --`
+    # in isolation works — we need the consecutive run at the end of line.
+    workers_live=1
+    echo "$workers" | awk '
+      {
+        pid=$1
+        cmd=""
+        for (i=2; i<=NF; i++) cmd = cmd (i==2 ? "" : " ") $i
+        marker = "copilot -p "
+        idx = index(cmd, marker)
+        if (idx > 0) {
+          prefix = substr(cmd, 1, idx + length(marker) - 1)
+          rest   = substr(cmd, idx + length(marker))
+          # Tokenise rest on whitespace; walk left across the trailing flag run.
+          n_tok = split(rest, toks, /[ \t]+/)
+          cut = n_tok + 1   # 1-based index of first trailing-flag token
+          # Sweep right-to-left: include `--flag` tokens and one value after.
+          i = n_tok
+          while (i >= 1) {
+            if (toks[i] ~ /^--[a-zA-Z]/) {
+              cut = i
+              i--
+            } else if (i > 1 && toks[i-1] ~ /^--[a-zA-Z]/) {
+              # toks[i] is the value for the preceding --flag; include both.
+              cut = i - 1
+              i -= 2
+            } else {
+              break
+            }
+          }
+          if (cut <= n_tok) {
+            prompt_part = ""
+            for (j = 1; j < cut; j++) prompt_part = prompt_part (j == 1 ? "" : " ") toks[j]
+            trailing = ""
+            for (j = cut; j <= n_tok; j++) trailing = trailing " " toks[j]
+          } else {
+            prompt_part = rest
+            trailing = ""
+          }
+          printf "  %s %s<prompt %d chars>%s\n", pid, prefix, length(prompt_part), trailing
+        } else {
+          printf "  %s %s\n", pid, cmd
+        }
+      }
+    '
   else
     echo "  (none)"
   fi
   echo
+  claims_count=0
   if [[ -f "$state_file" ]]; then
+    claims_count=$(jq -r '(.claims // {}) | length' "$state_file" 2>/dev/null || echo 0)
     echo "Claims (from state.json):"
-    jq -r '
-      .claims | to_entries[]
-      | "  #\(.key)  worker=\(.value.workerId)  pid=\(.value.pid)  log=\(.value.logFile)"
-    ' "$state_file" 2>/dev/null || echo "  (state.json unreadable)"
+    if [[ "$claims_count" -gt 0 ]]; then
+      jq -r '
+        .claims | to_entries[]
+        | "  #\(.key)  worker=\(.value.workerId)  pid=\(.value.pid)  log=\(.value.logFile)"
+      ' "$state_file" 2>/dev/null || echo "  (state.json unreadable)"
+    else
+      echo "  (none)"
+    fi
   else
     echo "Claims: (no state.json yet)"
   fi
@@ -364,8 +424,13 @@ if [[ "${1:-}" == "--status" ]]; then
       worker_n=$(basename "$pidfile" .pid | sed 's/^caffeinate-//')
       if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
         echo "  worker $worker_n: PID $pid (alive)"
+      elif [[ "$workers_live" -eq 1 || "$claims_count" -gt 0 ]]; then
+        # A worker is running but its caffeinate helper died — that's worth
+        # surfacing because the machine may sleep mid-iteration.
+        echo "  worker $worker_n: caffeinate not running (stale pidfile)"
       else
-        echo "  worker $worker_n: PID $pid (dead, stale pidfile — will be cleaned on --stop/--cleanup)"
+        # No live workers — a stale pidfile is just leftover state.
+        echo "  worker $worker_n: not running"
       fi
     done
   fi
@@ -373,7 +438,13 @@ if [[ "${1:-}" == "--status" ]]; then
     echo
     # --status always exits 0 — preflight returns non-zero on blockers, but
     # operators use --status to inspect rather than gate; absorb the rc.
-    preflight_run || true
+    # Export loop-active context so preflight can compute a smarter verdict:
+    # a running loop is allowed to dirty the tree and shouldn't be flagged.
+    if [[ "$workers_live" -eq 1 || "$claims_count" -gt 0 ]]; then
+      RALPH_LOOP_ACTIVE=1 preflight_run || true
+    else
+      preflight_run || true
+    fi
   fi
   # Rich snapshot from the terminal CLI (current iterations, queue progress,
   # loop.out tail). Silent fallback when node or the CLI isn't available so

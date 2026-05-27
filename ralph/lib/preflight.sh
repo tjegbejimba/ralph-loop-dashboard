@@ -120,13 +120,12 @@ _preflight_scan_issue() {
   local warnings_csv
   warnings_csv=$(_preflight_label_warnings "$labels")
 
-  # Closed issues can never be claimed; flag them.
+  # Closed issues can never be claimed. Track count separately so the verdict
+  # can distinguish "all queued issues closed" (queue drained — informational)
+  # from "some closed, some open" (mixed — blocker). The CLOSED state is
+  # already visible in the row, so we don't add a redundant "closed" tag.
   if [[ "$state" != "OPEN" ]]; then
-    if [[ -n "$warnings_csv" ]]; then
-      warnings_csv="closed,${warnings_csv}"
-    else
-      warnings_csv="closed"
-    fi
+    PREFLIGHT_CLOSED_COUNT=$((PREFLIGHT_CLOSED_COUNT + 1))
   fi
 
   # Unresolved blockers: any "#N" in "## Blocked by" that is not satisfied
@@ -167,14 +166,17 @@ _preflight_scan_issue() {
 preflight_run() {
   local config="$MAIN_REPO/.ralph/config.json"
   PREFLIGHT_BLOCKERS_FOUND=0
+  PREFLIGHT_CLOSED_COUNT=0
+  PREFLIGHT_ISSUE_COUNT=0
 
   echo "Preflight:"
 
-  # Repo working tree
+  # Repo working tree. A running loop dirties the tree by design (worker is
+  # mid-iteration), so don't flag it as a blocker when RALPH_LOOP_ACTIVE=1.
   local repo_state
   repo_state=$(_preflight_repo_state)
   echo "  Repo: $repo_state"
-  if [[ "$repo_state" != "clean" ]]; then
+  if [[ "$repo_state" != "clean" && "${RALPH_LOOP_ACTIVE:-0}" != "1" ]]; then
     PREFLIGHT_BLOCKERS_FOUND=1
   fi
 
@@ -203,6 +205,7 @@ preflight_run() {
   if [[ "$nums_count" -gt 0 ]]; then
     echo "  Queue mode: direct-numbers (${nums_count} issues)"
     echo "  Issues:"
+    PREFLIGHT_ISSUE_COUNT="$nums_count"
     local n
     while IFS= read -r n; do
       [[ -z "$n" ]] && continue
@@ -218,7 +221,22 @@ preflight_run() {
     fi
   fi
 
-  # Verdict
+  # Verdict.
+  #   - Loop in progress (workers/claims active) takes priority over blockers
+  #     so the operator sees the actual state, not stale "fix me" warnings.
+  #   - All queued issues CLOSED with no other blockers → queue drained
+  #     (informational, not an error — the loop just has nothing to do).
+  #   - Otherwise: existing blockers / ready verdicts.
+  if [[ "${RALPH_LOOP_ACTIVE:-0}" == "1" ]]; then
+    echo "  Verdict: 🔄 Loop in progress"
+    return 0
+  fi
+  if [[ "$PREFLIGHT_ISSUE_COUNT" -gt 0 \
+        && "$PREFLIGHT_CLOSED_COUNT" -eq "$PREFLIGHT_ISSUE_COUNT" \
+        && "$PREFLIGHT_BLOCKERS_FOUND" -eq 0 ]]; then
+    echo "  Verdict: ℹ️  Queue drained — all queued issues are closed"
+    return 0
+  fi
   if [[ "$PREFLIGHT_BLOCKERS_FOUND" -eq 0 ]]; then
     echo "  Verdict: ✅ Ready to launch"
     return 0
