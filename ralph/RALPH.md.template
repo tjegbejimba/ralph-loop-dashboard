@@ -13,7 +13,7 @@ You are running headless inside an automation loop with **no human at the keyboa
 
 - Pick the most reasonable default and proceed.
 - Document the choice in the PR description under a "Decisions" section so the human can review post-merge.
-- Use the `rubber-duck` agent (with both `gpt-5.5` and `claude-opus-4.7` in parallel) for plan critique instead of asking the user.
+- Use the `rubber-duck` agent (with both `gpt-5.5` and `claude-opus-4.8` in parallel) for plan critique instead of asking the user.
 - Never end an iteration with "Questions for you" or "Please confirm" — always end with a merged PR or an explicit failure (linked rubber-duck report, blocked dependency, etc.).
 
 ## Preflight
@@ -56,7 +56,9 @@ You MUST use the `tdd` skill (red-green-refactor). Invoke it explicitly via the 
    - After creating the PR, run `gh pr view <pr> --json closingIssuesReferences -q '.closingIssuesReferences[].number'` and confirm the slice's issue number appears. If it does not, edit the PR body file and run `gh pr edit <pr> --body-file .ralph-pr-body-<N>.md`.
    - Remove `.ralph-pr-body-<N>.md` after the PR body is accepted.
 9. **Dual-model code review** (mandatory before merge):
-   - Dispatch `code-review` agents in parallel against the open PR with both `gpt-5.5` and `claude-opus-4.7` (use `mode: "background"`, run them concurrently, then dedupe and merge findings).
+   - Dispatch two `code-review` agents in parallel against the open PR (same diff scope, complementary focus, `mode: "background"`, run concurrently), then dedupe and merge their findings:
+     - `gpt-5.5` — **code quality & correctness**: logic bugs, test coverage gaps, regressions, cross-file consistency, error handling and edge cases.
+     - `claude-opus-4.8` — **security vulnerabilities**: injection, authn/authz flaws, secrets exposure, unsafe input handling / SSRF / path traversal, crypto misuse, dependency risks.
    - Adopt every finding that prevents a bug, security issue, or test failure. Push fix commits to the same branch.
    - Set aside cosmetic or low-value findings; briefly justify in the PR body's "Review notes" section.
    - If both models return zero findings, record that in the PR body too.
