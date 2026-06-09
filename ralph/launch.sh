@@ -13,6 +13,7 @@
 #   .ralph/launch.sh --cleanup    # stop workers and remove clean loop worktrees
 #   .ralph/launch.sh --enqueue <N>... # write issue numbers to config.json
 #   .ralph/launch.sh --enqueue-prd <N> # resolve PRD slices and enqueue
+#   .ralph/launch.sh --once       # run one worker iteration, then exit
 #   .ralph/launch.sh --help       # show usage
 #
 # Configuration (env vars, all optional):
@@ -63,15 +64,22 @@ LOOP_BRANCH_BASE="${RALPH_LOOP_BRANCH:-ralph-loop-$(_default_branch_token)}"
 
 RALPH_SCRIPT="$(cd "$MAIN_REPO/.ralph" && pwd -P)/ralph.sh"
 
-# Strip --force from $@ early so all sub-commands benefit from the flag.
+# Strip launcher-level flags from $@ early so all sub-commands benefit.
 FORCE=0
+ONCE=0
 _filtered_args=()
 for _a in "$@"; do
-  if [[ "$_a" == "--force" ]]; then
-    FORCE=1
-  else
-    _filtered_args+=("$_a")
-  fi
+  case "$_a" in
+    --force)
+      FORCE=1
+      ;;
+    --once)
+      ONCE=1
+      ;;
+    *)
+      _filtered_args+=("$_a")
+      ;;
+  esac
 done
 set -- "${_filtered_args[@]:-}"
 unset _filtered_args _a
@@ -279,6 +287,7 @@ Usage:
   .ralph/launch.sh --cleanup                # stop workers + remove worktrees
   .ralph/launch.sh --enqueue <N>...         # write issue numbers to config.json
   .ralph/launch.sh --enqueue-prd <N>        # resolve PRD slices and enqueue them
+  .ralph/launch.sh --once                   # run one worker iteration, then exit
   .ralph/launch.sh --help | -h              # print this message
 
 Options:
@@ -293,6 +302,7 @@ Options:
       Mutually exclusive with --enqueue.
 
   --foreground    Run the worker loop in the foreground (RALPH_PARALLELISM=1 only).
+  --once          Ask each worker to run one iteration, then exit.
   --status        Print running workers and issue claims, followed by a rich
                   snapshot (current iterations, queue progress, loop.out tail).
   --watch [SEC]   Re-render the local snapshot every SEC seconds (default 2).
@@ -869,6 +879,10 @@ done
 
 # Launch phase.
 LOG="$MAIN_REPO/.ralph/loop.out"
+RALPH_WORKER_ARGS=()
+if [[ "$ONCE" -eq 1 ]]; then
+  RALPH_WORKER_ARGS+=(--once)
+fi
 
 if [[ "${1:-}" == "--foreground" ]]; then
   cd "$(worker_repo 1)"
@@ -876,7 +890,7 @@ if [[ "${1:-}" == "--foreground" ]]; then
   release_lockdir "$SETUP_LOCK"
   trap - EXIT
   spawn_caffeinate 1 "$$"
-  RALPH_WORKER_ID=1 exec "$MAIN_REPO/.ralph/ralph.sh"
+  RALPH_WORKER_ID=1 exec "$MAIN_REPO/.ralph/ralph.sh" "${RALPH_WORKER_ARGS[@]}"
 fi
 
 echo "🚀 Launching $PARALLELISM worker(s) in background. Tail: tail -f $LOG"
@@ -889,7 +903,7 @@ for ((i = 1; i <= PARALLELISM; i++)); do
   cd "$loop_repo"
   worker_log="$MAIN_REPO/.ralph/logs/worker-${i}.out"
   mkdir -p "$(dirname "$worker_log")"
-  RALPH_WORKER_ID=$i nohup "$MAIN_REPO/.ralph/ralph.sh" \
+  RALPH_WORKER_ID=$i nohup "$MAIN_REPO/.ralph/ralph.sh" "${RALPH_WORKER_ARGS[@]}" \
     >>"$worker_log" 2>&1 < /dev/null &
   worker_pid=$!
   disown

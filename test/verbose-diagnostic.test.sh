@@ -123,6 +123,7 @@ run_worker_legacy() {
 
   env RALPH_REPO="testowner/testrepo" \
       RALPH_WORKER_ID=1 \
+      RALPH_GH_BIN="$stub_bin/gh" \
       PATH="$stub_bin:$PATH" \
       GH_LOG="$TEST_ROOT/gh.log" \
       "${extra_env[@]}" \

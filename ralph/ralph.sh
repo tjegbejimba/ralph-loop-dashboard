@@ -32,8 +32,16 @@
 set -euo pipefail
 
 # Ensure homebrew tools (gh, etc.) are on PATH even when launched from
-# minimal-PATH contexts (nohup, launchd, dashboard, etc.)
+# minimal-PATH contexts (nohup, launchd, dashboard, etc.).
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+gh() {
+  if [[ -n "${RALPH_GH_BIN:-}" ]]; then
+    "$RALPH_GH_BIN" "$@"
+  else
+    command gh "$@"
+  fi
+}
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 CONFIG_FILE="$SCRIPT_DIR/config.json"

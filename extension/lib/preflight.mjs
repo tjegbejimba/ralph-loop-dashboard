@@ -56,12 +56,20 @@ async function defaultGhRepoCheck(repo) {
 }
 
 /**
+ * Default git worktree checker
+ */
+async function defaultGitStatusCheck(repoRoot) {
+  return execCommand("git", ["-C", repoRoot, "status", "--porcelain"]);
+}
+
+/**
  * Run preflight checks before launching the Ralph loop
  * 
  * @param {Object} options
  * @param {string} options.repoRoot - Repository root path
  * @param {Array<Object>} options.queue - Selected issue queue
  * @param {Object} options.runOptions - Run configuration (runMode, parallelism, model)
+ * @param {Function} [options.execGitStatus] - Git worktree checker (for testing)
  * @param {Function} [options.execGhAuth] - GitHub auth checker (for testing)
  * @param {Function} [options.execGhRepo] - GitHub repo checker (for testing)
  * @returns {Promise<Object>} Preflight result
@@ -72,6 +80,7 @@ export async function runPreflight({
   repoRoot,
   queue,
   runOptions,
+  execGitStatus = defaultGitStatusCheck,
   execGhAuth = defaultGhAuthCheck,
   execGhRepo = defaultGhRepoCheck,
 }) {
@@ -114,8 +123,36 @@ export async function runPreflight({
       : ".ralph/config.json not found. Initialize Ralph first.",
     blocking: true,
   });
+
+  // Check 4: Main worktree is clean
+  try {
+    const gitResult = await execGitStatus(repoRoot);
+    const dirtyFiles = gitResult.stdout
+      ? gitResult.stdout.split(/\r?\n/).filter(Boolean).length
+      : 0;
+    const clean = gitResult.exitCode === 0 && dirtyFiles === 0;
+    checks.push({
+      id: "worktree-clean",
+      label: "Worktree clean",
+      status: clean ? "pass" : "fail",
+      message: clean
+        ? "Git worktree is clean"
+        : gitResult.exitCode === 0
+          ? `Git worktree has uncommitted changes (${dirtyFiles} file${dirtyFiles === 1 ? "" : "s"})`
+          : `Git worktree check failed: ${gitResult.stderr || "git status failed"}`,
+      blocking: true,
+    });
+  } catch (err) {
+    checks.push({
+      id: "worktree-clean",
+      label: "Worktree clean",
+      status: "fail",
+      message: `Git worktree check failed: ${err.message}`,
+      blocking: true,
+    });
+  }
   
-  // Check 4: GitHub auth works
+  // Check 5: GitHub auth works
   try {
     const authResult = await execGhAuth();
     const authPassed = authResult.exitCode === 0;
@@ -138,7 +175,7 @@ export async function runPreflight({
     });
   }
   
-  // Check 5: Repo identity can be verified
+  // Check 6: Repo identity can be verified
   // Read repo from config.json if it exists
   let repoIdentity = null;
   if (hasConfig) {
