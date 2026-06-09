@@ -4,10 +4,10 @@ import { CopilotWebview } from "./lib/copilot-webview.js";
 import { resolveRepoState } from "./lib/repo-resolver.mjs";
 import { initializeRalph } from "./lib/ralph-init.mjs";
 import { loadUserConfig } from "./lib/user-config.mjs";
-import { startRalphLoop } from "./lib/loop-launch-controller.mjs";
+import { orchestrateRun as orchestrateRalphRun, startRalphLoop } from "./lib/loop-launch-controller.mjs";
 import {
-  createAutopilotStartPermissionHook,
-  createRalphStartTool,
+  createAutopilotOrchestrationPermissionHook,
+  createRalphOrchestrationTool,
   inferSessionMode,
 } from "./lib/ralph-tools.mjs";
 import {
@@ -89,6 +89,20 @@ async function startLoop({ queue, issueNumbers, runOptions } = {}) {
     queue,
     issueNumbers,
     runOptions,
+    userConfig,
+    getLoopProcess,
+  });
+}
+
+async function orchestrateRun({ queue, issueNumbers, runOptions, verify, timeoutMinutes } = {}) {
+  const { config: userConfig } = loadUserConfig();
+  return orchestrateRalphRun({
+    repoRoot: REPO_ROOT,
+    queue,
+    issueNumbers,
+    runOptions,
+    verify,
+    timeoutMinutes,
     userConfig,
     getLoopProcess,
   });
@@ -204,6 +218,7 @@ const webview = new CopilotWebview({
     stopLoop,
     initRalph,
     runPreflight,
+    orchestrateRun,
     getUserConfig,
     retryIssue,
     skipIssue,
@@ -212,19 +227,20 @@ const webview = new CopilotWebview({
     log: (msg, opts) => session.log(msg, opts),
   },
 });
+const agentSafeWebviewTools = webview.tools.filter((tool) => tool.name !== "ralph_dashboard_eval");
 
 let currentSessionMode = null;
 const updateCurrentSessionMode = (event) => {
   currentSessionMode = inferSessionMode([event], currentSessionMode);
 };
-const allowAutopilotRalphStart = createAutopilotStartPermissionHook({
+const allowAutopilotRalphOrchestration = createAutopilotOrchestrationPermissionHook({
   getMode: () => currentSessionMode,
 });
 
 const session = await joinSession({
   tools: [
-    ...webview.tools,
-    createRalphStartTool({ startLoop }),
+    ...agentSafeWebviewTools,
+    createRalphOrchestrationTool({ orchestrateRun }),
   ],
   commands: [
     {
@@ -235,7 +251,7 @@ const session = await joinSession({
   ],
   hooks: {
     onSessionEnd: webview.close,
-    onPreToolUse: allowAutopilotRalphStart,
+    onPreToolUse: allowAutopilotRalphOrchestration,
   },
 });
 

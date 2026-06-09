@@ -22,6 +22,7 @@ test("loadUserConfig — returns safe defaults when config file missing", () => 
     assert.equal(result.config.defaultIssueSearch, null);
     assert.equal(result.config.defaultModel, null);
     assert.equal(result.config.defaultParallelism, null);
+    assert.equal(result.config.allowAgentLaunch, false);
     assert.deepEqual(result.config.recentQueries, []);
     assert.deepEqual(result.warnings, []);
   } finally {
@@ -38,6 +39,7 @@ test("loadUserConfig — loads valid config from file", () => {
     defaultIssueSearch: "is:open label:enhancement",
     defaultModel: "claude-sonnet-4.5",
     defaultParallelism: 2,
+    allowAgentLaunch: true,
     recentQueries: ["is:open milestone:v1", "is:open author:@me"],
   };
   
@@ -50,10 +52,27 @@ test("loadUserConfig — loads valid config from file", () => {
     assert.equal(result.config.defaultIssueSearch, "is:open label:enhancement");
     assert.equal(result.config.defaultModel, "claude-sonnet-4.5");
     assert.equal(result.config.defaultParallelism, 2);
+    assert.equal(result.config.allowAgentLaunch, true);
     assert.deepEqual(result.config.recentQueries, [
       "is:open milestone:v1",
       "is:open author:@me",
     ]);
+    assert.deepEqual(result.warnings, []);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig — allowAgentLaunch defaults false and can be enabled", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+
+  writeFileSync(configPath, JSON.stringify({ allowAgentLaunch: true }), "utf8");
+
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+
+    assert.equal(result.config.allowAgentLaunch, true);
     assert.deepEqual(result.warnings, []);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });

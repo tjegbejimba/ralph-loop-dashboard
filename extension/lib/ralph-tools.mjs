@@ -1,16 +1,16 @@
 // Agent-facing Ralph tools and mode-aware permission helpers.
 
-export const RALPH_START_TOOL_NAME = "ralph_dashboard_start";
+export const RALPH_ORCHESTRATE_TOOL_NAME = "ralph_dashboard_orchestrate";
 
-export function createRalphStartTool({ startLoop }) {
-  if (typeof startLoop !== "function") {
-    throw new TypeError("startLoop is required");
+export function createRalphOrchestrationTool({ orchestrateRun }) {
+  if (typeof orchestrateRun !== "function") {
+    throw new TypeError("orchestrateRun is required");
   }
 
   return {
-    name: RALPH_START_TOOL_NAME,
+    name: RALPH_ORCHESTRATE_TOOL_NAME,
     description:
-      "Start the Ralph loop after running Ralph preflight. Autopilot agents may use this when given issueNumbers or a queue.",
+      "Orchestrate a gated Ralph run: preflight, create a durable queue run, launch workers, and optionally verify status.json until terminal.",
     parameters: {
       type: "object",
       properties: {
@@ -42,18 +42,27 @@ export function createRalphStartTool({ startLoop }) {
         runOptions: {
           type: "object",
           description:
-            "Optional run configuration. Missing fields use the user's Ralph dashboard defaults.",
+            "Optional run configuration. Missing fields use the user's Ralph dashboard defaults; agent launches default to until-empty.",
           properties: {
             runMode: { type: "string", enum: ["one-pass", "until-empty"] },
             parallelism: { type: "integer", minimum: 1, maximum: 10 },
             model: { type: "string" },
           },
         },
+        verify: {
+          type: "boolean",
+          description: "When true or omitted, poll the run status until all queue items are terminal or timeout.",
+        },
+        timeoutMinutes: {
+          type: "number",
+          minimum: 0,
+          description: "Maximum minutes to wait for verification. Defaults to the orchestration timeout.",
+        },
       },
     },
     handler: async (args = {}) => {
       try {
-        const result = await startLoop(args);
+        const result = await orchestrateRun(args);
         const textResultForLlm = JSON.stringify(result);
         if (result.ok) {
           return { resultType: "success", textResultForLlm };
@@ -94,18 +103,18 @@ export function inferSessionMode(events = [], fallback = null) {
   return mode;
 }
 
-export function createAutopilotStartPermissionHook({ getMode }) {
+export function createAutopilotOrchestrationPermissionHook({ getMode }) {
   if (typeof getMode !== "function") {
     throw new TypeError("getMode is required");
   }
 
   return (input) => {
-    if (input?.toolName !== RALPH_START_TOOL_NAME) return undefined;
+    if (input?.toolName !== RALPH_ORCHESTRATE_TOOL_NAME) return undefined;
     if (getMode() !== "autopilot") return undefined;
 
     return {
       permissionDecision: "allow",
-      permissionDecisionReason: "Autopilot agents may start Ralph after Ralph preflight passes.",
+      permissionDecisionReason: "Autopilot agents may orchestrate Ralph only when allowAgentLaunch is enabled.",
     };
   };
 }

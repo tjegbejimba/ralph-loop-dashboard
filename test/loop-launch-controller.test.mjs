@@ -2,6 +2,9 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { startRalphLoop } from "../extension/lib/loop-launch-controller.mjs";
 
 const queue = [{ number: 42, title: "Slice 42: Test" }];
@@ -41,7 +44,13 @@ test("startRalphLoop runs preflight, creates a run, and launches it", async () =
   assert.equal(calls[1][0], "createRun");
   assert.deepEqual(calls[1][1], { repoRoot: "/repo", queue, runOptions });
   assert.equal(calls[2][0], "launchLoop");
-  assert.deepEqual(calls[2][1], {
+  assert.equal(typeof calls[2][1].confirmStarted, "function");
+  assert.deepEqual({
+    repoRoot: calls[2][1].repoRoot,
+    runId: calls[2][1].runId,
+    runDir: calls[2][1].runDir,
+    runOptions: calls[2][1].runOptions,
+  }, {
     repoRoot: "/repo",
     runId: "run-1",
     runDir: "/repo/.ralph/runs/run-1",
@@ -146,4 +155,60 @@ test("startRalphLoop returns a structured error for invalid run options", async 
   assert.equal(result.ok, false);
   assert.match(result.error, /run mode/i);
   assert.equal(preflightRan, false);
+});
+
+test("startRalphLoop requires launcher startup confirmation before reporting success", async () => {
+  let processChecks = 0;
+
+  const result = await startRalphLoop({
+    repoRoot: "/repo",
+    queue,
+    runOptions,
+    getLoopProcess: async () => {
+      processChecks += 1;
+      if (processChecks === 1) return [];
+      return [{ pid: 1234, cmd: "bash /repo/.ralph/ralph.sh" }];
+    },
+    runPreflight: async () => passingPreflight(),
+    createRun: () => ({ runId: "run-1", runDir: "/repo/.ralph/runs/run-1" }),
+    launchLoop: async ({ confirmStarted }) => {
+      if (typeof confirmStarted !== "function") {
+        return { success: false, error: "missing startup confirmation" };
+      }
+      const started = await confirmStarted();
+      return started ? { success: true, pid: 1234 } : { success: false, error: "not started" };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.pid, 1234);
+  assert.equal(processChecks, 2);
+});
+
+test("startRalphLoop does not treat the Windows launcher pidfile as startup confirmation", async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-controller-"));
+  try {
+    let processChecks = 0;
+    const result = await startRalphLoop({
+      repoRoot: tmpRepo,
+      queue,
+      runOptions,
+      isWindows: true,
+      getLoopProcess: async () => {
+        processChecks += 1;
+        return processChecks === 1 ? [] : [{ pid: 1234, cmd: "ralph launcher (windows)" }];
+      },
+      runPreflight: async () => passingPreflight(),
+      createRun: () => ({ runId: "run-1", runDir: join(tmpRepo, ".ralph", "runs", "run-1") }),
+      launchLoop: async ({ confirmStarted }) => {
+        const started = await confirmStarted();
+        return started ? { success: true, pid: 1234 } : { success: false, error: "not started" };
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /not started/);
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
 });

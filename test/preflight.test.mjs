@@ -24,6 +24,11 @@ function createTestRepo(tmpDir, { hasRalphMd = true, hasConfig = true, validConf
 }
 
 const execGitStatusClean = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+const execGhIssueReady = async () => ({
+  exitCode: 0,
+  stdout: JSON.stringify({ state: "OPEN", labels: [{ name: "ready-for-agent" }] }),
+  stderr: "",
+});
 
 test("runPreflight passes when all conditions met", async () => {
   const tmpDir = join(import.meta.dirname, "tmp-preflight-1");
@@ -38,10 +43,11 @@ test("runPreflight passes when all conditions met", async () => {
       execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: execGhIssueReady,
     });
     
     assert.equal(result.passed, true);
-    assert.equal(result.checks.length, 6); // queue, ralph.md, config.json, git status, gh auth, gh repo
+    assert.equal(result.checks.length, 7); // queue, ralph.md, config.json, git status, gh auth, gh repo, AFK safety
     assert.ok(result.checks.every(c => c.status === "pass"));
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
@@ -60,6 +66,7 @@ test("runPreflight blocks when queue is empty", async () => {
       execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: execGhIssueReady,
     });
     
     assert.equal(result.passed, false);
@@ -84,6 +91,7 @@ test("runPreflight blocks when RALPH.md missing", async () => {
       execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: execGhIssueReady,
     });
     
     assert.equal(result.passed, false);
@@ -108,6 +116,7 @@ test("runPreflight blocks when config.json missing", async () => {
       execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: execGhIssueReady,
     });
     
     assert.equal(result.passed, false);
@@ -133,6 +142,7 @@ test("runPreflight blocks when GitHub auth fails", async () => {
       execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 1, stdout: "", stderr: "Not authenticated" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: execGhIssueReady,
     });
     
     assert.equal(result.passed, false);
@@ -158,6 +168,7 @@ test("runPreflight blocks when repo identity cannot be verified", async () => {
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       // Mock failed gh repo view
       execGhRepo: async () => ({ exitCode: 1, stdout: "", stderr: "Repository not found" }),
+      execGhIssue: execGhIssueReady,
     });
     
     assert.equal(result.passed, false);
@@ -182,10 +193,11 @@ test("runPreflight returns all checks even when some fail", async () => {
       execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
+      execGhIssue: execGhIssueReady,
     });
     
     // Should run all checks, not short-circuit
-    assert.equal(result.checks.length, 6);
+    assert.equal(result.checks.length, 7);
     
     // Queue should pass (has items)
     const queueCheck = result.checks.find(c => c.id === "queue-not-empty");
@@ -221,6 +233,7 @@ test("runPreflight blocks when worktree has uncommitted changes", async () => {
       execGitStatus: async () => ({ exitCode: 0, stdout: " M src/app.js\n?? tmp.txt", stderr: "" }),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: execGhIssueReady,
     });
 
     assert.equal(result.passed, false);
@@ -228,6 +241,44 @@ test("runPreflight blocks when worktree has uncommitted changes", async () => {
     assert.equal(gitCheck.status, "fail");
     assert.equal(gitCheck.blocking, true);
     assert.match(gitCheck.message, /uncommitted changes/i);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("runPreflight blocks queued issues that are not AFK-safe", async () => {
+  const tmpDir = join(import.meta.dirname, "tmp-preflight-9");
+  createTestRepo(tmpDir);
+
+  try {
+    const result = await runPreflight({
+      repoRoot: tmpDir,
+      queue: [
+        { number: 1, title: "Ready" },
+        { number: 2, title: "HITL" },
+        { number: 3, title: "Triage" },
+      ],
+      runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: execGitStatusClean,
+      execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: async (_repo, number) => {
+        const fixtures = {
+          1: { state: "OPEN", labels: [{ name: "ready-for-agent" }] },
+          2: { state: "OPEN", labels: [{ name: "ready-for-agent" }, { name: "hitl" }] },
+          3: { state: "OPEN", labels: [{ name: "needs-triage" }] },
+        };
+        return { exitCode: 0, stdout: JSON.stringify(fixtures[number]), stderr: "" };
+      },
+    });
+
+    assert.equal(result.passed, false);
+    const afkCheck = result.checks.find(c => c.id === "queue-afk-safe");
+    assert.equal(afkCheck.status, "fail");
+    assert.equal(afkCheck.blocking, true);
+    assert.match(afkCheck.message, /#2: has hitl/);
+    assert.match(afkCheck.message, /#3: missing ready-for-agent/);
+    assert.match(afkCheck.message, /#3: has needs-triage/);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

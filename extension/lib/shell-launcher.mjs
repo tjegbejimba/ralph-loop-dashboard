@@ -3,15 +3,83 @@
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { chmodSync, accessSync, constants } from "node:fs";
-import { resolveBashExe, toBashPath } from "./platform-shim.mjs";
+import {
+  removePidFile,
+  resolveBashExe,
+  toBashPath,
+  validateWindowsParallelism,
+  writePidFile,
+} from "./platform-shim.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
+const DEFAULT_SPAWN_CHECK_MS = 100;
+const DEFAULT_CONFIRM_START_MS = 30000;
+const DEFAULT_STARTUP_POLL_MS = 50;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatExit({ code, signal }) {
+  if (code !== null && code !== undefined) return `exited with code ${code}`;
+  return `exited from signal ${signal || "unknown"}`;
+}
+
+async function waitForStartup({
+  child,
+  getExit,
+  scriptPath,
+  confirmStarted,
+  startupTimeoutMs,
+  startupPollMs,
+}) {
+  const timeoutMs = startupTimeoutMs ?? (confirmStarted ? DEFAULT_CONFIRM_START_MS : DEFAULT_SPAWN_CHECK_MS);
+  const pollMs = startupPollMs ?? DEFAULT_STARTUP_POLL_MS;
+  const deadline = Date.now() + timeoutMs;
+
+  if (typeof confirmStarted === "function") {
+    while (Date.now() < deadline) {
+      const exit = getExit();
+      if (exit && exit.code !== 0) {
+        return { success: false, error: `${scriptPath} ${formatExit(exit)} during startup` };
+      }
+      let confirmed = false;
+      try {
+        confirmed = await confirmStarted();
+      } catch (err) {
+        return {
+          success: false,
+          error: `Startup confirmation failed for ${scriptPath}: ${String(err.message || err)}`,
+        };
+      }
+      if (confirmed) {
+        return { success: true, pid: child.pid };
+      }
+      await sleep(pollMs);
+    }
+    const exit = getExit();
+    if (exit && exit.code !== 0) {
+      return { success: false, error: `${scriptPath} ${formatExit(exit)} during startup` };
+    }
+    return {
+      success: false,
+      error: `Timed out waiting for Ralph workers to start after launching ${scriptPath}`,
+    };
+  }
+
+  while (Date.now() < deadline) {
+    const exit = getExit();
+    if (exit) {
+      if (exit.code === 0) return { success: true, pid: child.pid };
+      return { success: false, error: `${scriptPath} ${formatExit(exit)} during startup` };
+    }
+    await sleep(pollMs);
+  }
+  return { success: true, pid: child.pid };
+}
 
 /**
  * Launch shell engine detached with run ID
- * 
- * NOTE: RALPH_RUN_ID and RALPH_RUN_DIR are passed but not yet consumed by
- * launch.sh/ralph.sh. These will be used in future slices for run-aware execution.
  * 
  * @param {Object} options
  * @param {string} options.runId - Unique run identifier
@@ -19,6 +87,13 @@ const IS_WINDOWS = process.platform === "win32";
  * @param {string} options.repoRoot - Repository root path
  * @param {Object} options.runOptions - Run configuration (runMode, parallelism, model)
  * @param {string} [options.shellScript] - Override shell script path (for testing)
+ * @param {Function} [options.confirmStarted] - Optional startup verifier
+ * @param {number} [options.startupTimeoutMs] - Startup confirmation timeout
+ * @param {number} [options.startupPollMs] - Startup confirmation poll interval
+ * @param {boolean} [options.isWindows] - Platform override for tests
+ * @param {Function} [options.resolveBash] - Bash resolver override for tests
+ * @param {Function} [options.toBash] - Path converter override for tests
+ * @param {Function} [options.killProcess] - Process killer override for tests
  * @returns {Promise<Object>} Launch result
  * @returns {boolean} .success - Whether launch succeeded
  * @returns {number} [.pid] - Process ID (only if success is true)
@@ -30,6 +105,13 @@ export async function launchRun({
   repoRoot,
   runOptions,
   shellScript,
+  confirmStarted,
+  startupTimeoutMs,
+  startupPollMs,
+  isWindows = IS_WINDOWS,
+  resolveBash = resolveBashExe,
+  toBash = toBashPath,
+  killProcess = process.kill,
 }) {
   // Validate required parameters
   if (!runId || typeof runId !== "string") {
@@ -55,8 +137,8 @@ export async function launchRun({
     throw new TypeError("runOptions.runMode is required and must be a string");
   }
   
-  // Default to ralph/launch.sh if not overridden
-  const scriptPath = shellScript || join(repoRoot, "ralph", "launch.sh");
+  const scriptPath = shellScript || join(repoRoot, ".ralph", "launch.sh");
+  const launcherPidFile = join(repoRoot, ".ralph", "launcher.pid");
   
   // Verify script exists and is executable
   try {
@@ -71,7 +153,7 @@ export async function launchRun({
   // Make script executable if needed. Skip on Windows: NTFS doesn't carry
   // POSIX exec bits, and chmodSync on Windows is a no-op that can still
   // emit warnings on some filesystems. Bash interprets the shebang itself.
-  if (!IS_WINDOWS) {
+  if (!isWindows) {
     try {
       chmodSync(scriptPath, 0o755);
     } catch (err) {
@@ -82,8 +164,7 @@ export async function launchRun({
     }
   }
   
-  // Spawn detached process with error handling
-  return new Promise((resolve) => {
+  const childResult = await new Promise((resolve) => {
     const env = {
       ...process.env,
       RALPH_RUN_ID: runId,
@@ -93,16 +174,23 @@ export async function launchRun({
       RALPH_PARALLELISM: String(runOptions.parallelism),
       RALPH_RUN_MODE: runOptions.runMode,
     };
+    const launchArgs = runOptions.runMode === "one-pass" ? ["--once"] : [];
 
     let child;
-    if (IS_WINDOWS) {
+    let exit = null;
+    if (isWindows) {
+      const validation = validateWindowsParallelism(runOptions.parallelism);
+      if (!validation.ok) {
+        resolve({ success: false, error: validation.error });
+        return;
+      }
       // Windows: invoke launch.sh through Git for Windows bash. Direct
       // spawn(scriptPath, ...) fails because Node on Windows cannot honour
       // a shebang. We use `bash -lc "exec '<posix-path>'"` so the recorded
       // PID is launch.sh, not bash.
       let bashExe;
       try {
-        bashExe = resolveBashExe(process.env);
+        bashExe = resolveBash(process.env);
       } catch (err) {
         resolve({ success: false, error: String(err.message || err) });
         return;
@@ -116,20 +204,26 @@ export async function launchRun({
         });
         return;
       }
-      const scriptBash = toBashPath(scriptPath);
-      child = spawn(bashExe, ["-lc", `exec '${scriptBash}'`], {
+      const scriptBash = toBash(scriptPath);
+      const windowsLaunchArgs = ["--foreground", ...launchArgs];
+      const command = `exec '${scriptBash}' ${windowsLaunchArgs.join(" ")}`.trim();
+      child = spawn(bashExe, ["-lc", command], {
         detached: true,
         windowsHide: true,
         stdio: "ignore",
         env,
       });
     } else {
-      child = spawn(scriptPath, [], {
+      child = spawn(scriptPath, launchArgs, {
         detached: true,
         stdio: "ignore",
         env,
       });
     }
+
+    child.once("exit", (code, signal) => {
+      exit = { code, signal };
+    });
     
     // Handle spawn errors before unref
     child.on("error", (err) => {
@@ -139,13 +233,54 @@ export async function launchRun({
       });
     });
     
-    // On successful spawn, unref and return
+    // On successful spawn, unref and confirm startup
     child.on("spawn", () => {
+      if (isWindows) {
+        try {
+          writePidFile(launcherPidFile, child.pid);
+        } catch (err) {
+          try {
+            killProcess(child.pid, "SIGTERM");
+          } catch {
+            // best effort; the caller receives the pidfile error below
+          }
+          resolve({
+            success: false,
+            error: `Failed to write launcher pidfile: ${String(err.message || err)}`,
+          });
+          return;
+        }
+      }
       child.unref();
-      resolve({
-        success: true,
-        pid: child.pid,
-      });
+      resolve({ child, getExit: () => exit });
     });
   });
+
+  if (childResult.success === false) {
+    return childResult;
+  }
+
+  const result = await waitForStartup({
+    child: childResult.child,
+    getExit: childResult.getExit,
+    scriptPath,
+    confirmStarted,
+    startupTimeoutMs,
+    startupPollMs,
+  });
+  if (!result.success) {
+    try {
+      killProcess(childResult.child.pid, "SIGTERM");
+    } catch {
+      // already exited
+    }
+    if (isWindows) {
+      removePidFile(launcherPidFile);
+    }
+    return {
+      ...result,
+      pid: childResult.child.pid,
+    };
+  }
+  return result;
 }
