@@ -56,10 +56,32 @@ async function defaultGhRepoCheck(repo) {
 }
 
 /**
+ * Default GitHub issue checker
+ */
+async function defaultGhIssueCheck(repo, number) {
+  return execCommand("gh", [
+    "issue",
+    "view",
+    String(number),
+    "--repo",
+    repo,
+    "--json",
+    "number,state,labels",
+  ]);
+}
+
+/**
  * Default git worktree checker
  */
 async function defaultGitStatusCheck(repoRoot) {
   return execCommand("git", ["-C", repoRoot, "status", "--porcelain"]);
+}
+
+function labelNames(labels) {
+  if (!Array.isArray(labels)) return [];
+  return labels
+    .map((label) => (typeof label === "string" ? label : label?.name))
+    .filter(Boolean);
 }
 
 /**
@@ -72,6 +94,7 @@ async function defaultGitStatusCheck(repoRoot) {
  * @param {Function} [options.execGitStatus] - Git worktree checker (for testing)
  * @param {Function} [options.execGhAuth] - GitHub auth checker (for testing)
  * @param {Function} [options.execGhRepo] - GitHub repo checker (for testing)
+ * @param {Function} [options.execGhIssue] - GitHub issue checker (for testing)
  * @returns {Promise<Object>} Preflight result
  * @returns {boolean} .passed - Whether all blocking checks passed
  * @returns {Array<Object>} .checks - Individual check results
@@ -83,6 +106,7 @@ export async function runPreflight({
   execGitStatus = defaultGitStatusCheck,
   execGhAuth = defaultGhAuthCheck,
   execGhRepo = defaultGhRepoCheck,
+  execGhIssue = defaultGhIssueCheck,
 }) {
   const checks = [];
   
@@ -189,7 +213,9 @@ export async function runPreflight({
     }
   }
   
-  if (repoIdentity && typeof repoIdentity === "string" && repoIdentity.includes("/")) {
+  const hasRepoIdentity = repoIdentity && typeof repoIdentity === "string" && repoIdentity.includes("/");
+
+  if (hasRepoIdentity) {
     try {
       const repoResult = await execGhRepo(repoIdentity);
       const repoPassed = repoResult.exitCode === 0;
@@ -217,6 +243,61 @@ export async function runPreflight({
       label: "Repository identity verified",
       status: "fail",
       message: "Cannot verify repository identity: config.json missing or invalid 'repo' field",
+      blocking: true,
+    });
+  }
+
+  // Check 7: Queued issues are AFK-safe for autonomous workers
+  if (!queueEmpty && hasRepoIdentity) {
+    const unsafeIssues = [];
+    for (const issue of queue) {
+      const number = Number(issue?.number);
+      if (!Number.isInteger(number) || number <= 0) {
+        unsafeIssues.push(`#${issue?.number ?? "?"}: invalid issue number`);
+        continue;
+      }
+      try {
+        const issueResult = await execGhIssue(repoIdentity, number);
+        if (issueResult.exitCode !== 0) {
+          unsafeIssues.push(`#${number}: lookup failed (${issueResult.stderr || "gh issue view failed"})`);
+          continue;
+        }
+        const record = JSON.parse(issueResult.stdout || "{}");
+        const labels = labelNames(record.labels);
+        if (record.state !== "OPEN") {
+          unsafeIssues.push(`#${number}: state is ${record.state || "unknown"}`);
+        }
+        if (!labels.includes("ready-for-agent")) {
+          unsafeIssues.push(`#${number}: missing ready-for-agent`);
+        }
+        if (labels.includes("hitl")) {
+          unsafeIssues.push(`#${number}: has hitl`);
+        }
+        if (labels.includes("needs-triage")) {
+          unsafeIssues.push(`#${number}: has needs-triage`);
+        }
+      } catch (err) {
+        unsafeIssues.push(`#${number}: lookup failed (${String(err.message || err)})`);
+      }
+    }
+
+    checks.push({
+      id: "queue-afk-safe",
+      label: "Queue issues are AFK-safe",
+      status: unsafeIssues.length === 0 ? "pass" : "fail",
+      message: unsafeIssues.length === 0
+        ? "Queued issues are open, ready-for-agent, and not HITL/needs-triage"
+        : `Unsafe queue issues: ${unsafeIssues.join("; ")}`,
+      blocking: true,
+    });
+  } else {
+    checks.push({
+      id: "queue-afk-safe",
+      label: "Queue issues are AFK-safe",
+      status: "fail",
+      message: queueEmpty
+        ? "Queue is empty; cannot verify issue labels"
+        : "Cannot verify issue labels without a valid repo identity",
       blocking: true,
     });
   }

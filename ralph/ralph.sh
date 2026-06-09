@@ -54,6 +54,7 @@ config_get() {
 }
 
 REPO="${RALPH_REPO:-$(git -C "$(git rev-parse --show-toplevel)" config --get remote.origin.url 2>/dev/null | sed -E 's#(git@github.com:|https://github.com/)##; s/\.git$//')}"
+GH="${RALPH_GH_BIN:-gh}"
 TITLE_REGEX="${RALPH_TITLE_REGEX:-$(config_get '.issue.titleRegex')}"
 TITLE_REGEX="${TITLE_REGEX:-^Slice [0-9]+:}"
 TITLE_NUM_RE="${RALPH_TITLE_NUM_REGEX:-$(config_get '.issue.titleNumRegex')}"
@@ -417,8 +418,16 @@ while true; do
         continue
       fi
       
-      # Check if issue is already CLOSED on GitHub before claiming
-      current_state=$(gh issue view "$cand_num" --repo "$REPO" --json state -q .state 2>/dev/null || echo "")
+      # Re-fetch state/labels/body from GitHub before claiming. Queue files can
+      # be stale or agent-supplied, so run-aware workers enforce the same AFK
+      # safety boundary as direct-number queues.
+      cand_record=$("$GH" issue view "$cand_num" --repo "$REPO" \
+        --json state,labels,body 2>/dev/null | tr -d '\r' || echo "")
+      if [[ -z "$cand_record" ]]; then
+        echo "↪️  Worker $WORKER_ID: #$cand_num lookup failed; retrying later."
+        continue
+      fi
+      current_state=$(echo "$cand_record" | jq -r .state)
       if [[ "$current_state" != "OPEN" ]]; then
         # Mark as skipped and continue to next
         state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
@@ -427,9 +436,31 @@ while true; do
         echo "ℹ️  Worker $WORKER_ID: #$cand_num already closed (state=$current_state); marked as skipped."
         continue
       fi
-      
-      # Fetch issue body for prompt construction
-      cand_body=$(gh issue view "$cand_num" --repo "$REPO" --json body -q .body 2>/dev/null || echo "")
+
+      cand_labels=$(echo "$cand_record" | jq -r '[.labels[].name] | join(",")')
+      if [[ ",${cand_labels}," != *",ready-for-agent,"* ]]; then
+        state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+        status_mark_failed "$cand_num" "Issue is missing ready-for-agent"
+        state_unlock
+        echo "🚫 Worker $WORKER_ID: #$cand_num missing ready-for-agent; marked as failed."
+        continue
+      fi
+      if [[ ",${cand_labels}," == *",hitl,"* ]]; then
+        state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+        status_mark_failed "$cand_num" "Issue has hitl"
+        state_unlock
+        echo "🚫 Worker $WORKER_ID: #$cand_num has hitl; marked as failed."
+        continue
+      fi
+      if [[ ",${cand_labels}," == *",needs-triage,"* ]]; then
+        state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
+        status_mark_failed "$cand_num" "Issue has needs-triage"
+        state_unlock
+        echo "🚫 Worker $WORKER_ID: #$cand_num has needs-triage; marked as failed."
+        continue
+      fi
+
+      cand_body=$(echo "$cand_record" | jq -r '.body // ""')
       
       num="$cand_num"
       title="$cand_title"
@@ -729,7 +760,7 @@ while true; do
   fi
   # Re-fetch state + labels + body so we can re-validate the AFK guard and
   # re-parse blockers from the freshest body, not the stale chosen_blockers.
-  fresh_record=$(gh issue view "$num" --repo "$REPO" \
+  fresh_record=$("$GH" issue view "$num" --repo "$REPO" \
     --json state,title,labels,body 2>/dev/null | tr -d '\r' || echo "")
   if [[ -z "$fresh_record" ]]; then
     state_unlock
@@ -747,19 +778,22 @@ while true; do
   # via the search must have matched the AFK guard at scan time; legacy users
   # who manually crafted custom `issueSearch` queries may not want the
   # `ready-for-agent`/`hitl`/`needs-triage` triple enforced here.
-  if [[ -z "$RUN_ID" && ${#NUMBERS_QUEUE[@]} -gt 0 ]]; then
+  if [[ -n "$RUN_ID" || ( -z "$RUN_ID" && ${#NUMBERS_QUEUE[@]} -gt 0 ) ]]; then
     fresh_labels=$(echo "$fresh_record" | jq -r '[.labels[].name] | join(",")')
     if [[ ",${fresh_labels}," != *",ready-for-agent,"* ]]; then
+      [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue lost ready-for-agent before claim"
       state_unlock
       echo "↪️  Worker $WORKER_ID: #$num lost ready-for-agent during selection; retrying."
       continue
     fi
     if [[ ",${fresh_labels}," == *",hitl,"* ]]; then
+      [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue gained hitl before claim"
       state_unlock
       echo "↪️  Worker $WORKER_ID: #$num gained hitl during selection; retrying."
       continue
     fi
     if [[ ",${fresh_labels}," == *",needs-triage,"* ]]; then
+      [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue gained needs-triage before claim"
       state_unlock
       echo "↪️  Worker $WORKER_ID: #$num gained needs-triage during selection; retrying."
       continue

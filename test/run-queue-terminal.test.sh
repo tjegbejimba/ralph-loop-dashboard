@@ -21,7 +21,9 @@ run_worker() {
     RALPH_REPO="testowner/testrepo" \
       RALPH_RUN_ID="$run_id" \
       RALPH_POLL_SEC=1 \
-      .ralph/ralph.sh
+    RALPH_GH_BIN="$TEST_ROOT/bin/gh" \
+    PATH="$TEST_ROOT/bin:$PATH" \
+    .ralph/ralph.sh
   ) >"$output_file" 2>&1 &
   local pid=$!
 
@@ -41,6 +43,19 @@ run_worker() {
 }
 
 mkdir -p "$TEST_ROOT/main" "$TEST_ROOT/origin.git"
+mkdir -p "$TEST_ROOT/bin"
+cat > "$TEST_ROOT/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2 $3" in
+  "issue view 200")
+    printf '{"state":"OPEN","labels":[],"body":""}\n'
+    ;;
+  *)
+    printf '{}\n'
+    ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/bin/gh"
 git init -q --bare "$TEST_ROOT/origin.git"
 git init -q "$TEST_ROOT/main"
 cd "$TEST_ROOT/main"
@@ -54,7 +69,7 @@ git remote add origin "$TEST_ROOT/origin.git"
 git push -q -u origin main
 printf '%s\n' ".ralph" >> .git/info/exclude
 
-mkdir -p .ralph/lib .ralph/runs/empty .ralph/runs/all-terminal
+mkdir -p .ralph/lib .ralph/runs/empty .ralph/runs/all-terminal .ralph/runs/unsafe
 cp "$REPO_ROOT/ralph/ralph.sh" .ralph/ralph.sh
 cp "$REPO_ROOT/ralph/lib/state.sh" .ralph/lib/state.sh
 cp "$REPO_ROOT/ralph/lib/status.sh" .ralph/lib/status.sh
@@ -97,6 +112,14 @@ cat > .ralph/runs/all-terminal/status.json <<'EOF'
   }
 }
 EOF
+cat > .ralph/runs/unsafe/queue.json <<'EOF'
+[
+  {"number": 200, "title": "Test issue 200"}
+]
+EOF
+cat > .ralph/runs/unsafe/status.json <<'EOF'
+{"items":{}}
+EOF
 
 echo "Test 1: empty run queue exits cleanly"
 empty_output=$(run_worker empty) || fail "empty queue worker should exit cleanly"
@@ -114,6 +137,21 @@ if ! grep -q "queue fully resolved (3/3 terminal). Done." <<<"$terminal_output";
   fail "all-terminal worker should report fully resolved queue"
 fi
 echo "PASS: all-terminal run queue exits cleanly"
+
+echo ""
+echo "Test 3: unsafe run queue item is failed instead of claimed"
+unsafe_output=$(run_worker unsafe) || fail "unsafe queue worker should exit cleanly after failing unsafe item"
+if ! grep -q "missing ready-for-agent; marked as failed" <<<"$unsafe_output"; then
+  echo "$unsafe_output"
+  fail "unsafe queue worker should report missing ready-for-agent"
+fi
+unsafe_status=$(jq -r '.items["200"].status' "$TEST_ROOT/main/.ralph/runs/unsafe/status.json")
+unsafe_error=$(jq -r '.items["200"].error' "$TEST_ROOT/main/.ralph/runs/unsafe/status.json")
+if [[ "$unsafe_status" != "failed" || "$unsafe_error" != "Issue is missing ready-for-agent" ]]; then
+  cat "$TEST_ROOT/main/.ralph/runs/unsafe/status.json"
+  fail "unsafe issue should be terminal failed with AFK guard error"
+fi
+echo "PASS: unsafe run queue item is failed instead of claimed"
 
 echo ""
 echo "All run queue terminal tests passed!"

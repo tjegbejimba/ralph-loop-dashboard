@@ -10,6 +10,7 @@ const DEFAULTS = {
   defaultIssueSearch: null,
   defaultModel: null,
   defaultParallelism: null,
+  allowAgentLaunch: false,
   recentQueries: [],
 };
 
@@ -67,6 +68,16 @@ export function loadUserConfig({ configDir } = {}) {
             return true;
           });
           config[key] = validQueries;
+        } else if (key === "allowAgentLaunch") {
+          if (typeof value !== "boolean") {
+            warnings.push({
+              field: key,
+              message: "Field 'allowAgentLaunch' must be a boolean. Using default false.",
+              value: "[redacted]",
+            });
+            continue;
+          }
+          config[key] = value;
         } else {
           config[key] = value;
         }
