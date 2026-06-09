@@ -23,6 +23,8 @@ function createTestRepo(tmpDir, { hasRalphMd = true, hasConfig = true, validConf
   }
 }
 
+const execGitStatusClean = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+
 test("runPreflight passes when all conditions met", async () => {
   const tmpDir = join(import.meta.dirname, "tmp-preflight-1");
   createTestRepo(tmpDir);
@@ -33,12 +35,13 @@ test("runPreflight passes when all conditions met", async () => {
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
       // Mock successful external commands
+      execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
     });
     
     assert.equal(result.passed, true);
-    assert.equal(result.checks.length, 5); // queue, ralph.md, config.json, gh auth, gh repo
+    assert.equal(result.checks.length, 6); // queue, ralph.md, config.json, git status, gh auth, gh repo
     assert.ok(result.checks.every(c => c.status === "pass"));
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
@@ -54,6 +57,7 @@ test("runPreflight blocks when queue is empty", async () => {
       repoRoot: tmpDir,
       queue: [], // Empty queue
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
     });
@@ -77,6 +81,7 @@ test("runPreflight blocks when RALPH.md missing", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
     });
@@ -100,6 +105,7 @@ test("runPreflight blocks when config.json missing", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
     });
@@ -124,6 +130,7 @@ test("runPreflight blocks when GitHub auth fails", async () => {
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
       // Mock failed gh auth
+      execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 1, stdout: "", stderr: "Not authenticated" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
     });
@@ -147,6 +154,7 @@ test("runPreflight blocks when repo identity cannot be verified", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       // Mock failed gh repo view
       execGhRepo: async () => ({ exitCode: 1, stdout: "", stderr: "Repository not found" }),
@@ -171,12 +179,13 @@ test("runPreflight returns all checks even when some fail", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: execGitStatusClean,
       execGhAuth: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
     });
     
     // Should run all checks, not short-circuit
-    assert.equal(result.checks.length, 5);
+    assert.equal(result.checks.length, 6);
     
     // Queue should pass (has items)
     const queueCheck = result.checks.find(c => c.id === "queue-not-empty");
@@ -187,12 +196,38 @@ test("runPreflight returns all checks even when some fail", async () => {
     const configCheck = result.checks.find(c => c.id === "config-json-exists");
     const authCheck = result.checks.find(c => c.id === "github-auth");
     const repoCheck = result.checks.find(c => c.id === "repo-identity");
+    const gitCheck = result.checks.find(c => c.id === "worktree-clean");
     
     assert.equal(ralphCheck.status, "fail");
     assert.equal(configCheck.status, "fail");
+    assert.equal(gitCheck.status, "pass");
     assert.equal(authCheck.status, "fail");
     assert.equal(repoCheck.status, "fail");
     assert.equal(result.passed, false);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("runPreflight blocks when worktree has uncommitted changes", async () => {
+  const tmpDir = join(import.meta.dirname, "tmp-preflight-8");
+  createTestRepo(tmpDir);
+
+  try {
+    const result = await runPreflight({
+      repoRoot: tmpDir,
+      queue: [{ number: 1, title: "Test" }],
+      runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: async () => ({ exitCode: 0, stdout: " M src/app.js\n?? tmp.txt", stderr: "" }),
+      execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+    });
+
+    assert.equal(result.passed, false);
+    const gitCheck = result.checks.find(c => c.id === "worktree-clean");
+    assert.equal(gitCheck.status, "fail");
+    assert.equal(gitCheck.blocking, true);
+    assert.match(gitCheck.message, /uncommitted changes/i);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

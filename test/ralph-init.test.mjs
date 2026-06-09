@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { initializeRalph } from "../extension/lib/ralph-init.mjs";
 
 function makeTempDir() {
@@ -104,6 +105,25 @@ test("initializeRalph — adds .gitignore entries for runtime artifacts", () => 
     assert.match(gitignore, /locks\//);
     assert.match(gitignore, /state\//);
     assert.match(gitignore, /runs\//);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test("initializeRalph — excludes .ralph from git porcelain status", () => {
+  const tempRoot = makeTempDir();
+
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: tempRoot });
+
+    const result = initializeRalph(tempRoot);
+
+    assert.equal(result.success, true);
+    const status = execFileSync("git", ["status", "--porcelain"], {
+      cwd: tempRoot,
+      encoding: "utf-8",
+    });
+    assert.equal(status, "");
   } finally {
     rmSync(tempRoot, { recursive: true, force: true });
   }

@@ -1,11 +1,40 @@
 // Ralph initialization service — prepares a repo with .ralph/ setup.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, copyFileSync, appendFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { join, dirname, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const RALPH_SOURCE = join(__dirname, "..", "..", "ralph");
+
+function resolveGitExcludePath(repoRoot) {
+  try {
+    const excludePath = execFileSync(
+      "git",
+      ["-C", repoRoot, "rev-parse", "--git-path", "info/exclude"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    if (!excludePath) return null;
+    return isAbsolute(excludePath) ? excludePath : join(repoRoot, excludePath);
+  } catch {
+    return null;
+  }
+}
+
+function ensureRalphGitExclude(repoRoot) {
+  const excludePath = resolveGitExcludePath(repoRoot);
+  if (!excludePath) return null;
+
+  mkdirSync(dirname(excludePath), { recursive: true });
+  const existing = existsSync(excludePath) ? readFileSync(excludePath, "utf-8") : "";
+  if (existing.split(/\r?\n/).includes(".ralph")) {
+    return { created: false };
+  }
+
+  appendFileSync(excludePath, `${existing.length > 0 && !existing.endsWith("\n") ? "\n" : ""}.ralph\n`);
+  return { created: true };
+}
 
 /**
  * Initialize Ralph in a target repository.
@@ -112,6 +141,13 @@ runs/
 `;
       writeFileSync(gitignorePath, gitignoreContent);
       created.push(".ralph/.gitignore");
+    }
+
+    const excludeResult = ensureRalphGitExclude(repoRoot);
+    if (excludeResult?.created) {
+      created.push(".git/info/exclude");
+    } else if (excludeResult) {
+      skipped.push(".git/info/exclude");
     }
     
     return {
