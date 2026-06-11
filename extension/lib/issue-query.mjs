@@ -1,6 +1,7 @@
 // Issue query module — runs GitHub issue searches and generates preview warnings.
 
 import { spawnSync } from "node:child_process";
+import { classifyIssue } from "./label-taxonomy.mjs";
 
 /**
  * Query GitHub issues and return metadata with warnings.
@@ -54,7 +55,7 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
     
     const warnings = [];
     const claimedSet = new Set(claimedIssues);
-    const preflight = config?.preflight ?? {};
+    const taxonomyConfig = config?.taxonomy ?? {};
     
     // Normalize to preview format
     const issues = rawIssues.map(issue => {
@@ -96,23 +97,28 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
         });
       }
 
-      // Check needs-triage label
-      if (labels.includes("needs-triage")) {
+      const taxonomy = classifyIssue(
+        { ...issue, labels },
+        { compatibilityAliases: taxonomyConfig.compatibilityAliases === true },
+      );
+      for (const conflict of taxonomy.conflicts) {
         warnings.push({
           issueNumber: issue.number,
-          type: "needs_triage",
-          message: `Issue #${issue.number} still has the needs-triage label`,
-          blocking: preflight.requireNotNeedsTriage === true,
+          type: "taxonomy_conflict",
+          dimension: conflict.dimension,
+          labels: conflict.labels,
+          message: `Issue #${issue.number}: ${conflict.message}`,
+          blocking: true,
         });
       }
-
-      // Check ready-for-agent label
-      if (!labels.includes("ready-for-agent")) {
+      for (const warning of taxonomy.warnings.filter((warning) => warning.type === "legacy_alias")) {
         warnings.push({
           issueNumber: issue.number,
-          type: "not_ready_for_agent",
-          message: `Issue #${issue.number} is missing the ready-for-agent label`,
-          blocking: preflight.requireReadyForAgent === true,
+          type: "legacy_label_alias",
+          legacy: warning.legacy ?? null,
+          canonical: warning.canonical,
+          message: `Issue #${issue.number}: ${warning.message}`,
+          blocking: false,
         });
       }
 
@@ -136,6 +142,18 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
         title: issue.title,
         body: issue.body,
         labels,
+        taxonomy: {
+          state: taxonomy.state,
+          priority: taxonomy.priority,
+          workType: taxonomy.workType,
+          parentNumber: taxonomy.parentNumber,
+          blockers: taxonomy.blockers,
+          conflicts: taxonomy.conflicts,
+          warnings: taxonomy.warnings,
+          repoLabels: taxonomy.repoLabels,
+          runnable: taxonomy.runnable,
+          eligibleForQueue: taxonomy.runnable,
+        },
         milestone: issue.milestone ? issue.milestone.title : null,
         url: issue.url,
       };

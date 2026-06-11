@@ -89,6 +89,7 @@ setup_repo() {
   cp "$REPO_ROOT/ralph/ralph.sh"        .ralph/ralph.sh
   cp "$REPO_ROOT/ralph/launch.sh"       .ralph/launch.sh
   cp "$REPO_ROOT/ralph/lib/state.sh"    .ralph/lib/state.sh
+  cp "$REPO_ROOT/ralph/lib/labels.sh"   .ralph/lib/labels.sh
   cp "$REPO_ROOT/ralph/lib/status.sh"   .ralph/lib/status.sh
   cp "$REPO_ROOT/ralph/lib/pr-merge.sh" .ralph/lib/pr-merge.sh
   cp "$REPO_ROOT/ralph/lib/resume.sh" .ralph/lib/resume.sh
@@ -101,7 +102,8 @@ EOF
 {
   "issue": {
     "titleRegex": "^Slice [0-9]+:",
-    "titleNumRegex": "^Slice (?<x>[0-9]+):"
+    "titleNumRegex": "^Slice (?<x>[0-9]+):",
+    "issueSearch": "Slice in:title"
   }
 }
 EOF

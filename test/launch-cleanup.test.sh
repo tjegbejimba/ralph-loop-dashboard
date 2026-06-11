@@ -23,6 +23,7 @@ git commit -qm "initial"
 mkdir -p .ralph/lib .ralph/logs .ralph/lock
 cp "$REPO_ROOT/ralph/launch.sh" .ralph/launch.sh
 cp "$REPO_ROOT/ralph/lib/state.sh" .ralph/lib/state.sh
+cp "$REPO_ROOT/ralph/lib/labels.sh" .ralph/lib/labels.sh
 cat > .ralph/ralph.sh <<'EOF'
 #!/usr/bin/env bash
 exit 0

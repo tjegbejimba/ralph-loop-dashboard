@@ -1,61 +1,90 @@
 # Ralph Label Vocabulary
 
-Ralph uses three GitHub labels to control which issues AFK workers may pick up.
+Ralph uses GitHub labels as additive automation metadata. Repo/domain labels stay
+owned by the repo; Ralph only reads and writes labels in the `ralph:`,
+`priority:`, and `work:` dimensions.
 
-## Labels
+## Canonical dimensions
 
-### `needs-triage`
+Every issue that Ralph evaluates should have exactly one state label, one
+priority label, and one work label. Multiple labels in the same dimension are a
+conflict and fail closed until repaired.
 
-**Color**: `#E4E669` (yellow)
+### State labels
 
-Issues that have not yet been reviewed or scoped for an agent. Ralph skips
-these entirely — they are not included in the default `issueSearch` query.
+| Label | Meaning |
+| --- | --- |
+| `ralph:needs-triage` | Not yet scoped for Ralph. |
+| `ralph:evaluated` | Reviewed, but not runnable by workers. Used for PRD parent issues. |
+| `ralph:ready` | Runnable by Ralph when paired with a runnable work type and no blockers. |
+| `ralph:blocked` | Explicitly blocked before worker pickup. |
+| `ralph:hitl` | Human-in-the-loop; not safe for autonomous work. |
+| `ralph:queued` | Enqueued by `launch.sh --enqueue` or `--enqueue-prd`. |
+| `ralph:running` | Claimed by a worker. |
+| `ralph:done` | Completed by Ralph. |
+| `ralph:failed` | Worker failed and left the issue as a blocker for dependents. |
 
-### `ready-for-agent`
+### Priority labels
 
-**Color**: `#0075CA` (blue)
+`priority:P0`, `priority:P1`, `priority:P2`, and `priority:P3` order ready
+work. Missing priority is treated as `priority:P2` with a warning; backfill
+plans should add the explicit label.
 
-Issues that have been reviewed, scoped, and are safe for Ralph to pick up
-autonomously. Ralph's default `issueSearch` filters to `label:ready-for-agent`,
-so only issues carrying this label will be picked up by workers.
+### Work labels
 
-### `hitl`
+| Label | Meaning |
+| --- | --- |
+| `work:prd` | Parent PRD/spec issue. Must use `ralph:evaluated`, not runnable states. |
+| `work:slice` | Child implementation slice. Body must contain an exact `Parent #N` marker. |
+| `work:standalone` | Independent runnable issue without a PRD parent. |
 
-**Color**: `#B60205` (red)
+## Runtime eligibility
 
-**"Human-in-the-loop"** — issues that require human interaction or judgment
-before work can proceed (e.g., ambiguous requirements, security-sensitive
-changes, design decisions). Ralph's default `issueSearch` includes
-`-label:hitl`, so `hitl` issues are **naturally skipped** even if they also
-carry `ready-for-agent`.
+Workers are canonical-only by default. A runnable issue must be:
 
-`ready-for-agent` and `hitl` are **mutually exclusive** in practice:
-- An issue labelled only `ready-for-agent` → picked up by Ralph workers.
-- An issue labelled `hitl` (with or without `ready-for-agent`) → skipped by Ralph workers.
-- An issue labelled neither → skipped because `label:ready-for-agent` is required.
+1. Open.
+2. `ralph:ready`, `work:slice` or `work:standalone`, and exactly one label per dimension.
+3. Unassigned.
+4. Free of unresolved `Blocked by #N` dependencies, including `ralph:failed` dependencies.
 
-## How they interact with Ralph's `issueSearch`
+Compatibility aliases for the old labels (`ready-for-agent`, `needs-triage`,
+`hitl`) are only accepted by explicit compatibility code paths and always emit
+warnings. New automation should use canonical labels only.
 
-The default `issueSearch` in every profile config combines both guards:
+## Default search
 
+Profile defaults search for canonical runnable work:
+
+```text
+label:ralph:ready (label:work:slice OR label:work:standalone) is:open no:assignee
 ```
-label:ready-for-agent -label:hitl
-```
 
-This means **only issues that are explicitly opt-ed in (`ready-for-agent`) AND
-have not been flagged for human review (`-label:hitl`) will be processed by
-Ralph**.
+Preflight and status are read-only. Normal enqueue and worker transitions are
+the only paths that mutate labels.
 
-## Creating labels in your target repo
+## Label management
 
-When you run `install.sh` against a new repo, create matching labels with the
-GitHub CLI:
+Mutating label-management commands must be dry-run by default and require an
+explicit apply flag. Dry-run output should show the exact add/remove operations
+without changing GitHub.
+
+Example setup commands for a repo that has not created Ralph labels yet:
 
 ```bash
-gh label create needs-triage   --color E4E669 --description "Needs human triage before agent work"
-gh label create ready-for-agent --color 0075CA --description "Safe for AFK Ralph workers to pick up"
-gh label create hitl            --color B60205 --description "Requires human interaction; not safe for AFK Ralph workers"
+gh label create ralph:needs-triage --color E4E669 --description "Needs human triage before Ralph work"
+gh label create ralph:evaluated    --color C5DEF5 --description "Reviewed PRD or issue, not worker-runnable"
+gh label create ralph:ready        --color 0E8A16 --description "Ready for Ralph workers"
+gh label create ralph:blocked      --color D93F0B --description "Blocked before Ralph pickup"
+gh label create ralph:hitl         --color B60205 --description "Human-in-the-loop; not autonomous"
+gh label create ralph:queued       --color 1D76DB --description "Queued for Ralph"
+gh label create ralph:running      --color 5319E7 --description "Claimed by Ralph"
+gh label create ralph:done         --color 0E8A16 --description "Completed by Ralph"
+gh label create ralph:failed       --color B60205 --description "Ralph failed; blocks dependents"
+gh label create priority:P0        --color B60205 --description "Highest Ralph priority"
+gh label create priority:P1        --color D93F0B --description "High Ralph priority"
+gh label create priority:P2        --color FBCA04 --description "Default Ralph priority"
+gh label create priority:P3        --color C2E0C6 --description "Low Ralph priority"
+gh label create work:prd           --color 0052CC --description "Ralph PRD parent"
+gh label create work:slice         --color 1D76DB --description "Ralph PRD child slice"
+gh label create work:standalone    --color 5319E7 --description "Standalone Ralph issue"
 ```
-
-The `install.sh` script prints a reminder with these commands after a
-successful install.

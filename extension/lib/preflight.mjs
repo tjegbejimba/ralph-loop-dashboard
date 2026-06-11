@@ -3,6 +3,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
+import { validateRunnableForClaim } from "./label-taxonomy.mjs";
 
 /**
  * Execute a command and return result
@@ -66,7 +67,7 @@ async function defaultGhIssueCheck(repo, number) {
     "--repo",
     repo,
     "--json",
-    "number,state,labels",
+    "number,title,body,state,labels,assignees",
   ]);
 }
 
@@ -75,13 +76,6 @@ async function defaultGhIssueCheck(repo, number) {
  */
 async function defaultGitStatusCheck(repoRoot) {
   return execCommand("git", ["-C", repoRoot, "status", "--porcelain"]);
-}
-
-function labelNames(labels) {
-  if (!Array.isArray(labels)) return [];
-  return labels
-    .map((label) => (typeof label === "string" ? label : label?.name))
-    .filter(Boolean);
 }
 
 /**
@@ -247,9 +241,10 @@ export async function runPreflight({
     });
   }
 
-  // Check 7: Queued issues are AFK-safe for autonomous workers
+  // Check 7: Queued issues are canonical Ralph-runnable work
   if (!queueEmpty && hasRepoIdentity) {
     const unsafeIssues = [];
+    const taxonomyWarnings = [];
     for (const issue of queue) {
       const number = Number(issue?.number);
       if (!Number.isInteger(number) || number <= 0) {
@@ -263,18 +258,19 @@ export async function runPreflight({
           continue;
         }
         const record = JSON.parse(issueResult.stdout || "{}");
-        const labels = labelNames(record.labels);
-        if (record.state !== "OPEN") {
-          unsafeIssues.push(`#${number}: state is ${record.state || "unknown"}`);
+        const validation = validateRunnableForClaim({
+          ...record,
+          number,
+          title: record.title ?? issue.title,
+          body: record.body ?? issue.body,
+        });
+        if (!validation.ok) {
+          unsafeIssues.push(...validation.reasons);
         }
-        if (!labels.includes("ready-for-agent")) {
-          unsafeIssues.push(`#${number}: missing ready-for-agent`);
-        }
-        if (labels.includes("hitl")) {
-          unsafeIssues.push(`#${number}: has hitl`);
-        }
-        if (labels.includes("needs-triage")) {
-          unsafeIssues.push(`#${number}: has needs-triage`);
+        for (const warning of validation.warnings) {
+          if (warning.type === "missing_priority") {
+            taxonomyWarnings.push(`#${number}: ${warning.message}`);
+          }
         }
       } catch (err) {
         unsafeIssues.push(`#${number}: lookup failed (${String(err.message || err)})`);
@@ -282,22 +278,23 @@ export async function runPreflight({
     }
 
     checks.push({
-      id: "queue-afk-safe",
-      label: "Queue issues are AFK-safe",
+      id: "queue-canonical-ready",
+      label: "Queue issues are canonical Ralph-runnable work",
       status: unsafeIssues.length === 0 ? "pass" : "fail",
       message: unsafeIssues.length === 0
-        ? "Queued issues are open, ready-for-agent, and not HITL/needs-triage"
+        ? "Queued issues are open, unassigned, work:slice/work:standalone, and ralph:ready/ralph:queued or satisfied ralph:blocked"
         : `Unsafe queue issues: ${unsafeIssues.join("; ")}`,
       blocking: true,
+      warnings: taxonomyWarnings,
     });
   } else {
     checks.push({
-      id: "queue-afk-safe",
-      label: "Queue issues are AFK-safe",
+      id: "queue-canonical-ready",
+      label: "Queue issues are canonical Ralph-runnable work",
       status: "fail",
       message: queueEmpty
         ? "Queue is empty; cannot verify issue labels"
-        : "Cannot verify issue labels without a valid repo identity",
+        : "Cannot verify canonical issue labels without a valid repo identity",
       blocking: true,
     });
   }

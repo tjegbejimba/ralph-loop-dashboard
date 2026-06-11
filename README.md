@@ -149,7 +149,7 @@ After `to-issues` has filed the slice issues, invoke the `to-ralph` skill:
 
 The skill will:
 1. Identify the PRD issue number from context (or ask if unclear).
-2. Run `.ralph/launch.sh --enqueue-prd <N>` (for AFK-labelled PRDs) or `.ralph/launch.sh --enqueue <N> [<N>...]` (for explicit child issues) to write issue numbers into `.ralph/config.json`.
+2. Run `.ralph/launch.sh --enqueue-prd <N>` (for canonical runnable PRD slices) or `.ralph/launch.sh --enqueue <N> [<N>...]` (for explicit child issues) to write issue numbers into `.ralph/config.json`.
 3. Read the preflight report `launch.sh` prints automatically after the enqueue — it covers repo cleanliness, `RALPH.md` PRD reference, queue mode, per-issue label/state/blocker warnings, and a final `✅ Ready to launch | ⚠️ preflight blockers found` verdict.
 4. Print either a ✅ **Ready to launch** summary or a ⚠️ list of blockers paired with exact `gh issue edit` / `git commit` commands the operator can copy.
 
@@ -201,6 +201,12 @@ per-issue label/state/blocker warnings, and a final `✅ Ready to launch | ⚠�
 preflight blockers found` verdict so you can spot a broken setup before
 launching any worker.
 
+Ralph's canonical runnable labels are `ralph:ready`, one priority
+(`priority:P0` through `priority:P3`, defaulting to `priority:P2` with a
+warning), and either `work:slice` or `work:standalone`. PRD parent issues use
+`work:prd` with `ralph:evaluated`. See [Ralph Label Vocabulary](docs/labels.md)
+for migration, conflict, and dry-run label-management guidance.
+
 ### Tracking a run from the terminal
 
 When the dashboard extension isn't available (e.g., you're using GitHub Copilot
@@ -229,7 +235,7 @@ to override (e.g., when developing the dashboard from a source checkout).
 The worker selects issues from one of three sources, in priority order:
 
 1. **Run-aware** — when `RALPH_RUN_ID` is set, consume `.ralph/runs/<RUN_ID>/queue.json`.
-2. **Direct-numbers** — when `.issue.numbers` in `.ralph/config.json` is non-empty (populated by `--enqueue` or `--enqueue-prd`), iterate that list. AFK guard (must be open, `ready-for-agent`, not `hitl`, blockers satisfied) still applies.
+2. **Direct-numbers** — when `.issue.numbers` in `.ralph/config.json` is non-empty (populated by `--enqueue` or `--enqueue-prd`), iterate that list. The canonical runnable guard (open, `ralph:ready`, runnable work type, unassigned, blockers satisfied, no taxonomy conflicts) still applies.
 3. **Title-search** — fall back to `gh issue list --search "<issue.issueSearch>"` and filter by `issue.titleRegex`.
 
 Direct-numbers mode is what makes `--enqueue 5 6 7` actually drive workers
@@ -321,7 +327,7 @@ Config is intentionally small:
   "issue": {
     "titleRegex": "^Slice [0-9]+:",
     "titleNumRegex": "^Slice (?<x>[0-9]+):",
-    "issueSearch": "Slice in:title"
+    "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"
   },
   "validation": {
     "commands": [

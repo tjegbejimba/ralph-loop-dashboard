@@ -72,6 +72,7 @@ printf '%s\n' ".ralph" >> .git/info/exclude
 mkdir -p .ralph/lib .ralph/runs/empty .ralph/runs/all-terminal .ralph/runs/unsafe
 cp "$REPO_ROOT/ralph/ralph.sh" .ralph/ralph.sh
 cp "$REPO_ROOT/ralph/lib/state.sh" .ralph/lib/state.sh
+cp "$REPO_ROOT/ralph/lib/labels.sh" .ralph/lib/labels.sh
 cp "$REPO_ROOT/ralph/lib/status.sh" .ralph/lib/status.sh
 cp "$REPO_ROOT/ralph/lib/pr-merge.sh" .ralph/lib/pr-merge.sh
 cp "$REPO_ROOT/ralph/lib/resume.sh" .ralph/lib/resume.sh
@@ -141,15 +142,15 @@ echo "PASS: all-terminal run queue exits cleanly"
 echo ""
 echo "Test 3: unsafe run queue item is failed instead of claimed"
 unsafe_output=$(run_worker unsafe) || fail "unsafe queue worker should exit cleanly after failing unsafe item"
-if ! grep -q "missing ready-for-agent; marked as failed" <<<"$unsafe_output"; then
+if ! grep -q "not canonical Ralph-runnable" <<<"$unsafe_output"; then
   echo "$unsafe_output"
-  fail "unsafe queue worker should report missing ready-for-agent"
+  fail "unsafe queue worker should report canonical runnable failure"
 fi
 unsafe_status=$(jq -r '.items["200"].status' "$TEST_ROOT/main/.ralph/runs/unsafe/status.json")
 unsafe_error=$(jq -r '.items["200"].error' "$TEST_ROOT/main/.ralph/runs/unsafe/status.json")
-if [[ "$unsafe_status" != "failed" || "$unsafe_error" != "Issue is missing ready-for-agent" ]]; then
+if [[ "$unsafe_status" != "failed" || "$unsafe_error" != "Issue is not canonical Ralph-runnable: missing_state,missing_work_type" ]]; then
   cat "$TEST_ROOT/main/.ralph/runs/unsafe/status.json"
-  fail "unsafe issue should be terminal failed with AFK guard error"
+  fail "unsafe issue should be terminal failed with canonical guard error"
 fi
 echo "PASS: unsafe run queue item is failed instead of claimed"
 

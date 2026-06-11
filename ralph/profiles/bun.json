@@ -3,7 +3,7 @@
   "issue": {
     "titleRegex": "^Slice [0-9]+:",
     "titleNumRegex": "^Slice (?<x>[0-9]+):",
-    "issueSearch": "Slice in:title label:ready-for-agent -label:hitl"
+    "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"
   },
   "validation": {
     "commands": [
@@ -80,4 +80,3 @@
     }
   ]
 }
-

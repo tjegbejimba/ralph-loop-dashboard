@@ -59,6 +59,7 @@ new_repo() {
   echo ".ralph" >> .git/info/exclude
   cp "$REPO_ROOT/ralph/launch.sh" .ralph/launch.sh
   cp "$REPO_ROOT/ralph/lib/state.sh" .ralph/lib/state.sh
+  cp "$REPO_ROOT/ralph/lib/labels.sh" .ralph/lib/labels.sh
   cp "$REPO_ROOT/ralph/lib/status.sh" .ralph/lib/status.sh
   cp "$REPO_ROOT/ralph/lib/pr-merge.sh" .ralph/lib/pr-merge.sh
   cp "$REPO_ROOT/ralph/lib/preflight.sh" .ralph/lib/preflight.sh
@@ -116,19 +117,19 @@ echo "mock gh: unhandled: $*" >&2
 exit 2
 '
 
-# ─── Tracer bullet: --enqueue surfaces needs-triage on each queued issue ──────
+# ─── Tracer bullet: --enqueue surfaces non-runnable canonical states ──────────
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "label:ready-for-agent -label:hitl"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
 
   bin_dir="$TEST_ROOT/bin-tracer"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
 
   blob=$(printf '%s\n%s\n' \
-    "$(issue_json 5 OPEN needs-triage 'A child slice.')" \
-    "$(issue_json 6 OPEN needs-triage 'Another slice.')"
+    "$(issue_json 5 OPEN 'ralph:needs-triage,priority:P2,work:standalone' 'A child slice.')" \
+    "$(issue_json 6 OPEN 'ralph:needs-triage,priority:P2,work:standalone' 'Another slice.')"
   )
 
   rc=0
@@ -142,20 +143,18 @@ EOF
   assert_contains "$out" "Preflight" "--enqueue prints a Preflight section"
   assert_contains "$out" "#5"        "--enqueue preflight lists issue #5"
   assert_contains "$out" "#6"        "--enqueue preflight lists issue #6"
-  assert_contains "$out" "needs_triage" \
-    "--enqueue preflight surfaces needs_triage warning"
-  assert_contains "$out" "not_ready_for_agent" \
-    "--enqueue preflight surfaces not_ready_for_agent warning"
+  assert_contains "$out" "not_runnable_state(ralph:needs-triage)" \
+    "--enqueue preflight surfaces non-runnable state"
   # Final verdict line for blocker case.
   assert_contains "$out" "blockers" \
     "--enqueue preflight prints a blockers verdict"
 }
 
-# ─── Ready path: queued issue is ready-for-agent, no warnings ─────────────────
+# ─── Ready path: queued issue is canonical runnable work, no blockers ─────────
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "label:ready-for-agent -label:hitl"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
   # RALPH.md with a concrete PRD reference (no placeholder).
   cat > "$repo/.ralph/RALPH.md" <<'EOF'
@@ -167,7 +166,7 @@ EOF
   bin_dir="$TEST_ROOT/bin-ready"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
 
-  blob=$(issue_json 7 OPEN ready-for-agent 'A ready slice with no blockers.')
+  blob=$(issue_json 7 OPEN 'ralph:ready,priority:P2,work:standalone' 'A ready standalone issue with no blockers.')
 
   rc=0
   out=$(ISSUE_BLOB="$blob" \
@@ -179,12 +178,37 @@ EOF
   assert_contains     "$out" "Ready to launch"      "ready: verdict is ✅ Ready to launch"
   assert_contains     "$out" "ref #4"                "ready: surfaces concrete PRD ref"
   assert_contains     "$out" "Repo: clean"           "ready: surfaces clean repo state"
-  assert_not_contains "$out" "needs_triage"          "ready: no needs_triage warning"
-  assert_not_contains "$out" "not_ready_for_agent"   "ready: no not_ready_for_agent warning"
+  assert_not_contains "$out" "not_runnable_state"    "ready: no non-runnable state warning"
+  assert_not_contains "$out" "missing_work_type"     "ready: work type present"
   assert_not_contains "$out" "preflight blockers"    "ready: no blocker verdict"
 }
 
-# ─── hitl label is surfaced ───────────────────────────────────────────────────
+# ─── Queued path: already-enqueued issues remain claimable ────────────────────
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [17], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+
+  bin_dir="$TEST_ROOT/bin-queued"
+  write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
+  blob=$(issue_json 17 OPEN 'ralph:queued,priority:P2,work:standalone' 'Queued by --enqueue.')
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  [[ "$rc" -eq 0 ]] && pass "queued: --status exits 0" \
+    || fail "queued: --status exits 0 (got $rc)"
+  assert_contains     "$out" "Ready to launch"           "queued: verdict is ✅ Ready to launch"
+  assert_not_contains "$out" "not_runnable_state(ralph:queued)" "queued: not rejected as non-runnable"
+}
+
+# ─── ralph:hitl state is surfaced ─────────────────────────────────────────────
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
@@ -196,7 +220,7 @@ EOF
 
   bin_dir="$TEST_ROOT/bin-hitl"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
-  blob=$(issue_json 8 OPEN "ready-for-agent,hitl" 'A human-required slice.')
+  blob=$(issue_json 8 OPEN "ralph:hitl,priority:P2,work:standalone" 'A human-required issue.')
 
   rc=0
   out=$(ISSUE_BLOB="$blob" \
@@ -205,7 +229,7 @@ EOF
 
   [[ "$rc" -eq 0 ]] && pass "hitl: --enqueue exits 0" \
     || fail "hitl: --enqueue exits 0 (got $rc)"
-  assert_contains "$out" "hitl"             "hitl: warning surfaced"
+  assert_contains "$out" "not_runnable_state(ralph:hitl)" "hitl: warning surfaced"
   assert_contains "$out" "preflight blockers" "hitl: verdict is blockers"
 }
 
@@ -221,7 +245,7 @@ EOF
 
   bin_dir="$TEST_ROOT/bin-closed"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
-  blob=$(issue_json 9 CLOSED ready-for-agent 'Already merged slice.')
+  blob=$(issue_json 9 CLOSED 'ralph:done,priority:P2,work:standalone' 'Already merged slice.')
 
   rc=0
   out=$(ISSUE_BLOB="$blob" \
@@ -254,8 +278,8 @@ EOF
   bin_dir="$TEST_ROOT/bin-mixed"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
   blob=$(printf '%s\n%s\n' \
-    "$(issue_json 30 CLOSED ready-for-agent 'Done.')" \
-    "$(issue_json 31 OPEN  ready-for-agent 'Pending.')"
+    "$(issue_json 30 CLOSED 'ralph:done,priority:P2,work:standalone' 'Done.')" \
+    "$(issue_json 31 OPEN  'ralph:ready,priority:P2,work:standalone' 'Pending.')"
   )
 
   rc=0
@@ -284,7 +308,7 @@ EOF
 
   bin_dir="$TEST_ROOT/bin-placeholder"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
-  blob=$(issue_json 10 OPEN ready-for-agent 'A slice.')
+  blob=$(issue_json 10 OPEN 'ralph:ready,priority:P2,work:standalone' 'A slice.')
 
   rc=0
   out=$(ISSUE_BLOB="$blob" \
@@ -309,7 +333,7 @@ EOF
 
   bin_dir="$TEST_ROOT/bin-dirty"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
-  blob=$(issue_json 11 OPEN ready-for-agent 'A slice.')
+  blob=$(issue_json 11 OPEN 'ralph:ready,priority:P2,work:standalone' 'A slice.')
 
   rc=0
   out=$(ISSUE_BLOB="$blob" \
@@ -351,7 +375,7 @@ echo "mock gh: unhandled: $*" >&2
 exit 2
 '
   body=$'Description.\n\n## Blocked by\n- #99\n- #100\n\n## Acceptance Criteria\n- thing'
-  blob=$(issue_json 12 OPEN ready-for-agent "$body")
+  blob=$(issue_json 12 OPEN 'ralph:ready,priority:P2,work:standalone' "$body")
 
   rc=0
   out=$(ISSUE_BLOB="$blob" \
@@ -374,23 +398,23 @@ EOF
 EOF
 
   bin_dir="$TEST_ROOT/bin-enqueue-prd"
-  # Two layers: --enqueue-prd uses `gh issue list ... --json number,labels`
-  # to find AFK slices, then preflight uses `gh issue view ... --json state,labels,body`.
+  # Two layers: --enqueue-prd uses `gh issue list ...` to find canonical
+  # runnable slices, then preflight uses per-issue canonical metadata.
   write_mock_gh "$bin_dir" '
 case "$1 $2" in
   "issue view")
     num="$3"
     if [[ "$num" == "20" ]]; then
-      echo "{\"number\":20}"
+      echo "{\"number\":20,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"
       exit 0
     fi
     # Preflight per-issue lookup.
-    echo "{\"number\":$num,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ready-for-agent\"}],\"body\":\"slice\"}"
+    echo "{\"number\":$num,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"body\":\"Parent #20\"}"
     exit 0
     ;;
   "issue list")
-    if echo "$@" | grep -qF "label:ready-for-agent"; then
-      echo "[{\"number\":21,\"labels\":[{\"name\":\"ready-for-agent\"}]},{\"number\":22,\"labels\":[{\"name\":\"ready-for-agent\"}]}]"
+    if echo "$@" | grep -qF "label:work:slice"; then
+      echo "[{\"number\":21,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #20\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":22,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #20\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
     else
       echo "[]"
     fi
@@ -425,8 +449,8 @@ EOF
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
 
   blob=$(printf '%s\n%s\n' \
-    "$(issue_json 5 OPEN needs-triage 'Triage me.')" \
-    "$(issue_json 6 OPEN ready-for-agent 'OK.')"
+    "$(issue_json 5 OPEN 'ralph:needs-triage,priority:P2,work:standalone' 'Triage me.')" \
+    "$(issue_json 6 OPEN 'ralph:ready,priority:P2,work:standalone' 'OK.')"
   )
 
   rc=0
@@ -443,7 +467,7 @@ EOF
     "status: surfaces queue mode"
   assert_contains "$out" "#5"                  "status: lists queued #5"
   assert_contains "$out" "#6"                  "status: lists queued #6"
-  assert_contains "$out" "needs_triage"        "status: surfaces needs_triage for #5"
+  assert_contains "$out" "not_runnable_state(ralph:needs-triage)" "status: surfaces non-runnable state for #5"
   assert_contains "$out" "{{PRD_REFERENCE}}"   "status: surfaces placeholder RALPH.md ref"
   # Existing --status fields still present.
   assert_contains "$out" "Parallelism"         "status: still prints Parallelism"
@@ -454,7 +478,7 @@ EOF
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "label:ready-for-agent -label:hitl"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
   cat > "$repo/.ralph/RALPH.md" <<'EOF'
 <!-- RALPH_PRD_REF: #4 -->
@@ -466,7 +490,7 @@ EOF
 
   assert_contains "$out" "Queue mode: issueSearch" \
     "status (search): surfaces issueSearch queue mode"
-  assert_contains "$out" "label:ready-for-agent -label:hitl" \
+  assert_contains "$out" "label:ralph:ready" \
     "status (search): echoes the configured search query"
 }
 
@@ -510,8 +534,8 @@ exit 2
 '
 
   blob=$(printf '%s\n%s\n' \
-    "$(issue_json 11 OPEN ready-for-agent 'CRLF-config slice.')" \
-    "$(issue_json 12 OPEN ready-for-agent 'Another CRLF-config slice.')"
+    "$(issue_json 11 OPEN 'ralph:ready,priority:P2,work:standalone' 'CRLF-config slice.')" \
+    "$(issue_json 12 OPEN 'ralph:ready,priority:P2,work:standalone' 'Another CRLF-config slice.')"
   )
 
   rc=0
@@ -530,7 +554,7 @@ exit 2
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "label:ready-for-agent -label:hitl"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
   cat > "$repo/.ralph/RALPH.md" <<'EOF'
 <!-- RALPH_PRD_REF: #4 -->
@@ -621,7 +645,7 @@ EOF
 
   bin_dir="$TEST_ROOT/bin-loop-active"
   write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
-  blob=$(issue_json 50 OPEN ready-for-agent 'Slice in flight.')
+  blob=$(issue_json 50 OPEN 'ralph:running,priority:P2,work:standalone' 'Slice in flight.')
 
   rc=0
   out=$(ISSUE_BLOB="$blob" \

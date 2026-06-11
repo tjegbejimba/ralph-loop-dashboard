@@ -1,5 +1,4 @@
-// Tests for the hitl label convention — verifies profile configs exclude hitl issues
-// and that label documentation exists.
+// Tests for Ralph's canonical label taxonomy documentation and profile defaults.
 // Run via `node --test test/labels.test.mjs`.
 
 import { test } from "node:test";
@@ -14,9 +13,9 @@ function readJson(rel) {
   return JSON.parse(readFileSync(join(ROOT, rel), "utf8"));
 }
 
-// RED: All profile configs must exclude hitl-labelled issues
+// RED: All profile configs must use canonical queue eligibility labels.
 for (const profile of ["generic", "bun", "python"]) {
-  test(`profile ${profile} issueSearch excludes hitl label`, () => {
+  test(`profile ${profile} issueSearch uses canonical ready work labels`, () => {
     const cfg = readJson(`ralph/profiles/${profile}.json`);
     const search = cfg.issue.issueSearch;
     assert.ok(
@@ -24,45 +23,44 @@ for (const profile of ["generic", "bun", "python"]) {
       `${profile} issueSearch should be a string`
     );
     assert.ok(
-      search.includes("-label:hitl"),
-      `${profile} issueSearch ("${search}") must include -label:hitl`
+      search.includes("label:ralph:ready"),
+      `${profile} issueSearch ("${search}") must include label:ralph:ready`
     );
     assert.ok(
-      search.includes("label:ready-for-agent"),
-      `${profile} issueSearch ("${search}") must include label:ready-for-agent`
+      search.includes("label:work:slice") && search.includes("label:work:standalone"),
+      `${profile} issueSearch ("${search}") must include canonical work labels`
     );
   });
 }
 
-// RED: docs/labels.md must exist and document the three Ralph-relevant labels
-test("docs/labels.md documents needs-triage, ready-for-agent, and hitl labels", () => {
+// RED: docs/labels.md must exist and document the canonical dimensions.
+test("docs/labels.md documents canonical state, priority, and work labels", () => {
   let content;
   try {
     content = readFileSync(join(ROOT, "docs/labels.md"), "utf8");
   } catch {
     assert.fail("docs/labels.md does not exist");
   }
-  assert.ok(content.includes("needs-triage"), "docs/labels.md must mention needs-triage");
-  assert.ok(content.includes("ready-for-agent"), "docs/labels.md must mention ready-for-agent");
-  assert.ok(content.includes("hitl"), "docs/labels.md must mention hitl");
+  assert.ok(content.includes("ralph:ready"), "docs/labels.md must mention ralph:ready");
+  assert.ok(content.includes("priority:P2"), "docs/labels.md must mention priority:P2");
+  assert.ok(content.includes("work:slice"), "docs/labels.md must mention work:slice");
 });
 
-// RED: docs/labels.md explains mutual exclusivity of ready-for-agent and hitl
-test("docs/labels.md explains ready-for-agent and hitl are mutually exclusive", () => {
+// RED: docs/labels.md explains one-label-per-dimension conflict rules.
+test("docs/labels.md explains dimension conflicts are invalid", () => {
   const content = readFileSync(join(ROOT, "docs/labels.md"), "utf8");
-  // Check that it mentions Ralph's issueSearch exclusion
   assert.ok(
-    content.includes("issueSearch") || content.includes("mutually exclusive") || content.includes("naturally skipped"),
-    "docs/labels.md should explain how hitl interacts with Ralph's issueSearch"
+    content.includes("Exactly one") || content.includes("one label per dimension") || content.includes("conflict"),
+    "docs/labels.md should explain conflicts within taxonomy dimensions"
   );
 });
 
-// RED: install.sh must include a hint about creating the hitl label
-test("install.sh contains a hint to create the hitl label in target repos", () => {
+// RED: install.sh must include a hint about creating canonical Ralph-owned labels.
+test("install.sh contains a hint to create canonical Ralph labels in target repos", () => {
   const content = readFileSync(join(ROOT, "install.sh"), "utf8");
   assert.ok(
-    content.includes("hitl"),
-    "install.sh should mention the hitl label to guide maintainers"
+    content.includes("ralph:ready") && content.includes("work:slice") && content.includes("priority:P2"),
+    "install.sh should mention canonical labels to guide maintainers"
   );
 });
 

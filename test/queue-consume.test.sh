@@ -23,6 +23,7 @@ mkdir -p .ralph/logs
 mkdir -p .ralph/lock
 mkdir -p .ralph/lib
 cp "$SCRIPT_DIR/../ralph/lib/state.sh" .ralph/lib/state.sh
+cp "$SCRIPT_DIR/../ralph/lib/labels.sh" .ralph/lib/labels.sh
 cp "$SCRIPT_DIR/../ralph/lib/status.sh" .ralph/lib/status.sh
 
 # Create test queue
