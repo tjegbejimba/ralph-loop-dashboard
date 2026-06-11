@@ -445,8 +445,8 @@ while true; do
       fi
 
       cand_blockers=""
-      if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
-        cand_blockers=$(ralph_runnable_blocker_tags "$cand_record")
+      if declare -F ralph_claimable_blocker_tags >/dev/null 2>&1; then
+        cand_blockers=$(ralph_claimable_blocker_tags "$cand_record")
       fi
       if [[ -n "$cand_blockers" ]]; then
         state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
@@ -551,8 +551,8 @@ while true; do
         continue
       fi
       cand_blockers=""
-      if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
-        cand_blockers=$(ralph_runnable_blocker_tags "$record")
+      if declare -F ralph_claimable_blocker_tags >/dev/null 2>&1; then
+        cand_blockers=$(ralph_claimable_blocker_tags "$record")
       fi
       if [[ -n "$cand_blockers" ]]; then
         skip_reasons+=("#${cand_num}: not canonical Ralph-runnable (${cand_blockers})")
@@ -597,14 +597,19 @@ while true; do
       continue
     fi
   else
-    # Legacy mode: search GitHub for issues matching TITLE_REGEX
-    # Fetch open issues matching the title regex along with their bodies so we
-    # can evaluate "Blocked by" sections without an extra round-trip per issue.
+    # Search GitHub for candidate issues. Canonical searches are label-driven
+    # (`ralph:ready` + work type) and may include work:standalone titles that do
+    # not match the legacy Slice regex. Non-canonical custom searches preserve
+    # the legacy titleRegex filter.
     _gh_search_args=()
     [[ -n "$ISSUE_SEARCH" ]] && _gh_search_args=(--search "$ISSUE_SEARCH")
+    _canonical_issue_search=0
+    if [[ "$ISSUE_SEARCH" == *"label:ralph:ready"* && "$ISSUE_SEARCH" == *"label:work:"* ]]; then
+      _canonical_issue_search=1
+    fi
     open_json=$(gh issue list --repo "$REPO" --state open --limit 100 \
       "${_gh_search_args[@]}" \
-      --json number,title,body)
+      --json number,title,body,state,labels,assignees)
 
     # Sort eligible issues by slice number ascending; pick the first one whose
     # blockers are all closed AND that no other worker has already claimed.
@@ -621,9 +626,9 @@ while true; do
     # match TITLE_NUM_RE silently empties the entire candidate list and
     # the worker prints "no eligible issue (remaining=N)" forever.
     candidates=$(echo "$open_json" \
-      | TITLE_REGEX="$TITLE_REGEX" TITLE_NUM_RE="$TITLE_NUM_RE" jq -r '
+      | TITLE_REGEX="$TITLE_REGEX" TITLE_NUM_RE="$TITLE_NUM_RE" RALPH_CANONICAL_SEARCH="$_canonical_issue_search" jq -r '
           [ .[]
-            | select(.title | test(env.TITLE_REGEX))
+            | select((env.RALPH_CANONICAL_SEARCH == "1") or (.title | test(env.TITLE_REGEX)))
             | . + {n: ((.title | capture(env.TITLE_NUM_RE)? | .x? | tonumber?) // .number)} ]
           | sort_by(.n)
           | .[]
@@ -670,6 +675,17 @@ while true; do
         continue
       fi
 
+      cand_blockers=""
+      if [[ "$_canonical_issue_search" -eq 1 ]] && declare -F ralph_claimable_blocker_tags >/dev/null 2>&1; then
+        cand_blockers=$(ralph_claimable_blocker_tags "$decoded")
+      elif declare -F ralph_legacy_safety_blocker_tags >/dev/null 2>&1; then
+        cand_blockers=$(ralph_legacy_safety_blocker_tags "$decoded")
+      fi
+      if [[ -n "$cand_blockers" ]]; then
+        [[ -n "${RALPH_VERBOSE:-}" ]] && echo "  ↳ skipping #$cand_num: not canonical Ralph-runnable ($cand_blockers)"
+        continue
+      fi
+
       # Evaluate blockers — every #N referenced in the "## Blocked by" section
       # must be closed by a merged PR (same predicate the iteration uses for
       # itself, so manually-closed wontfix/duplicate blockers don't unblock
@@ -705,10 +721,14 @@ while true; do
       # claimed, we're waiting on dependencies; sleep and retry. If everything
       # is claimed by other workers, also sleep.
       remaining=$(echo "$open_json" \
-        | TITLE_REGEX="$TITLE_REGEX" jq -r '
-            [.[] | select(.title | test(env.TITLE_REGEX))] | length')
+        | TITLE_REGEX="$TITLE_REGEX" RALPH_CANONICAL_SEARCH="$_canonical_issue_search" jq -r '
+            [.[] | select((env.RALPH_CANONICAL_SEARCH == "1") or (.title | test(env.TITLE_REGEX)))] | length')
       if [[ "$remaining" -eq 0 ]]; then
-        echo "✅ Worker $WORKER_ID: no open issues match \"$TITLE_REGEX\". Done."
+        if [[ "$_canonical_issue_search" -eq 1 ]]; then
+          echo "✅ Worker $WORKER_ID: no open issues match canonical Ralph labels. Done."
+        else
+          echo "✅ Worker $WORKER_ID: no open issues match \"$TITLE_REGEX\". Done."
+        fi
         exit 0
       fi
       claimed_n=$(count_claimed_issues <<<"$claimed_set")
@@ -765,8 +785,8 @@ while true; do
   fi
   fresh_body=$(echo "$fresh_record" | jq -r '.body // ""')
   fresh_blocker_tags=""
-  if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
-    fresh_blocker_tags=$(ralph_runnable_blocker_tags "$fresh_record")
+  if declare -F ralph_claimable_blocker_tags >/dev/null 2>&1; then
+    fresh_blocker_tags=$(ralph_claimable_blocker_tags "$fresh_record")
   fi
   if [[ -n "$fresh_blocker_tags" ]]; then
     [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue became non-runnable before claim: $fresh_blocker_tags"

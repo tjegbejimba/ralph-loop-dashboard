@@ -239,6 +239,34 @@ exit 1
   assert_contains "$out" "No canonical runnable" "--enqueue-prd no children error message"
 }
 
+# Test 8b: --enqueue-prd does not treat already queued slices as pre-enqueue runnable
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": []}}
+EOF
+  bin_dir="$TEST_ROOT/bin-t8b"
+  write_mock_gh "$bin_dir" '
+case "$1 $2" in
+  "issue view") echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"; exit 0 ;;
+  "issue list")
+    if echo "$@" | grep -qF "label:work:slice"; then
+      echo "[{\"number\":18,\"state\":\"OPEN\",\"title\":\"Slice 18: queued\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:queued\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
+    else
+      echo "[]"
+    fi
+    exit 0
+    ;;
+esac
+exit 1
+'
+  rc=0
+  out=$(RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --enqueue-prd 7 2>&1) || rc=$?
+  assert_exit_nonzero "$rc" "--enqueue-prd queued-only children exits non-zero"
+  assert_contains "$out" "No canonical runnable" "--enqueue-prd queued children are not pre-enqueue runnable"
+}
+
 # Test 9: --enqueue-prd HITL-only PRD
 {
   repo=$(new_repo)

@@ -4,7 +4,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveActiveRun, createStatusReader } from "../extension/lib/status-data.mjs";
@@ -157,6 +157,50 @@ test("createStatusReader.buildLocalPayload — assembles workers + activeRun + t
     assert.equal(payload.activeRun.runId, "run-1");
     assert.equal(payload.activeRun.isActive, true);
     assert.match(payload.loopOutTail, /line c/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createStatusReader.getOpenSlices — canonical standalone issues do not require Slice titles", async () => {
+  const root = makeFixture();
+  try {
+    const ghBin = join(root, "gh-mock.sh");
+    writeFileSync(ghBin, `#!/usr/bin/env bash
+if [[ "$1 $2" == "issue list" ]]; then
+  cat <<'JSON'
+[
+  {
+    "number": 12,
+    "title": "Fix standalone bug",
+    "body": "No PRD parent needed",
+    "state": "OPEN",
+    "url": "https://github.com/owner/repo/issues/12",
+    "labels": [{"name":"ralph:ready"},{"name":"priority:P2"},{"name":"work:standalone"}],
+    "assignees": []
+  },
+  {
+    "number": 13,
+    "title": "Slice 13: PRD child",
+    "body": "Parent #1",
+    "state": "OPEN",
+    "url": "https://github.com/owner/repo/issues/13",
+    "labels": [{"name":"ralph:ready"},{"name":"priority:P2"},{"name":"work:slice"}],
+    "assignees": []
+  }
+]
+JSON
+  exit 0
+fi
+echo "[]"
+`);
+    chmodSync(ghBin, 0o755);
+
+    const reader = createStatusReader({ repoRoot: root, ghBin });
+    const issues = await reader.getOpenSlices();
+
+    assert.deepEqual(new Set(issues.map((issue) => issue.number)), new Set([12, 13]));
+    assert.equal(issues.find((issue) => issue.number === 12).taxonomy.workType, "work:standalone");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

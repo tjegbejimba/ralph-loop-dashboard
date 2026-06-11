@@ -475,6 +475,8 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
   }
 
   async function getOpenSlices() {
+    const usesCanonicalIssueSearch = /\blabel:ralph:ready\b/.test(ISSUE_SEARCH) &&
+      /\blabel:work:(slice|standalone)\b/.test(ISSUE_SEARCH);
     const data = await ghJson([
       "issue", "list", "--state", "open", "--limit", "30",
       "--search", ISSUE_SEARCH,
@@ -503,7 +505,7 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
           slice: m ? Number(m.groups?.x ?? m[1]) : 999,
         };
       })
-      .filter((i) => titleRegex.regex.test(i.title));
+      .filter((i) => usesCanonicalIssueSearch ? i.taxonomy.runnable : titleRegex.regex.test(i.title));
     return orderIssuesForQueue(issues);
   }
 

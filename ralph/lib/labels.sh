@@ -14,6 +14,7 @@ RALPH_STATE_LABELS=(
 )
 RALPH_PRIORITY_LABELS=("priority:P0" "priority:P1" "priority:P2" "priority:P3")
 RALPH_WORK_LABELS=("work:prd" "work:slice" "work:standalone")
+RALPH_LEGACY_SAFETY_LABELS=("hitl" "needs-triage")
 
 ralph_default_issue_search() {
   printf '%s\n' 'is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)'
@@ -88,8 +89,22 @@ _ralph_append_tag() {
   fi
 }
 
-ralph_runnable_blocker_tags() {
+ralph_legacy_safety_blocker_tags() {
   local record="$1"
+  local tags="" labels legacy_label
+  labels=$(ralph_labels_csv "$record")
+  for legacy_label in "${RALPH_LEGACY_SAFETY_LABELS[@]}"; do
+    if ralph_has_label "$labels" "$legacy_label"; then
+      tags=$(_ralph_append_tag "$tags" "legacy_safety_label(${legacy_label})")
+    fi
+  done
+  printf '%s' "$tags"
+}
+
+_ralph_runnable_blocker_tags_for_states() {
+  local record="$1"
+  shift
+  local allowed_states=("$@")
   local tags="" labels state_count state_label states priority_count priority_label priorities work_count work_label works state body
   labels=$(ralph_labels_csv "$record")
   IFS='|' read -r state_count state_label states <<<"$(ralph_state_result "$labels")"
@@ -103,11 +118,23 @@ ralph_runnable_blocker_tags() {
   [[ "$state_count" -gt 1 ]] && tags=$(_ralph_append_tag "$tags" "state_conflict(${states})")
   [[ "$priority_count" -gt 1 ]] && tags=$(_ralph_append_tag "$tags" "priority_conflict(${priorities})")
   [[ "$work_count" -gt 1 ]] && tags=$(_ralph_append_tag "$tags" "work_conflict(${works})")
+  local legacy_tags
+  legacy_tags=$(ralph_legacy_safety_blocker_tags "$record")
+  [[ -n "$legacy_tags" ]] && tags=$(_ralph_append_tag "$tags" "$legacy_tags")
   [[ "$state_count" -eq 0 ]] && tags=$(_ralph_append_tag "$tags" "missing_state")
   [[ "$work_count" -eq 0 ]] && tags=$(_ralph_append_tag "$tags" "missing_work_type")
 
-  if [[ "$state_count" -eq 1 && "$state_label" != "ralph:ready" && "$state_label" != "ralph:blocked" ]]; then
+  if [[ "$state_count" -eq 1 ]]; then
+    local state_allowed=0 allowed_state
+    for allowed_state in "${allowed_states[@]}"; do
+      if [[ "$state_label" == "$allowed_state" ]]; then
+        state_allowed=1
+        break
+      fi
+    done
+    if [[ "$state_allowed" -ne 1 ]]; then
     tags=$(_ralph_append_tag "$tags" "not_runnable_state(${state_label})")
+    fi
   fi
   if [[ "$work_count" -eq 1 && "$work_label" != "work:slice" && "$work_label" != "work:standalone" ]]; then
     tags=$(_ralph_append_tag "$tags" "not_runnable_work(${work_label})")
@@ -134,6 +161,18 @@ ralph_runnable_blocker_tags() {
   fi
 
   printf '%s' "$tags"
+}
+
+ralph_enqueueable_blocker_tags() {
+  _ralph_runnable_blocker_tags_for_states "$1" "ralph:ready" "ralph:blocked"
+}
+
+ralph_claimable_blocker_tags() {
+  _ralph_runnable_blocker_tags_for_states "$1" "ralph:ready" "ralph:blocked" "ralph:queued"
+}
+
+ralph_runnable_blocker_tags() {
+  ralph_claimable_blocker_tags "$1"
 }
 
 ralph_runnable_warning_tags() {
@@ -199,6 +238,6 @@ ralph_apply_label_transition() {
 
   if ! "$GH" "${args[@]}" >/dev/null 2>&1; then
     echo "⚠️  Could not apply Ralph label transition '$transition' to #$issue" >&2
-    return 0
+    return 1
   fi
 }

@@ -61,6 +61,40 @@ test("runPreflight passes when all conditions met", async () => {
   }
 });
 
+test("runPreflight passes for already queued canonical issues", async () => {
+  const tmpDir = join(import.meta.dirname, "tmp-preflight-queued");
+  createTestRepo(tmpDir);
+
+  try {
+    const result = await runPreflight({
+      repoRoot: tmpDir,
+      queue: [{ number: 2, title: "Queued standalone" }],
+      runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      execGitStatus: execGitStatusClean,
+      execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({
+          number: 2,
+          title: "Queued standalone",
+          body: "Ready to run from direct queue",
+          state: "OPEN",
+          labels: [{ name: "ralph:queued" }, { name: "priority:P2" }, { name: "work:standalone" }],
+          assignees: [],
+        }),
+        stderr: "",
+      }),
+    });
+
+    assert.equal(result.passed, true);
+    const queueCheck = result.checks.find(c => c.id === "queue-canonical-ready");
+    assert.equal(queueCheck.status, "pass");
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("runPreflight blocks when queue is empty", async () => {
   const tmpDir = join(import.meta.dirname, "tmp-preflight-2");
   createTestRepo(tmpDir);
@@ -304,8 +338,8 @@ test("runPreflight blocks queued issues that are not canonical Ralph-runnable wo
     const canonicalCheck = result.checks.find(c => c.id === "queue-canonical-ready");
     assert.equal(canonicalCheck.status, "fail");
     assert.equal(canonicalCheck.blocking, true);
-    assert.match(canonicalCheck.message, /#2 must be ralph:ready, or ralph:blocked with satisfied blockers/);
-    assert.match(canonicalCheck.message, /#3 must be ralph:ready, or ralph:blocked with satisfied blockers/);
+    assert.match(canonicalCheck.message, /#2 must be ralph:ready, ralph:blocked, ralph:queued/);
+    assert.match(canonicalCheck.message, /#3 must be ralph:ready, ralph:blocked, ralph:queued/);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

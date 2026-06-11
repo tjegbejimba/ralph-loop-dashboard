@@ -670,12 +670,12 @@ if [[ "${1:-}" == "--enqueue-prd" ]]; then
 
   # Collect enqueueable issue numbers.
   _runnable_numbers=()
-  if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
+  if declare -F ralph_enqueueable_blocker_tags >/dev/null 2>&1; then
     while IFS= read -r _row; do
       [[ -z "$_row" ]] && continue
       _record=$(echo "$_row" | base64 --decode | tr -d '\r')
       _num=$(echo "$_record" | jq -r '.number')
-      _blockers=$(ralph_runnable_blocker_tags "$_record")
+      _blockers=$(ralph_enqueueable_blocker_tags "$_record")
       [[ -z "$_blockers" && -n "$_num" ]] && _runnable_numbers+=("$_num")
     done < <(echo "$_runnable_json" | jq -r '.[] | @base64' 2>/dev/null || true)
     unset _row _record _num _blockers
@@ -695,9 +695,11 @@ if [[ "${1:-}" == "--enqueue-prd" ]]; then
   _blocker_count=0
   if [[ -f "$_dep_parser" ]]; then
     _sorted_result=$(
-      node --input-type=module 2>/dev/null <<NODEEOF || echo '{"sorted":[],"blockers":0}'
-import { parseDependencies } from '${_dep_parser}';
-const numbers = ${_runnable_json};
+      RALPH_DEP_PARSER="$_dep_parser" RALPH_RUNNABLE_JSON="$_runnable_json" \
+      node --input-type=module 2>/dev/null <<'NODEEOF' || echo '{"sorted":[],"blockers":0}'
+import { pathToFileURL } from 'node:url';
+const { parseDependencies } = await import(pathToFileURL(process.env.RALPH_DEP_PARSER).href);
+const numbers = JSON.parse(process.env.RALPH_RUNNABLE_JSON || "[]");
 const sorted = parseDependencies(numbers);
 const sortedNums = sorted.map(i => i.number ?? i);
 const blockers = sorted.filter(i => i.blocked === true).length;

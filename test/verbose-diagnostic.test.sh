@@ -102,7 +102,8 @@ EOF
 {
   "issue": {
     "titleRegex": "^Slice [0-9]+:",
-    "titleNumRegex": "^Slice (?<x>[0-9]+):"
+    "titleNumRegex": "^Slice (?<x>[0-9]+):",
+    "issueSearch": "Slice in:title"
   }
 }
 EOF

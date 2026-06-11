@@ -200,6 +200,59 @@ exit 2
   assert_contains "$out" "#8: not open" "closed: reports closed skip reason"
 }
 
+# ─── queued issue is claimable but not pre-enqueueable ────────────────────────
+{
+  # Direct-number and run-aware queues contain issues after --enqueue has moved
+  # them to ralph:queued, so worker/preflight validation must be claimable.
+  # PRD child selection still uses the stricter enqueueable validator.
+  # shellcheck source=/dev/null
+  . "$REPO_ROOT/ralph/lib/labels.sh"
+  queued_record=$(issue_json 10 OPEN 'ralph:queued,priority:P2,work:standalone' '#10' 'queued')
+  claim_blockers=$(ralph_claimable_blocker_tags "$queued_record")
+  enqueue_blockers=$(ralph_enqueueable_blocker_tags "$queued_record")
+
+  [[ -z "$claim_blockers" ]] && pass "queued: claimable validator accepts queued issue" \
+    || fail "queued: claimable validator unexpectedly blocked: $claim_blockers"
+  [[ "$enqueue_blockers" == *"not_runnable_state(ralph:queued)"* ]] \
+    && pass "queued: enqueueable validator rejects queued issue" \
+    || fail "queued: enqueueable validator should reject queued issue (got: $enqueue_blockers)"
+}
+
+# ─── bare legacy hitl still fails closed during migration ─────────────────────
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [11], "issueSearch": "label:ralph:ready label:work:standalone"}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+Test prompt.
+EOF
+
+  bin_dir="$TEST_ROOT/bin-legacy-hitl"
+  write_mock_gh "$bin_dir" '
+case "$1 $2" in
+  "issue view")
+    echo "{\"number\":11,\"state\":\"OPEN\",\"title\":\"#11\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:standalone\"},{\"name\":\"hitl\"}],\"body\":\"\",\"assignees\":[]}"
+    exit 0
+    ;;
+esac
+exit 2
+'
+
+  rc=0
+  out=$(cd "$repo" && \
+        RALPH_REPO="test-owner/test-repo" \
+        RALPH_GH_BIN="$bin_dir/gh" \
+        RALPH_POLL_SEC=0.05 \
+        RALPH_IDLE_EXIT_POLLS=1 \
+        PATH="$bin_dir:$PATH" \
+        "$repo/.ralph/ralph.sh" 2>&1) || rc=$?
+
+  assert_contains "$out" "#11: not canonical Ralph-runnable (legacy_safety_label(hitl))" \
+    "legacy hitl: rejected even with canonical ready"
+  assert_contains "$out" "idle for" "legacy hitl: idle-exit log present"
+}
+
 # ─── conflicting states are rejected ──────────────────────────────────────────
 {
   repo=$(new_repo)

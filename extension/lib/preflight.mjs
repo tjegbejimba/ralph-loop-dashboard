@@ -3,7 +3,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
-import { validateRunnableForEnqueue } from "./label-taxonomy.mjs";
+import { validateRunnableForClaim } from "./label-taxonomy.mjs";
 
 /**
  * Execute a command and return result
@@ -258,7 +258,7 @@ export async function runPreflight({
           continue;
         }
         const record = JSON.parse(issueResult.stdout || "{}");
-        const validation = validateRunnableForEnqueue({
+        const validation = validateRunnableForClaim({
           ...record,
           number,
           title: record.title ?? issue.title,
@@ -282,7 +282,7 @@ export async function runPreflight({
       label: "Queue issues are canonical Ralph-runnable work",
       status: unsafeIssues.length === 0 ? "pass" : "fail",
       message: unsafeIssues.length === 0
-        ? "Queued issues are open, unassigned, work:slice/work:standalone, and ralph:ready or satisfied ralph:blocked"
+        ? "Queued issues are open, unassigned, work:slice/work:standalone, and ralph:ready/ralph:queued or satisfied ralph:blocked"
         : `Unsafe queue issues: ${unsafeIssues.join("; ")}`,
       blocking: true,
       warnings: taxonomyWarnings,

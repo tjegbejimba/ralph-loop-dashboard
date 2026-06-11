@@ -9,6 +9,7 @@ import {
   planBackfill,
   planRepair,
   planRuntimeTransition,
+  validateRunnableForClaim,
   validatePrdForEnqueue,
   validateRunnableForEnqueue,
 } from "../extension/lib/label-taxonomy.mjs";
@@ -104,7 +105,11 @@ describe("Ralph label taxonomy", () => {
   it("emits a dry-run schema plan unless apply is explicit", () => {
     const dryRun = buildLabelSchemaPlan({ repo: "owner/repo" });
     assert.equal(dryRun.dryRun, true);
-    assert.equal(dryRun.commands[0], "gh label create ralph:needs-triage --repo owner/repo --color FBCA04 --description 'Needs human triage before Ralph automation'");
+    assert.equal(dryRun.commands[0], "gh label create ralph:needs-triage --repo 'owner/repo' --color FBCA04 --description 'Needs human triage before Ralph automation'");
+
+    const quotedRepo = buildLabelSchemaPlan({ repo: "owner/repo; touch /tmp/pwned" });
+    assert.match(quotedRepo.commands[0], /--repo 'owner\/repo; touch \/tmp\/pwned'/);
+    assert.doesNotMatch(quotedRepo.commands[0], /--repo owner\/repo; touch/);
 
     const apply = buildLabelSchemaPlan({ repo: "owner/repo", apply: true });
     assert.equal(apply.dryRun, false);
@@ -135,6 +140,20 @@ describe("Ralph label taxonomy", () => {
       assignees: [],
     });
     assert.equal(runnable.ok, true);
+
+    const queued = {
+      number: 24,
+      state: "OPEN",
+      labels: ["ralph:queued", "priority:P2", "work:standalone"],
+      body: "Standalone task",
+      assignees: [],
+    };
+    const queuedForEnqueue = validateRunnableForEnqueue(queued);
+    assert.equal(queuedForEnqueue.ok, false);
+    assert.match(queuedForEnqueue.reasons.join(" "), /ralph:ready/);
+
+    const queuedForClaim = validateRunnableForClaim(queued);
+    assert.equal(queuedForClaim.ok, true);
 
     const assigned = validateRunnableForEnqueue({
       number: 23,

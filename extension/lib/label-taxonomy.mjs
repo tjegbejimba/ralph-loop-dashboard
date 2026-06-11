@@ -39,6 +39,7 @@ export const LEGACY_STATE_ALIASES = new Map([
   ["ready-for-agent", "ralph:ready"],
   ["hitl", "ralph:hitl"],
 ]);
+export const LEGACY_SAFETY_LABELS = ["hitl", "needs-triage"];
 
 const PRIORITY_RANK = new Map([
   ["priority:P0", 0],
@@ -238,7 +239,7 @@ export function buildLabelSchemaPlan({ repo, apply = false } = {}) {
     dryRun: apply !== true,
     labels: CANONICAL_LABELS.map((label) => ({ ...label })),
     commands: CANONICAL_LABELS.map((label) =>
-      `gh label create ${label.name} --repo ${repo} --color ${label.color} --description ${shellQuote(label.description)}`),
+      `gh label create ${label.name} --repo ${shellQuote(repo)} --color ${label.color} --description ${shellQuote(label.description)}`),
   };
 }
 
@@ -264,7 +265,7 @@ export function validatePrdForEnqueue(issue = {}) {
   };
 }
 
-export function validateRunnableForEnqueue(issue = {}, options = {}) {
+function validateRunnableWithAllowedStates(issue = {}, options = {}, allowedStates = []) {
   const blockersSatisfied = options.blockersSatisfied ?? true;
   const classification = classifyIssue(issue, { blockersSatisfied });
   const reasons = [];
@@ -275,13 +276,18 @@ export function validateRunnableForEnqueue(issue = {}, options = {}) {
   if (classification.conflicts.length > 0) {
     reasons.push(...classification.conflicts.map((conflict) => conflict.message));
   }
+  for (const legacyLabel of LEGACY_SAFETY_LABELS) {
+    if (classification.repoLabels.includes(legacyLabel)) {
+      reasons.push(`#${issue.number} has legacy do-not-run label ${legacyLabel}`);
+    }
+  }
   if (classification.workType !== "work:slice" && classification.workType !== "work:standalone") {
     reasons.push(`#${issue.number} must be work:slice or work:standalone`);
   }
   if (classification.state === "ralph:blocked" && blockersSatisfied !== true) {
     reasons.push(`#${issue.number} is ralph:blocked with unsatisfied blockers`);
-  } else if (classification.state !== "ralph:ready" && classification.state !== "ralph:blocked") {
-    reasons.push(`#${issue.number} must be ralph:ready, or ralph:blocked with satisfied blockers`);
+  } else if (!allowedStates.includes(classification.state)) {
+    reasons.push(`#${issue.number} must be ${allowedStates.join(", ")}`);
   }
   if (classification.workType === "work:slice" && !classification.parentNumber) {
     reasons.push(`#${issue.number} work:slice is missing exact Parent #N body marker`);
@@ -292,6 +298,14 @@ export function validateRunnableForEnqueue(issue = {}, options = {}) {
     warnings: classification.warnings,
     classification,
   };
+}
+
+export function validateRunnableForEnqueue(issue = {}, options = {}) {
+  return validateRunnableWithAllowedStates(issue, options, ["ralph:ready", "ralph:blocked"]);
+}
+
+export function validateRunnableForClaim(issue = {}, options = {}) {
+  return validateRunnableWithAllowedStates(issue, options, ["ralph:ready", "ralph:blocked", "ralph:queued"]);
 }
 
 function inferPriority(labels) {

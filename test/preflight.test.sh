@@ -183,6 +183,31 @@ EOF
   assert_not_contains "$out" "preflight blockers"    "ready: no blocker verdict"
 }
 
+# ─── Queued path: already-enqueued issues remain claimable ────────────────────
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [17], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+
+  bin_dir="$TEST_ROOT/bin-queued"
+  write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
+  blob=$(issue_json 17 OPEN 'ralph:queued,priority:P2,work:standalone' 'Queued by --enqueue.')
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  [[ "$rc" -eq 0 ]] && pass "queued: --status exits 0" \
+    || fail "queued: --status exits 0 (got $rc)"
+  assert_contains     "$out" "Ready to launch"           "queued: verdict is ✅ Ready to launch"
+  assert_not_contains "$out" "not_runnable_state(ralph:queued)" "queued: not rejected as non-runnable"
+}
+
 # ─── ralph:hitl state is surfaced ─────────────────────────────────────────────
 {
   repo=$(new_repo)
