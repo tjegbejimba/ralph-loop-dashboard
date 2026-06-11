@@ -117,6 +117,17 @@ function issueHasLabel(issue, labelName) {
   });
 }
 
+function issueIsCanonicalRunnable(issue) {
+  const taxonomy = issue?.taxonomy || {};
+  if (taxonomy.eligibleForQueue === true) return true;
+  if (taxonomy.eligibleForQueue === false) return false;
+  return issueHasLabel(issue, "ralph:ready") &&
+    (issueHasLabel(issue, "work:slice") || issueHasLabel(issue, "work:standalone")) &&
+    !issueHasLabel(issue, "ralph:blocked") &&
+    !issueHasLabel(issue, "ralph:hitl") &&
+    !issueHasLabel(issue, "ralph:failed");
+}
+
 // Import would go here in a module context, but since main.js is loaded as a script tag,
 // we inline a minimal QueueBuilder implementation that matches the tested module
 function getQueueBuilder(repoKey = currentRepoKey) {
@@ -173,7 +184,7 @@ function maybeAutoSeedQueue(status) {
   if (!Array.isArray(status.openSlices)) return;
   qb.needsAutoSeed = false;
   const readyIssues = (status.openSlices || [])
-    .filter((issue) => issueHasLabel(issue, "ready-for-agent"))
+    .filter((issue) => issueIsCanonicalRunnable(issue))
     .map(normalizeIssue);
   for (const issue of readyIssues) {
     if (!qb.queue.some((item) => item.number === issue.number)) {
@@ -898,12 +909,12 @@ function render(s) {
         const slice = sliceNumFromIssue(i);
         const cleanTitle = cleanIssueTitle(i.title);
         const labels = Array.isArray(i.labels) ? i.labels : [];
-        const ready = issueHasLabel(i, "ready-for-agent");
+        const ready = issueIsCanonicalRunnable(i);
         const labelHtml = labels
           .map((label) => `<span class="label">${escapeHtml(label)}</span>`)
           .join(" ");
         return `
-                    <li class="${idx === 0 ? "first-up issue-row" : "issue-row"}${ready ? " ready-for-agent" : ""}" data-issue="${i.number}" data-url="${escapeHtml(i.url)}">
+                    <li class="${idx === 0 ? "first-up issue-row" : "issue-row"}${ready ? " ralph-ready" : ""}" data-issue="${i.number}" data-url="${escapeHtml(i.url)}">
                         <div class="issue-head">
                             <span class="slice-num">${slice ?? "?"}</span>
                             <span class="issue-num">#${i.number}</span>

@@ -1,5 +1,7 @@
 // Queue builder module — manages issue selection, deselection, and ordering for run queue.
 
+import { orderIssuesForQueue } from "./label-taxonomy.mjs";
+
 /**
  * QueueBuilder manages a run queue with selection, deselection, and reordering.
  */
@@ -22,7 +24,7 @@ export class QueueBuilder {
     
     // Deep copy to prevent external mutations affecting internal state
     this.queue.push(structuredClone(issue));
-    this.queue.sort((a, b) => a.number - b.number);
+    this.queue = orderIssuesForQueue(this.queue).map((queuedIssue) => structuredClone(queuedIssue));
   }
 
   /**

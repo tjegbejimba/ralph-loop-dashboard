@@ -26,7 +26,14 @@ function createTestRepo(tmpDir, { hasRalphMd = true, hasConfig = true, validConf
 const execGitStatusClean = async () => ({ exitCode: 0, stdout: "", stderr: "" });
 const execGhIssueReady = async () => ({
   exitCode: 0,
-  stdout: JSON.stringify({ state: "OPEN", labels: [{ name: "ready-for-agent" }] }),
+  stdout: JSON.stringify({
+    number: 1,
+    title: "Standalone task",
+    body: "Ready to run",
+    state: "OPEN",
+    labels: [{ name: "ralph:ready" }, { name: "priority:P2" }, { name: "work:standalone" }],
+    assignees: [],
+  }),
   stderr: "",
 });
 
@@ -47,7 +54,7 @@ test("runPreflight passes when all conditions met", async () => {
     });
     
     assert.equal(result.passed, true);
-    assert.equal(result.checks.length, 7); // queue, ralph.md, config.json, git status, gh auth, gh repo, AFK safety
+    assert.equal(result.checks.length, 7); // queue, ralph.md, config.json, git status, gh auth, gh repo, canonical issue safety
     assert.ok(result.checks.every(c => c.status === "pass"));
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
@@ -246,7 +253,7 @@ test("runPreflight blocks when worktree has uncommitted changes", async () => {
   }
 });
 
-test("runPreflight blocks queued issues that are not AFK-safe", async () => {
+test("runPreflight blocks queued issues that are not canonical Ralph-runnable work", async () => {
   const tmpDir = join(import.meta.dirname, "tmp-preflight-9");
   createTestRepo(tmpDir);
 
@@ -264,21 +271,41 @@ test("runPreflight blocks queued issues that are not AFK-safe", async () => {
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: async (_repo, number) => {
         const fixtures = {
-          1: { state: "OPEN", labels: [{ name: "ready-for-agent" }] },
-          2: { state: "OPEN", labels: [{ name: "ready-for-agent" }, { name: "hitl" }] },
-          3: { state: "OPEN", labels: [{ name: "needs-triage" }] },
+          1: {
+            number: 1,
+            title: "Ready",
+            body: "Ready",
+            state: "OPEN",
+            labels: [{ name: "ralph:ready" }, { name: "priority:P2" }, { name: "work:standalone" }],
+            assignees: [],
+          },
+          2: {
+            number: 2,
+            title: "HITL",
+            body: "Needs a human",
+            state: "OPEN",
+            labels: [{ name: "ralph:hitl" }, { name: "priority:P2" }, { name: "work:standalone" }],
+            assignees: [],
+          },
+          3: {
+            number: 3,
+            title: "Triage",
+            body: "Needs triage",
+            state: "OPEN",
+            labels: [{ name: "ralph:needs-triage" }, { name: "work:standalone" }],
+            assignees: [],
+          },
         };
         return { exitCode: 0, stdout: JSON.stringify(fixtures[number]), stderr: "" };
       },
     });
-
     assert.equal(result.passed, false);
-    const afkCheck = result.checks.find(c => c.id === "queue-afk-safe");
-    assert.equal(afkCheck.status, "fail");
-    assert.equal(afkCheck.blocking, true);
-    assert.match(afkCheck.message, /#2: has hitl/);
-    assert.match(afkCheck.message, /#3: missing ready-for-agent/);
-    assert.match(afkCheck.message, /#3: has needs-triage/);
+    assert.equal(result.passed, false);
+    const canonicalCheck = result.checks.find(c => c.id === "queue-canonical-ready");
+    assert.equal(canonicalCheck.status, "fail");
+    assert.equal(canonicalCheck.blocking, true);
+    assert.match(canonicalCheck.message, /#2 must be ralph:ready, or ralph:blocked with satisfied blockers/);
+    assert.match(canonicalCheck.message, /#3 must be ralph:ready, or ralph:blocked with satisfied blockers/);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

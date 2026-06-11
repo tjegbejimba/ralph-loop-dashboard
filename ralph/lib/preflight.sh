@@ -25,29 +25,6 @@ _preflight_emit_issue() {
   fi
 }
 
-# Echo "needs_triage,not_ready_for_agent,hitl" subset based on the labels
-# JSON array piped in via stdin (output of `gh issue view ... --json labels`
-# `.labels` field).
-_preflight_label_warnings() {
-  local labels_json="$1"
-  local warnings=()
-  local names
-  names=$(echo "$labels_json" | jq -r '.[].name' 2>/dev/null || echo "")
-  local has_ready=0 has_hitl=0 has_triage=0
-  while IFS= read -r name; do
-    [[ -z "$name" ]] && continue
-    case "$name" in
-      needs-triage)    has_triage=1 ;;
-      ready-for-agent) has_ready=1 ;;
-      hitl)            has_hitl=1 ;;
-    esac
-  done <<< "$names"
-  [[ "$has_triage" -eq 1 ]] && warnings+=("needs_triage")
-  [[ "$has_ready"  -eq 0 ]] && warnings+=("not_ready_for_agent")
-  [[ "$has_hitl"   -eq 1 ]] && warnings+=("hitl")
-  printf '%s' "$(IFS=, ; echo "${warnings[*]:-}")"
-}
-
 # Inspect target repo working tree. Echoes "clean" or "dirty (N files)".
 _preflight_repo_state() {
   local porcelain
@@ -90,12 +67,12 @@ _preflight_ralph_md_state() {
 }
 
 # Fetch a single issue's JSON record via gh. Echoes the JSON object on stdout
-# (state, labels, body fields) or the empty string on failure. Strips CR so
+# (state, labels, assignees, body fields) or the empty string on failure. Strips CR so
 # Windows-native jq's CRLF output doesn't poison downstream parsing.
 _preflight_fetch_issue() {
   local n="$1"
   "$GH" issue view "$n" --repo "$REPO" \
-    --json number,state,labels,body 2>/dev/null \
+    --json number,state,title,labels,assignees,body 2>/dev/null \
     | tr -d '\r' \
     || echo ""
 }
@@ -106,7 +83,7 @@ _preflight_fetch_issue() {
 # Echoes the row to stdout. Sets PREFLIGHT_BLOCKERS_FOUND to 1 on warnings.
 _preflight_scan_issue() {
   local n="$1"
-  local record state labels body
+  local record state body
   record=$(_preflight_fetch_issue "$n")
   if [[ -z "$record" ]]; then
     _preflight_emit_issue "$n" "lookup_failed" "?"
@@ -114,11 +91,7 @@ _preflight_scan_issue() {
     return
   fi
   state=$(echo "$record" | jq -r .state)
-  labels=$(echo "$record" | jq -c '.labels // []')
   body=$(echo "$record" | jq -r '.body // ""')
-
-  local warnings_csv
-  warnings_csv=$(_preflight_label_warnings "$labels")
 
   # Closed issues can never be claimed. Track count separately so the verdict
   # can distinguish "all queued issues closed" (queue drained — informational)
@@ -126,35 +99,30 @@ _preflight_scan_issue() {
   # already visible in the row, so we don't add a redundant "closed" tag.
   if [[ "$state" != "OPEN" ]]; then
     PREFLIGHT_CLOSED_COUNT=$((PREFLIGHT_CLOSED_COUNT + 1))
+    _preflight_emit_issue "$n" "" "$state"
+    return
   fi
 
-  # Unresolved blockers: any "#N" in "## Blocked by" that is not satisfied
-  # (closed by a merged PR). Quiet failure if state.sh isn't sourced.
-  if declare -F parse_blockers >/dev/null 2>&1; then
-    local blockers b unresolved=()
-    blockers=$(parse_blockers "$body" || true)
-    for b in $blockers; do
-      local sat=0
-      if declare -F is_issue_satisfied >/dev/null 2>&1; then
-        sat=$(is_issue_satisfied "$b" 2>/dev/null || echo 0)
-      fi
-      if [[ "$sat" != "1" ]]; then
-        unresolved+=("$b")
-      fi
-    done
-    if [[ "${#unresolved[@]}" -gt 0 ]]; then
-      local bl
-      bl="unresolved_blocker(#$(IFS=,; printf '%s' "${unresolved[*]}" | sed 's/,/,#/g'))"
-      if [[ -n "$warnings_csv" ]]; then
-        warnings_csv="${warnings_csv},${bl}"
-      else
-        warnings_csv="$bl"
-      fi
+  local blockers_csv warnings_csv display_csv
+  blockers_csv=""
+  warnings_csv=""
+  if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
+    blockers_csv=$(ralph_runnable_blocker_tags "$record")
+  fi
+  if declare -F ralph_runnable_warning_tags >/dev/null 2>&1; then
+    warnings_csv=$(ralph_runnable_warning_tags "$record")
+  fi
+  display_csv="$blockers_csv"
+  if [[ -n "$warnings_csv" ]]; then
+    if [[ -n "$display_csv" ]]; then
+      display_csv="${display_csv},${warnings_csv}"
+    else
+      display_csv="$warnings_csv"
     fi
   fi
 
-  [[ -n "$warnings_csv" ]] && PREFLIGHT_BLOCKERS_FOUND=1
-  _preflight_emit_issue "$n" "$warnings_csv" "$state"
+  [[ -n "$blockers_csv" ]] && PREFLIGHT_BLOCKERS_FOUND=1
+  _preflight_emit_issue "$n" "$display_csv" "$state"
 }
 
 # Main entry. Prints a "Preflight:" report for the configured queue + repo.

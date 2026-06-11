@@ -311,15 +311,20 @@ test("queryIssues — handles malformed PR references gracefully", () => {
   assert.equal(result.warnings.length, 0); // No warnings for malformed data
 });
 
-// ─── Preflight label warnings ────────────────────────────────────────────────
+// ─── Canonical Ralph taxonomy metadata ───────────────────────────────────────
 
-test("queryIssues — needs-triage label generates needs_triage warning", () => {
+test("queryIssues — attaches canonical taxonomy metadata without dropping repo labels", () => {
   const mockOutput = JSON.stringify([
     {
       number: 90,
-      title: "Half-baked task",
-      body: "Content here",
-      labels: [{ name: "needs-triage" }, { name: "ready-for-agent" }],
+      title: "Slice 1: build thing",
+      body: "Parent #7\n\n## Blocked by\n- None",
+      labels: [
+        { name: "ralph:ready" },
+        { name: "priority:P1" },
+        { name: "work:slice" },
+        { name: "domain:billing" },
+      ],
       milestone: null,
       url: "https://github.com/owner/repo/issues/90",
       closingPullRequestsReferences: [],
@@ -334,122 +339,28 @@ test("queryIssues — needs-triage label generates needs_triage warning", () => 
   });
 
   assert.equal(result.error, null);
-  const w = result.warnings.find(w => w.type === "needs_triage");
-  assert.ok(w, "expected needs_triage warning");
-  assert.equal(w.issueNumber, 90);
-  assert.match(w.message, /needs-triage/i);
-  assert.equal(w.blocking, false);
+  assert.equal(result.warnings.length, 0);
+  assert.deepEqual(result.issues[0].labels, ["ralph:ready", "priority:P1", "work:slice", "domain:billing"]);
+  assert.equal(result.issues[0].taxonomy.state, "ralph:ready");
+  assert.equal(result.issues[0].taxonomy.priority, "priority:P1");
+  assert.equal(result.issues[0].taxonomy.workType, "work:slice");
+  assert.equal(result.issues[0].taxonomy.parentNumber, 7);
+  assert.equal(result.issues[0].taxonomy.eligibleForQueue, true);
+  assert.deepEqual(result.issues[0].taxonomy.repoLabels, ["domain:billing"]);
 });
 
-test("queryIssues — no needs-triage label means no needs_triage warning", () => {
-  const mockOutput = JSON.stringify([
-    {
-      number: 91,
-      title: "Clean task",
-      body: "Content here",
-      labels: [{ name: "ready-for-agent" }],
-      milestone: null,
-      url: "https://github.com/owner/repo/issues/91",
-      closingPullRequestsReferences: [],
-    },
-  ]);
-
-  const result = queryIssues({
-    repoOwner: "owner",
-    repoName: "repo",
-    searchQuery: "is:open",
-    execCommand: () => mockOutput,
-  });
-
-  assert.equal(result.error, null);
-  assert.ok(!result.warnings.some(w => w.type === "needs_triage"));
-});
-
-test("queryIssues — missing ready-for-agent label generates not_ready_for_agent warning", () => {
-  const mockOutput = JSON.stringify([
-    {
-      number: 92,
-      title: "Not AFK-safe task",
-      body: "Content here",
-      labels: [{ name: "bug" }],
-      milestone: null,
-      url: "https://github.com/owner/repo/issues/92",
-      closingPullRequestsReferences: [],
-    },
-  ]);
-
-  const result = queryIssues({
-    repoOwner: "owner",
-    repoName: "repo",
-    searchQuery: "is:open",
-    execCommand: () => mockOutput,
-  });
-
-  assert.equal(result.error, null);
-  const w = result.warnings.find(w => w.type === "not_ready_for_agent");
-  assert.ok(w, "expected not_ready_for_agent warning");
-  assert.equal(w.issueNumber, 92);
-  assert.match(w.message, /ready-for-agent/i);
-  assert.equal(w.blocking, false);
-});
-
-test("queryIssues — ready-for-agent present means no not_ready_for_agent warning", () => {
-  const mockOutput = JSON.stringify([
-    {
-      number: 93,
-      title: "AFK-safe task",
-      body: "Content here",
-      labels: [{ name: "ready-for-agent" }],
-      milestone: null,
-      url: "https://github.com/owner/repo/issues/93",
-      closingPullRequestsReferences: [],
-    },
-  ]);
-
-  const result = queryIssues({
-    repoOwner: "owner",
-    repoName: "repo",
-    searchQuery: "is:open",
-    execCommand: () => mockOutput,
-  });
-
-  assert.equal(result.error, null);
-  assert.ok(!result.warnings.some(w => w.type === "not_ready_for_agent"));
-});
-
-test("queryIssues — both labels missing produces both label warnings", () => {
-  const mockOutput = JSON.stringify([
-    {
-      number: 94,
-      title: "Unprocessed task",
-      body: "Content here",
-      labels: [],
-      milestone: null,
-      url: "https://github.com/owner/repo/issues/94",
-      closingPullRequestsReferences: [],
-    },
-  ]);
-
-  const result = queryIssues({
-    repoOwner: "owner",
-    repoName: "repo",
-    searchQuery: "is:open",
-    execCommand: () => mockOutput,
-  });
-
-  assert.equal(result.error, null);
-  assert.ok(result.warnings.some(w => w.type === "not_ready_for_agent" && w.issueNumber === 94));
-  // needs-triage absent means no needs_triage warning
-  assert.ok(!result.warnings.some(w => w.type === "needs_triage"));
-});
-
-test("queryIssues — both labels present produces no label warnings", () => {
+test("queryIssues — canonical dimension conflicts produce blocking preview warnings", () => {
   const mockOutput = JSON.stringify([
     {
       number: 95,
-      title: "Fully tagged task",
+      title: "Conflicting task",
       body: "Content here",
-      labels: [{ name: "ready-for-agent" }, { name: "feature" }],
+      labels: [
+        { name: "ralph:ready" },
+        { name: "ralph:hitl" },
+        { name: "priority:P2" },
+        { name: "work:standalone" },
+      ],
       milestone: null,
       url: "https://github.com/owner/repo/issues/95",
       closingPullRequestsReferences: [],
@@ -464,63 +375,48 @@ test("queryIssues — both labels present produces no label warnings", () => {
   });
 
   assert.equal(result.error, null);
-  assert.equal(result.warnings.length, 0);
+  const warning = result.warnings.find(w => w.type === "taxonomy_conflict");
+  assert.ok(warning);
+  assert.equal(warning.issueNumber, 95);
+  assert.equal(warning.dimension, "state");
+  assert.equal(warning.blocking, true);
 });
 
-// ─── Configurable blocking ────────────────────────────────────────────────────
-
-test("queryIssues — requireReadyForAgent:true makes not_ready_for_agent blocking", () => {
-  const mockOutput = JSON.stringify([
-    {
-      number: 96,
-      title: "Not ready",
-      body: "Content",
-      labels: [],
-      milestone: null,
-      url: "https://github.com/owner/repo/issues/96",
-      closingPullRequestsReferences: [],
-    },
-  ]);
-
-  const result = queryIssues({
-    repoOwner: "owner",
-    repoName: "repo",
-    searchQuery: "is:open",
-    execCommand: () => mockOutput,
-    config: { preflight: { requireReadyForAgent: true } },
-  });
-
-  assert.equal(result.error, null);
-  const w = result.warnings.find(w => w.type === "not_ready_for_agent");
-  assert.ok(w);
-  assert.equal(w.blocking, true);
-});
-
-test("queryIssues — requireNotNeedsTriage:true makes needs_triage blocking", () => {
+test("queryIssues — legacy compatibility aliases warn only when explicitly enabled", () => {
   const mockOutput = JSON.stringify([
     {
       number: 97,
-      title: "Needs triage",
+      title: "Legacy ready task",
       body: "Content",
-      labels: [{ name: "needs-triage" }, { name: "ready-for-agent" }],
+      labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/97",
       closingPullRequestsReferences: [],
     },
   ]);
 
-  const result = queryIssues({
+  const canonicalOnly = queryIssues({
     repoOwner: "owner",
     repoName: "repo",
     searchQuery: "is:open",
     execCommand: () => mockOutput,
-    config: { preflight: { requireNotNeedsTriage: true } },
+  });
+  assert.ok(!canonicalOnly.warnings.some(w => w.type === "legacy_label_alias"));
+
+  const compatible = queryIssues({
+    repoOwner: "owner",
+    repoName: "repo",
+    searchQuery: "is:open",
+    execCommand: () => mockOutput,
+    config: { taxonomy: { compatibilityAliases: true } },
   });
 
-  assert.equal(result.error, null);
-  const w = result.warnings.find(w => w.type === "needs_triage");
-  assert.ok(w);
-  assert.equal(w.blocking, true);
+  const warning = compatible.warnings.find(w => w.type === "legacy_label_alias");
+  assert.ok(warning);
+  assert.equal(warning.issueNumber, 97);
+  assert.equal(warning.legacy, "ready-for-agent");
+  assert.equal(warning.canonical, "ralph:ready");
+  assert.equal(warning.blocking, false);
 });
 
 // ─── Unresolved blocker warnings ─────────────────────────────────────────────

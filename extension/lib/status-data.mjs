@@ -14,6 +14,7 @@ import { detectTokens } from "./tokens.mjs";
 import { parsePrdReference, extractRepo, buildHeaderText, fetchPrdTitle } from "./header.mjs";
 import { filterScopedRalphProcesses } from "./process-scope.mjs";
 import { isAlive, readPidFile } from "./platform-shim.mjs";
+import { classifyIssue, orderIssuesForQueue } from "./label-taxonomy.mjs";
 
 const execFileAsync = promisify(execFile);
 const IS_WINDOWS = process.platform === "win32";
@@ -28,7 +29,7 @@ export const DEFAULT_CONFIG = {
   issue: {
     titleRegex: "^Slice [0-9]+:",
     titleNumRegex: "^Slice ([0-9]+):",
-    issueSearch: "Slice in:title",
+    issueSearch: "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)",
   },
   validation: {
     commands: [{ name: "Project checks", command: "Run the relevant checks documented by this repo." }],
@@ -477,20 +478,33 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
     const data = await ghJson([
       "issue", "list", "--state", "open", "--limit", "30",
       "--search", ISSUE_SEARCH,
-      "--json", "number,title,url,labels",
+      "--json", "number,title,body,state,url,labels,assignees",
     ]);
     if (!Array.isArray(data)) return [];
-    return data
+    const issues = data
       .map((i) => {
         const m = i.title.match(titleNumRegex.regex);
+        const labels = (i.labels || []).map((label) => label.name).filter(Boolean);
+        const taxonomy = classifyIssue({ ...i, labels });
         return {
           ...i,
-          labels: (i.labels || []).map((label) => label.name).filter(Boolean),
+          labels,
+          taxonomy: {
+            state: taxonomy.state,
+            priority: taxonomy.priority,
+            workType: taxonomy.workType,
+            parentNumber: taxonomy.parentNumber,
+            blockers: taxonomy.blockers,
+            conflicts: taxonomy.conflicts,
+            warnings: taxonomy.warnings,
+            runnable: taxonomy.runnable,
+            eligibleForQueue: taxonomy.runnable,
+          },
           slice: m ? Number(m.groups?.x ?? m[1]) : 999,
         };
       })
-      .filter((i) => titleRegex.regex.test(i.title))
-      .sort((a, b) => a.slice - b.slice);
+      .filter((i) => titleRegex.regex.test(i.title));
+    return orderIssuesForQueue(issues);
   }
 
   async function getRecentPrs() {
@@ -574,6 +588,11 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
         titleRegex: titleRegex.source,
         titleNumRegex: titleNumRegex.source,
         issueSearch: ISSUE_SEARCH,
+      },
+      taxonomy: {
+        defaultState: "ralph:ready",
+        runnableWorkTypes: ["work:slice", "work:standalone"],
+        defaultPriority: "priority:P2",
       },
       validation: {
         commands: ralphConfig.validation.commands

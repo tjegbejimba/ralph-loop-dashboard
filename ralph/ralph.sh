@@ -104,6 +104,13 @@ BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-$(config_get '.issue.branchPrefix')}"
 # state_init() (which has side effects) is invoked further down after cd.
 # shellcheck source=lib/state.sh
 . "$SCRIPT_DIR/lib/state.sh"
+# shellcheck source=lib/labels.sh
+if [[ -f "$SCRIPT_DIR/lib/labels.sh" ]]; then
+  . "$SCRIPT_DIR/lib/labels.sh"
+fi
+if [[ -z "$ISSUE_SEARCH" ]] && declare -F ralph_default_issue_search >/dev/null 2>&1; then
+  ISSUE_SEARCH="$(ralph_default_issue_search)"
+fi
 
 # Resume-incomplete-iterations feature (issue #60). Maximum retries per issue
 # when copilot exits 0 but no merged PR is produced (most often: autopilot
@@ -419,10 +426,10 @@ while true; do
       fi
       
       # Re-fetch state/labels/body from GitHub before claiming. Queue files can
-      # be stale or agent-supplied, so run-aware workers enforce the same AFK
-      # safety boundary as direct-number queues.
+      # be stale or agent-supplied, so run-aware workers enforce the same
+      # canonical runnable boundary as direct-number queues.
       cand_record=$("$GH" issue view "$cand_num" --repo "$REPO" \
-        --json state,labels,body 2>/dev/null | tr -d '\r' || echo "")
+        --json number,state,title,labels,body,assignees 2>/dev/null | tr -d '\r' || echo "")
       if [[ -z "$cand_record" ]]; then
         echo "↪️  Worker $WORKER_ID: #$cand_num lookup failed; retrying later."
         continue
@@ -437,26 +444,18 @@ while true; do
         continue
       fi
 
-      cand_labels=$(echo "$cand_record" | jq -r '[.labels[].name] | join(",")')
-      if [[ ",${cand_labels}," != *",ready-for-agent,"* ]]; then
-        state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
-        status_mark_failed "$cand_num" "Issue is missing ready-for-agent"
-        state_unlock
-        echo "🚫 Worker $WORKER_ID: #$cand_num missing ready-for-agent; marked as failed."
-        continue
+      cand_blockers=""
+      if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
+        cand_blockers=$(ralph_runnable_blocker_tags "$cand_record")
       fi
-      if [[ ",${cand_labels}," == *",hitl,"* ]]; then
+      if [[ -n "$cand_blockers" ]]; then
         state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
-        status_mark_failed "$cand_num" "Issue has hitl"
+        status_mark_failed "$cand_num" "Issue is not canonical Ralph-runnable: $cand_blockers"
         state_unlock
-        echo "🚫 Worker $WORKER_ID: #$cand_num has hitl; marked as failed."
-        continue
-      fi
-      if [[ ",${cand_labels}," == *",needs-triage,"* ]]; then
-        state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
-        status_mark_failed "$cand_num" "Issue has needs-triage"
-        state_unlock
-        echo "🚫 Worker $WORKER_ID: #$cand_num has needs-triage; marked as failed."
+        if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+          ralph_apply_label_transition "$cand_num" fail || true
+        fi
+        echo "🚫 Worker $WORKER_ID: #$cand_num not canonical Ralph-runnable ($cand_blockers); marked as failed."
         continue
       fi
 
@@ -500,8 +499,8 @@ while true; do
     fi
   elif [[ ${#NUMBERS_QUEUE[@]} -gt 0 ]]; then
     # Direct-numbers mode (issue #64): consume the configured `.issue.numbers`
-    # list when no RUN_ID is active. Honors the same AFK guard as legacy
-    # issueSearch — must be OPEN, `ready-for-agent`, not `hitl`, and all
+    # list when no RUN_ID is active. Honors the same canonical runnable guard
+    # as issueSearch — must be OPEN, canonical Ralph-runnable, and all
     # blockers satisfied — so this mode is safe to enable by default.
     state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
     state_reap_stale
@@ -538,7 +537,7 @@ while true; do
       fi
 
       record=$(gh issue view "$cand_num" --repo "$REPO" \
-        --json number,state,title,labels,body 2>/dev/null | tr -d '\r' || echo "")
+        --json number,state,title,labels,body,assignees 2>/dev/null | tr -d '\r' || echo "")
       if [[ -z "$record" ]]; then
         skip_reasons+=("#${cand_num}: lookup failed")
         continue
@@ -546,26 +545,17 @@ while true; do
       cand_state=$(echo "$record" | jq -r .state)
       cand_title=$(echo "$record" | jq -r .title)
       cand_body=$(echo "$record" | jq -r '.body // ""')
-      cand_labels=$(echo "$record" | jq -r '[.labels[].name] | join(",")')
 
       if [[ "$cand_state" != "OPEN" ]]; then
         skip_reasons+=("#${cand_num}: not open (${cand_state})")
         continue
       fi
-      if [[ ",${cand_labels}," != *",ready-for-agent,"* ]]; then
-        skip_reasons+=("#${cand_num}: missing ready-for-agent")
-        continue
+      cand_blockers=""
+      if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
+        cand_blockers=$(ralph_runnable_blocker_tags "$record")
       fi
-      if [[ ",${cand_labels}," == *",hitl,"* ]]; then
-        skip_reasons+=("#${cand_num}: hitl")
-        continue
-      fi
-      if [[ ",${cand_labels}," == *",needs-triage,"* ]]; then
-        # ready-for-agent and needs-triage can coexist if the operator forgot
-        # to remove the triage marker. The AFK contract is "human reviewed
-        # AND scoped"; needs-triage says "not yet reviewed". Reject when both
-        # are present so the worker matches what preflight already flags.
-        skip_reasons+=("#${cand_num}: still needs-triage")
+      if [[ -n "$cand_blockers" ]]; then
+        skip_reasons+=("#${cand_num}: not canonical Ralph-runnable (${cand_blockers})")
         continue
       fi
 
@@ -748,7 +738,7 @@ while true; do
   # Atomic claim: re-acquire lock, re-check that nobody else grabbed this
   # issue between selection and now, AND re-validate state/labels/blockers
   # against a fresh fetch. The selection-time snapshot can go stale: an
-  # operator may have removed `ready-for-agent`, added `hitl`, added a new
+  # operator may have changed Ralph state/work labels, added a new
   # `## Blocked by`, or closed the issue between scan and claim. Re-fetch
   # everything and re-validate before committing the claim.
   state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
@@ -758,10 +748,10 @@ while true; do
     echo "↪️  Worker $WORKER_ID: #$num was claimed by another worker between selection and claim; retrying."
     continue
   fi
-  # Re-fetch state + labels + body so we can re-validate the AFK guard and
+  # Re-fetch state + labels + body so we can re-validate the canonical guard and
   # re-parse blockers from the freshest body, not the stale chosen_blockers.
   fresh_record=$("$GH" issue view "$num" --repo "$REPO" \
-    --json state,title,labels,body 2>/dev/null | tr -d '\r' || echo "")
+    --json number,state,title,labels,body,assignees 2>/dev/null | tr -d '\r' || echo "")
   if [[ -z "$fresh_record" ]]; then
     state_unlock
     echo "↪️  Worker $WORKER_ID: #$num lookup failed during claim re-check; retrying."
@@ -773,46 +763,18 @@ while true; do
     echo "↪️  Worker $WORKER_ID: #$num is no longer OPEN (state=$current_state); retrying."
     continue
   fi
-  # Only re-validate labels for direct-numbers mode. Legacy issueSearch mode
-  # already filters via the gh search predicate so an issue that came back
-  # via the search must have matched the AFK guard at scan time; legacy users
-  # who manually crafted custom `issueSearch` queries may not want the
-  # `ready-for-agent`/`hitl`/`needs-triage` triple enforced here.
-  if [[ -n "$RUN_ID" || ( -z "$RUN_ID" && ${#NUMBERS_QUEUE[@]} -gt 0 ) ]]; then
-    fresh_labels=$(echo "$fresh_record" | jq -r '[.labels[].name] | join(",")')
-    if [[ ",${fresh_labels}," != *",ready-for-agent,"* ]]; then
-      [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue lost ready-for-agent before claim"
-      state_unlock
-      echo "↪️  Worker $WORKER_ID: #$num lost ready-for-agent during selection; retrying."
-      continue
-    fi
-    if [[ ",${fresh_labels}," == *",hitl,"* ]]; then
-      [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue gained hitl before claim"
-      state_unlock
-      echo "↪️  Worker $WORKER_ID: #$num gained hitl during selection; retrying."
-      continue
-    fi
-    if [[ ",${fresh_labels}," == *",needs-triage,"* ]]; then
-      [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue gained needs-triage before claim"
-      state_unlock
-      echo "↪️  Worker $WORKER_ID: #$num gained needs-triage during selection; retrying."
-      continue
-    fi
-  fi
-  # Re-parse blockers from the fresh body so newly-added `## Blocked by`
-  # entries are honored.
   fresh_body=$(echo "$fresh_record" | jq -r '.body // ""')
-  fresh_blockers=$(parse_blockers "$fresh_body")
-  blockers_still_satisfied=1
-  for b in $fresh_blockers; do
-    if [[ "$(is_issue_satisfied "$b")" != "1" ]]; then
-      blockers_still_satisfied=0
-      break
-    fi
-  done
-  if [[ "$blockers_still_satisfied" -ne 1 ]]; then
+  fresh_blocker_tags=""
+  if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
+    fresh_blocker_tags=$(ralph_runnable_blocker_tags "$fresh_record")
+  fi
+  if [[ -n "$fresh_blocker_tags" ]]; then
+    [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue became non-runnable before claim: $fresh_blocker_tags"
     state_unlock
-    echo "↪️  Worker $WORKER_ID: #$num blocker became unsatisfied during selection; retrying."
+    if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+      ralph_apply_label_transition "$num" fail || true
+    fi
+    echo "↪️  Worker $WORKER_ID: #$num became non-runnable during selection ($fresh_blocker_tags); retrying."
     continue
   fi
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
@@ -823,6 +785,9 @@ while true; do
     status_update_item "$num" "claimed" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
   fi
   state_unlock
+  if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+    ralph_apply_label_transition "$num" claim || true
+  fi
 
   # Use the freshest title/body for the prompt — the selection-time snapshot
   # may be stale if the operator edited the issue between scan and claim.
@@ -841,6 +806,9 @@ while true; do
         state_lock || true
         status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
         state_unlock || true
+        if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+          ralph_apply_label_transition "$num" done || true
+        fi
       fi
       echo "✅ Worker $WORKER_ID: merged ready PR for #$num before launching Copilot."
       state_lock && state_release "$num" && state_unlock || true
@@ -924,6 +892,9 @@ DO NOT re-plan or open a new branch. Instead:
       state_lock || true
       status_mark_failed "$num" "Copilot exited with code $rc"
       state_unlock || true
+    fi
+    if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+      ralph_apply_label_transition "$num" fail || true
     fi
     echo "⚠️  copilot exited $rc on #$num. See $log_file. Halting." >&2
     exit 1
@@ -1088,6 +1059,9 @@ DO NOT re-plan or open a new branch. Instead:
       status_mark_failed "$num" "No merged PR found after copilot completed"
       state_unlock || true
     fi
+    if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+      ralph_apply_label_transition "$num" fail || true
+    fi
     echo "⚠️  Issue #$num not closed by a merged PR (state=$state, merged_prs=$merged_count). Halting." >&2
     exit 1
   fi
@@ -1097,6 +1071,9 @@ DO NOT re-plan or open a new branch. Instead:
     state_lock || true
     status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
     state_unlock || true
+  fi
+  if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+    ralph_apply_label_transition "$num" done || true
   fi
 
   # Optional Slice 1 postcondition (alisterr-specific guard) — skipped when

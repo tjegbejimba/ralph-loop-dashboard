@@ -1,5 +1,7 @@
 // Queue timeline presenter — transforms run state into timeline rows for dashboard display
 
+import { classifyIssue } from "./label-taxonomy.mjs";
+
 /**
  * Build queue timeline from run state
  * 
@@ -41,6 +43,7 @@ export function buildQueueTimeline({ queue, status, repoOwner, repoName }) {
   return queue.map(issue => {
     const issueNumber = issue.number;
     const itemStatus = status.items[String(issueNumber)];
+    const taxonomy = classifyIssue(issue);
     
     // Build base row with issue metadata
     const row = {
@@ -54,6 +57,15 @@ export function buildQueueTimeline({ queue, status, repoOwner, repoName }) {
       workerId: null,
       startedAt: null,
       error: null,
+      taxonomy: {
+        state: taxonomy.state,
+        priority: taxonomy.priority,
+        workType: taxonomy.workType,
+        parentNumber: taxonomy.parentNumber,
+        blockers: taxonomy.blockers,
+        conflicts: taxonomy.conflicts,
+        warnings: taxonomy.warnings,
+      },
     };
     
     // Add runtime state if item has status

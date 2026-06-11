@@ -52,6 +52,7 @@ new_repo() {
   mkdir -p .ralph/lib .ralph/logs .ralph/lock
   cp "$REPO_ROOT/ralph/launch.sh" .ralph/launch.sh
   cp "$REPO_ROOT/ralph/lib/state.sh" .ralph/lib/state.sh
+  cp "$REPO_ROOT/ralph/lib/labels.sh" .ralph/lib/labels.sh
   echo "$dir"
 }
 
@@ -183,12 +184,12 @@ EOF
   write_mock_gh "$bin_dir" '
 case "$1 $2" in
   "issue view")
-    echo "{\"number\": 7}"
+    echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"
     exit 0
     ;;
   "issue list")
-    if echo "$@" | grep -qF "label:ready-for-agent"; then
-      echo "[{\"number\": 8, \"labels\": []}, {\"number\": 9, \"labels\": []}]"
+    if echo "$@" | grep -qF "label:work:slice"; then
+      echo "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":9,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
     else
       echo "[{\"number\": 10}]"
     fi
@@ -203,7 +204,7 @@ exit 1
     "$repo/.ralph/launch.sh" --enqueue-prd 7 2>&1) || rc=$?
   assert_exit_zero "$rc" "--enqueue-prd happy path exits 0"
   assert_contains "$out" "Enqueued PRD #7" "--enqueue-prd happy path output"
-  assert_contains "$out" "2 AFK slices" "--enqueue-prd AFK count"
+  assert_contains "$out" "2 canonical runnable slices" "--enqueue-prd runnable count"
   assert_contains "$out" "1 HITL skipped" "--enqueue-prd HITL count"
   assert_contains "$out" "#8 #9" "--enqueue-prd lists slice numbers"
   assert_json "$repo/.ralph/config.json" '.issue.numbers | join(",")' "8,9" "--enqueue-prd updates config"
@@ -226,7 +227,7 @@ EOF
   bin_dir="$TEST_ROOT/bin-t8"
   write_mock_gh "$bin_dir" '
 case "$1 $2" in
-  "issue view") echo "{\"number\": 7}"; exit 0 ;;
+  "issue view") echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"; exit 0 ;;
   "issue list") echo "[]"; exit 0 ;;
 esac
 exit 1
@@ -235,7 +236,7 @@ exit 1
   out=$(RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
     "$repo/.ralph/launch.sh" --enqueue-prd 7 2>&1) || rc=$?
   assert_exit_nonzero "$rc" "--enqueue-prd no children exits non-zero"
-  assert_contains "$out" "No AFK" "--enqueue-prd no children error message"
+  assert_contains "$out" "No canonical runnable" "--enqueue-prd no children error message"
 }
 
 # Test 9: --enqueue-prd HITL-only PRD
@@ -247,9 +248,9 @@ EOF
   bin_dir="$TEST_ROOT/bin-t9"
   write_mock_gh "$bin_dir" '
 case "$1 $2" in
-  "issue view") echo "{\"number\": 7}"; exit 0 ;;
+  "issue view") echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"; exit 0 ;;
   "issue list")
-    if echo "$@" | grep -qF "label:ready-for-agent"; then
+    if echo "$@" | grep -qF "label:work:slice"; then
       echo "[]"
     else
       echo "[{\"number\": 15}]"
@@ -299,10 +300,10 @@ EOF
   bin_dir="$TEST_ROOT/bin-t11"
   write_mock_gh "$bin_dir" '
 case "$1 $2" in
-  "issue view") echo "{\"number\": 7}"; exit 0 ;;
+  "issue view") echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"; exit 0 ;;
   "issue list")
-    if echo "$@" | grep -qF "label:ready-for-agent"; then
-      echo "[{\"number\": 8}]"
+    if echo "$@" | grep -qF "label:work:slice"; then
+      echo "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
     else
       echo "[]"
     fi
@@ -330,10 +331,10 @@ EOF
   bin_dir="$TEST_ROOT/bin-t12"
   write_mock_gh "$bin_dir" '
 case "$1 $2" in
-  "issue view") echo "{\"number\": 7}"; exit 0 ;;
+  "issue view") echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"; exit 0 ;;
   "issue list")
-    if echo "$@" | grep -qF "label:ready-for-agent"; then
-      echo "[{\"number\": 8}]"
+    if echo "$@" | grep -qF "label:work:slice"; then
+      echo "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
     else
       echo "[]"
     fi
@@ -366,10 +367,10 @@ EOF
   bin_dir="$TEST_ROOT/bin-t13"
   write_mock_gh "$bin_dir" '
 case "$1 $2" in
-  "issue view") echo "{\"number\": 7}"; exit 0 ;;
+  "issue view") echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"; exit 0 ;;
   "issue list")
-    if echo "$@" | grep -qF "label:ready-for-agent"; then
-      echo "[{\"number\": 8}]"
+    if echo "$@" | grep -qF "label:work:slice"; then
+      echo "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
     else
       echo "[]"
     fi

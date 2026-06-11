@@ -36,6 +36,7 @@ custom_config='{"profile":"custom","keep":true}'
 printf '%s\n' "$custom_prompt" > "$TARGET/.ralph/RALPH.md"
 printf '%s\n' "$custom_config" > "$TARGET/.ralph/config.json"
 printf '%s\n' "# stale launch" > "$TARGET/.ralph/launch.sh"
+printf '%s\n' "# stale labels" > "$TARGET/.ralph/lib/labels.sh"
 printf '%s\n' "# stale status" > "$TARGET/.ralph/lib/status.sh"
 printf '%s\n' "# Local agent note" >> "$instructions_file"
 
@@ -58,6 +59,11 @@ fi
 
 if ! cmp -s "$REPO_ROOT/ralph/lib/status.sh" "$TARGET/.ralph/lib/status.sh"; then
   echo "FAIL: installer should refresh lib/status.sh"
+  exit 1
+fi
+
+if ! cmp -s "$REPO_ROOT/ralph/lib/labels.sh" "$TARGET/.ralph/lib/labels.sh"; then
+  echo "FAIL: installer should install/refresh lib/labels.sh"
   exit 1
 fi
 

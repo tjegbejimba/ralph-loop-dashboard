@@ -635,7 +635,7 @@ test("queue builder - manual reorder", async ({ page }) => {
   await expect(queueItems.nth(2)).toContainText("#3");
 });
 
-test("queue builder - auto-seeds selected queue from ready-for-agent open slices", async ({ page }) => {
+test("queue builder - auto-seeds selected queue from canonical runnable open slices", async ({ page }) => {
   await page.addInitScript(() => {
     window.copilot = {
       getStatus: () => Promise.resolve({
@@ -643,9 +643,9 @@ test("queue builder - auto-seeds selected queue from ready-for-agent open slices
         loopRunning: false,
         workers: [],
         openSlices: [
-          { number: 153, title: "Slice 153: fast path", labels: ["ready-for-agent"], url: "https://github.com/test/repo/issues/153", slice: 153 },
+          { number: 153, title: "Slice 153: fast path", labels: ["ralph:ready", "priority:P2", "work:slice"], url: "https://github.com/test/repo/issues/153", slice: 153 },
           { number: 154, title: "Slice 154: needs answers", labels: ["needs-info"], url: "https://github.com/test/repo/issues/154", slice: 154 },
-          { number: 155, title: "Slice 155: cache tune", labels: ["enhancement", "ready-for-agent"], url: "https://github.com/test/repo/issues/155", slice: 155 },
+          { number: 155, title: "Slice 155: cache tune", labels: ["enhancement", "ralph:ready", "priority:P2", "work:slice"], url: "https://github.com/test/repo/issues/155", slice: 155 },
         ],
         config: {
           repoState: { state: "resolved", repoRoot: "/test/auto-seed", hasRalph: true },
@@ -669,7 +669,7 @@ test("queue builder - auto-seeds selected queue from ready-for-agent open slices
   await expect(queueItems).toHaveCount(2);
   await expect(queueItems.nth(0)).toContainText("#153");
   await expect(queueItems.nth(1)).toContainText("#155");
-  await expect(page.locator(".issue-row.ready-for-agent")).toHaveCount(2);
+  await expect(page.locator(".issue-row.ralph-ready")).toHaveCount(2);
 });
 
 test("queue builder - persists manual edits across reloads", async ({ page }) => {
@@ -1206,7 +1206,7 @@ test("queue timeline - is primary panel when run is active", async ({ page }) =>
 
 // ─── Issue preview — preflight warnings ──────────────────────────────────────
 
-test("issue preview - renders needs_triage warning with nonblocking style", async ({ page }) => {
+test("issue preview - renders non-runnable state warning with nonblocking style", async ({ page }) => {
   await page.addInitScript(() => {
     window.copilot = {
       getStatus: () => Promise.resolve({
@@ -1225,7 +1225,7 @@ test("issue preview - renders needs_triage warning with nonblocking style", asyn
             { number: 10, title: "Half-baked", labels: [], milestone: null, url: "https://github.com/test/repo/issues/10" },
           ],
           warnings: [
-            { issueNumber: 10, type: "needs_triage", message: "Issue #10 still has the needs-triage label", blocking: false },
+            { issueNumber: 10, type: "not_runnable_state", message: "Issue #10 has non-runnable state ralph:needs-triage", blocking: false },
           ],
         },
       }),
@@ -1243,12 +1243,12 @@ test("issue preview - renders needs_triage warning with nonblocking style", asyn
   const row = page.locator('[data-issue-number="10"]');
   await expect(row).toBeVisible();
   await expect(row.locator('.warning')).toBeVisible();
-  await expect(row.locator('.warning')).toContainText("needs-triage");
+  await expect(row.locator('.warning')).toContainText("ralph:needs-triage");
   // Nonblocking: should NOT have the blocking class
   await expect(row.locator('.warning.warning--blocking')).toHaveCount(0);
 });
 
-test("issue preview - renders not_ready_for_agent warning with nonblocking style", async ({ page }) => {
+test("issue preview - renders missing_state warning with nonblocking style", async ({ page }) => {
   await page.addInitScript(() => {
     window.copilot = {
       getStatus: () => Promise.resolve({
@@ -1264,10 +1264,10 @@ test("issue preview - renders not_ready_for_agent warning with nonblocking style
         },
         issuePreview: {
           issues: [
-            { number: 11, title: "Not AFK safe", labels: [], milestone: null, url: "https://github.com/test/repo/issues/11" },
+            { number: 11, title: "Not canonical runnable", labels: [], milestone: null, url: "https://github.com/test/repo/issues/11" },
           ],
           warnings: [
-            { issueNumber: 11, type: "not_ready_for_agent", message: "Issue #11 is missing the ready-for-agent label", blocking: false },
+            { issueNumber: 11, type: "missing_state", message: "Issue #11 is missing a Ralph state label", blocking: false },
           ],
         },
       }),
@@ -1284,7 +1284,7 @@ test("issue preview - renders not_ready_for_agent warning with nonblocking style
 
   const row = page.locator('[data-issue-number="11"]');
   await expect(row).toBeVisible();
-  await expect(row.locator('.warning')).toContainText("ready-for-agent");
+  await expect(row.locator('.warning')).toContainText("missing a Ralph state label");
   await expect(row.locator('.warning.warning--blocking')).toHaveCount(0);
 });
 
@@ -1347,7 +1347,7 @@ test("issue preview - blocking warning uses warning--blocking class and distinct
             { number: 13, title: "Needs triage", labels: [], milestone: null, url: "https://github.com/test/repo/issues/13" },
           ],
           warnings: [
-            { issueNumber: 13, type: "needs_triage", message: "Issue #13 still has the needs-triage label", blocking: true },
+            { issueNumber: 13, type: "not_runnable_state", message: "Issue #13 has non-runnable state ralph:needs-triage", blocking: true },
           ],
         },
       }),

@@ -165,6 +165,13 @@ LOG_DIR="$MAIN_REPO/.ralph/logs"
 mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
 # shellcheck source=lib/state.sh
 . "$MAIN_REPO/.ralph/lib/state.sh"
+# shellcheck source=lib/labels.sh
+_labels_lib="$MAIN_REPO/.ralph/lib/labels.sh"
+if [[ -f "$_labels_lib" ]]; then
+  # shellcheck disable=SC1090
+  . "$_labels_lib"
+fi
+unset _labels_lib
 # shellcheck source=lib/preflight.sh
 # Preflight library is optional in older installs; only source if present so a
 # stale installer doesn't break --enqueue/--status (operator gets a hint to
@@ -296,10 +303,10 @@ Options:
       all other fields. N must be positive integers. Idempotent.
 
   --enqueue-prd <N>
-      Given a PRD issue number, finds all open AFK child slices (label:ready-for-
-      agent, not label:hitl, unassigned) via GitHub search, enqueues them via
-      --enqueue, and updates the {{PRD_REFERENCE}} in .ralph/RALPH.md.
-      Mutually exclusive with --enqueue.
+      Given a PRD issue number, finds all canonical runnable child slices
+      (ralph:ready, work:slice, exact Parent #N marker, unassigned) via GitHub
+      search, enqueues them via --enqueue, and updates the {{PRD_REFERENCE}} in
+      .ralph/RALPH.md. Mutually exclusive with --enqueue.
 
   --foreground    Run the worker loop in the foreground (RALPH_PARALLELISM=1 only).
   --once          Ask each worker to run one iteration, then exit.
@@ -606,6 +613,12 @@ if [[ "${1:-}" == "--enqueue" ]]; then
   if [[ "$enq_rc" -ne 0 ]]; then
     exit "$enq_rc"
   fi
+  if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+    for _enq_issue in "$@"; do
+      ralph_apply_label_transition "$_enq_issue" enqueue || true
+    done
+    unset _enq_issue
+  fi
   if declare -F preflight_run >/dev/null 2>&1; then
     echo
     preflight_run || true
@@ -626,34 +639,54 @@ if [[ "${1:-}" == "--enqueue-prd" ]]; then
     exit 1
   fi
 
-  # Verify PRD exists.
-  if ! "$GH" issue view "$_prd_n" --repo "$REPO" --json number >/dev/null 2>&1; then
+  # Verify PRD exists and is a canonical, evaluated PRD parent.
+  _prd_record=$("$GH" issue view "$_prd_n" --repo "$REPO" --json number,state,title,body,labels 2>/dev/null | tr -d '\r' || echo "")
+  if [[ -z "$_prd_record" ]]; then
     echo "❌ PRD issue #$_prd_n not found in $REPO" >&2
     exit 1
   fi
+  if declare -F ralph_prd_blocker_tags >/dev/null 2>&1; then
+    _prd_blockers=$(ralph_prd_blocker_tags "$_prd_record")
+    if [[ -n "$_prd_blockers" ]]; then
+      echo "❌ PRD issue #$_prd_n is not enqueueable: $_prd_blockers" >&2
+      exit 1
+    fi
+  fi
 
-  # Find AFK child slices (ready-for-agent, not hitl, open, unassigned).
-  _afk_json=$("$GH" issue list \
+  # Find canonical runnable child slices (open, unassigned, work:slice,
+  # ralph:ready or ralph:blocked with satisfied blockers).
+  _runnable_json=$("$GH" issue list \
     --repo "$REPO" \
-    --search "\"Parent #${_prd_n}\" label:ready-for-agent -label:hitl is:open no:assignee" \
-    --json number,labels \
+    --search "\"Parent #${_prd_n}\" label:work:slice is:open no:assignee" \
+    --json number,title,body,state,labels,assignees \
     --limit 100 2>/dev/null || echo "[]")
 
   # Count HITL issues separately for the summary line.
   _hitl_count=$("$GH" issue list \
     --repo "$REPO" \
-    --search "\"Parent #${_prd_n}\" label:hitl is:open" \
+    --search "\"Parent #${_prd_n}\" label:ralph:hitl is:open" \
     --json number \
     --limit 100 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
 
-  # Collect AFK issue numbers.
-  _afk_numbers=()
-  while IFS= read -r _num; do
-    [[ -n "$_num" ]] && _afk_numbers+=("$_num")
-  done < <(echo "$_afk_json" | jq -r '.[].number' 2>/dev/null || true)
+  # Collect enqueueable issue numbers.
+  _runnable_numbers=()
+  if declare -F ralph_runnable_blocker_tags >/dev/null 2>&1; then
+    while IFS= read -r _row; do
+      [[ -z "$_row" ]] && continue
+      _record=$(echo "$_row" | base64 --decode | tr -d '\r')
+      _num=$(echo "$_record" | jq -r '.number')
+      _blockers=$(ralph_runnable_blocker_tags "$_record")
+      [[ -z "$_blockers" && -n "$_num" ]] && _runnable_numbers+=("$_num")
+    done < <(echo "$_runnable_json" | jq -r '.[] | @base64' 2>/dev/null || true)
+    unset _row _record _num _blockers
+  else
+    while IFS= read -r _num; do
+      [[ -n "$_num" ]] && _runnable_numbers+=("$_num")
+    done < <(echo "$_runnable_json" | jq -r '.[].number' 2>/dev/null || true)
+  fi
 
-  if [[ ${#_afk_numbers[@]} -eq 0 ]]; then
-    echo "❌ No AFK child slices found for PRD #$_prd_n (${_hitl_count} HITL issues skipped)" >&2
+  if [[ ${#_runnable_numbers[@]} -eq 0 ]]; then
+    echo "❌ No canonical runnable child slices found for PRD #$_prd_n (${_hitl_count} HITL issues skipped)" >&2
     exit 1
   fi
 
@@ -664,7 +697,7 @@ if [[ "${1:-}" == "--enqueue-prd" ]]; then
     _sorted_result=$(
       node --input-type=module 2>/dev/null <<NODEEOF || echo '{"sorted":[],"blockers":0}'
 import { parseDependencies } from '${_dep_parser}';
-const numbers = ${_afk_json};
+const numbers = ${_runnable_json};
 const sorted = parseDependencies(numbers);
 const sortedNums = sorted.map(i => i.number ?? i);
 const blockers = sorted.filter(i => i.blocked === true).length;
@@ -672,17 +705,17 @@ console.log(JSON.stringify({sorted: sortedNums, blockers}));
 NODEEOF
     )
     _sorted_json=$(echo "$_sorted_result" | jq '.sorted // []' 2>/dev/null || echo "[]")
-    _afk_numbers=()
+    _runnable_numbers=()
     while IFS= read -r _num; do
-      [[ -n "$_num" ]] && _afk_numbers+=("$_num")
+      [[ -n "$_num" ]] && _runnable_numbers+=("$_num")
     done < <(echo "$_sorted_json" | jq -r '.[]' 2>/dev/null || true)
     # Restore original order if parser returned empty (error fallback).
-    if [[ ${#_afk_numbers[@]} -eq 0 ]]; then
+    if [[ ${#_runnable_numbers[@]} -eq 0 ]]; then
       echo "⚠️  Warning: dependency parser returned no results — using original order" >&2
-      _afk_numbers=()
+      _runnable_numbers=()
       while IFS= read -r _num; do
-        [[ -n "$_num" ]] && _afk_numbers+=("$_num")
-      done < <(echo "$_afk_json" | jq -r '.[].number' 2>/dev/null || true)
+        [[ -n "$_num" ]] && _runnable_numbers+=("$_num")
+      done < <(echo "$_runnable_json" | jq -r '.[].number' 2>/dev/null || true)
       _blocker_count=0
     else
       _blocker_count=$(echo "$_sorted_result" | jq '.blockers // 0' 2>/dev/null || echo 0)
@@ -690,7 +723,13 @@ NODEEOF
   fi
 
   # Write issue numbers to config via shared enqueue function.
-  do_enqueue "$MAIN_REPO/.ralph/config.json" "${_afk_numbers[@]}"
+  do_enqueue "$MAIN_REPO/.ralph/config.json" "${_runnable_numbers[@]}"
+  if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+    for _enq_issue in "${_runnable_numbers[@]}"; do
+      ralph_apply_label_transition "$_enq_issue" enqueue || true
+    done
+    unset _enq_issue
+  fi
 
   # Update RALPH.md: replace {{PRD_REFERENCE}} placeholder and/or the
   # existing reference following the RALPH_PRD_REF marker comment.
@@ -715,9 +754,9 @@ NODEEOF
   fi
 
   # Print summary.
-  _afk_count=${#_afk_numbers[@]}
-  _issues_display=$(printf '#%s ' "${_afk_numbers[@]}" | sed 's/ $//')
-  echo "Enqueued PRD #${_prd_n} (${_afk_count} AFK slices, ${_hitl_count} HITL skipped, ${_blocker_count} unresolved blockers): ${_issues_display}"
+  _runnable_count=${#_runnable_numbers[@]}
+  _issues_display=$(printf '#%s ' "${_runnable_numbers[@]}" | sed 's/ $//')
+  echo "Enqueued PRD #${_prd_n} (${_runnable_count} canonical runnable slices, ${_hitl_count} HITL skipped, ${_blocker_count} unresolved blockers): ${_issues_display}"
 
   if declare -F preflight_run >/dev/null 2>&1; then
     echo
