@@ -207,6 +207,25 @@ warning), and either `work:slice` or `work:standalone`. PRD parent issues use
 `work:prd` with `ralph:evaluated`. See [Ralph Label Vocabulary](docs/labels.md)
 for migration, conflict, and dry-run label-management guidance.
 
+### Advisory issue triage
+
+Ralph also exposes a separate comment-only triage workflow for periodically or
+manually reviewing open issues before they enter the readiness ladder:
+
+```bash
+node ~/.copilot/extensions/ralph-dashboard/cli.mjs triage --dry-run
+node ~/.copilot/extensions/ralph-dashboard/cli.mjs triage --live
+```
+
+Dry-run is the default. It scans the configured repo allowlist
+(`tjegbejimba/ralph-loop-dashboard` initially), uses `label:needs-triage`
+unless `--canonical-labels` is supplied, and prints the exact triage comments
+without posting. Live mode only creates or updates the bot-owned triage opinion
+comment for the authenticated `gh` user (or an explicit `--bot-login`), capped at
+10 changed issues per repo. It never mutates labels, closes issues, creates
+PRDs/slices, invokes `to-prd`/`to-issues`/`to-ralph`, or enqueues Ralph workers.
+`Pursue` means "worth shaping," not "ready for Ralph."
+
 ### Tracking a run from the terminal
 
 When the dashboard extension isn't available (e.g., you're using GitHub Copilot
