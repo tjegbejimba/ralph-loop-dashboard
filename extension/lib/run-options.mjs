@@ -7,6 +7,7 @@ const VALID_MODELS = new Set([
   "claude-opus-4.5",
   "claude-opus-4.6",
   "claude-opus-4.7",
+  "claude-opus-4.8",
   "claude-haiku-4.5",
   "gpt-5.2",
   "gpt-5.3-codex",

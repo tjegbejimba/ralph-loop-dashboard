@@ -75,13 +75,20 @@ test("validateParallelism enforces maximum bound", () => {
 });
 
 test("validateModel accepts known model names", () => {
-  const models = ["claude-sonnet-4.5", "gpt-5.4", "claude-opus-4.7", "gpt-5.5"];
+  const models = ["claude-sonnet-4.5", "gpt-5.4", "claude-opus-4.7", "claude-opus-4.8", "gpt-5.5"];
   
   for (const model of models) {
     const result = validateModel(model);
     assert.equal(result.valid, true, `${model} should be valid`);
     assert.equal(result.error, undefined);
   }
+});
+
+test("validateModel allows the claude-opus-4.8 review model used by RALPH.md.template", () => {
+  const result = validateModel("claude-opus-4.8");
+  
+  assert.equal(result.valid, true, "claude-opus-4.8 should be in the allowlist");
+  assert.equal(result.error, undefined);
 });
 
 test("validateModel rejects empty string", () => {
