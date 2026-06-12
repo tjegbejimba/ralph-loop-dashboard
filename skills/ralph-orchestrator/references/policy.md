@@ -97,12 +97,14 @@ ledger and do not modify it. Active repos are reported, never mutated.
 
 Headless Ralph workers operate under `.ralph/RALPH.md` (operational law). They:
 claim one ready issue, run strict TDD (red-green-refactor via the `tdd` skill),
-run the repo's validation commands, dual-model code review (`gpt-5.5` quality +
-`claude-opus-4.8` security), open a PR with a literal `Closes #<N>`, rebase, and
-merge via the normal protected path (never `--admin`). Closure happens only via a
-merged PR. The orchestrator must not pre-empt, resume, or finish a worker's slice;
-on repeated worker failure it emits a hard-stop brief and leaves the evidence in
-place.
+run the repo's validation commands, run **dual-model code review** in parallel
+(one reviewer for quality/correctness, one for security), open a PR with a literal
+`Closes #<N>`, rebase, and merge via the normal protected path (never `--admin`).
+Closure happens only via a merged PR. The specific review models are defined by the
+target repo's `.ralph/RALPH.md` — treat that file as the single source of truth and
+do not hardcode model versions here (they drift per repo/version). The orchestrator
+must not pre-empt, resume, or finish a worker's slice; on repeated worker failure it
+emits a hard-stop brief and leaves the evidence in place.
 
 ## Monitoring
 
