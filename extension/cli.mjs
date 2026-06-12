@@ -48,6 +48,7 @@ function parseFlags(args) {
     triageQuery: null,
     triageTaxonomyMode: "legacy",
     triageBotLogin: null,
+    triageRepos: [],
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -61,6 +62,7 @@ function parseFlags(args) {
     else if (a === "--canonical-labels") flags.triageTaxonomyMode = "canonical";
     else if (a === "--query") flags.triageQuery = args[++i] || null;
     else if (a === "--bot-login") flags.triageBotLogin = args[++i] || null;
+    else if (a === "--repo") flags.triageRepos.push(args[++i]);
     else if (a === "--interval") {
       const n = Number(args[++i]);
       if (Number.isFinite(n) && n > 0) flags.interval = n;
@@ -82,7 +84,7 @@ function printUsage() {
   node cli.mjs status [--with-prs] [--no-color]
   node cli.mjs watch [SEC|--interval SEC] [--no-color]
   node cli.mjs follow [N|--worker N]
-  node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--query QUERY] [--json]
+  node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--repo OWNER/NAME] [--query QUERY] [--json]
   node cli.mjs help
 
 Reads .ralph/ from cwd (or RALPH_REPO_ROOT). Shows current workers, queue
@@ -98,7 +100,7 @@ enqueue happens automatically.
 
 function printTriageUsage() {
   process.stdout.write(`Usage:
-  node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--query QUERY] [--json]
+  node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--repo OWNER/NAME] [--query QUERY] [--json]
 
 Runs comment-only advisory issue triage for configured repositories.
 Default repo: tjegbejimba/ralph-loop-dashboard
@@ -107,6 +109,8 @@ Default query: label:needs-triage
 --dry-run           Print exact comments; do not post anything. Default.
 --live              Post/update only the bot-owned triage comment.
 --canonical-labels  Use label:ralph:needs-triage instead of the legacy query.
+--repo OWNER/NAME   Triage this repo instead of the default. Repeatable to
+                    triage several repos in one run.
 --query QUERY       Override the triage issue search query.
 --bot-login LOGIN   Override detected gh login for bot-owned comment matching.
 --json              Emit the structured run summary.
@@ -233,12 +237,25 @@ async function cmdFollow(reader, flags) {
   }
 }
 
+function parseRepoSpec(value) {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  const segment = "[A-Za-z0-9._][A-Za-z0-9._-]*";
+  const match = new RegExp(`^(${segment})\\/(${segment})$`).exec(trimmed);
+  if (!match) {
+    throw new Error(`Invalid --repo value: ${JSON.stringify(value)}. Expected owner/name.`);
+  }
+  return { owner: match[1], name: match[2] };
+}
+
 function triageReposFromFlags(flags) {
   const repoOverrides = {
     taxonomyMode: flags.triageTaxonomyMode,
   };
   if (flags.triageQuery) repoOverrides.query = flags.triageQuery;
-  return DEFAULT_TRIAGE_CONFIG.repos.map((repo) => ({ ...repo, ...repoOverrides }));
+  const baseRepos = flags.triageRepos.length > 0
+    ? flags.triageRepos.map(parseRepoSpec)
+    : DEFAULT_TRIAGE_CONFIG.repos;
+  return baseRepos.map((repo) => ({ ...repo, ...repoOverrides }));
 }
 
 function currentGithubLogin() {
@@ -279,10 +296,18 @@ async function cmdTriage(flags) {
     printTriageUsage();
     return;
   }
+  let repos;
+  try {
+    repos = triageReposFromFlags(flags);
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
   const result = await runIssueTriage({
     mode: flags.triageMode,
     config: {
-      repos: triageReposFromFlags(flags),
+      repos,
       botLogin: flags.triageBotLogin || currentGithubLogin(),
     },
   });

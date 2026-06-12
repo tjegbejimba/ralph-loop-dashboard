@@ -56,6 +56,31 @@ function setupFixture() {
   return root;
 }
 
+// Minimal fake `gh` for triage tests: returns a login for `gh api user` and an
+// empty issue list for `gh issue list`, recording the --repo it was asked for.
+function writeTriageGh(root, { login = "tjegbejimba" } = {}) {
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const gh = join(bin, "gh");
+  writeFileSync(gh, `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+if (args[0] === "api" && args[1] === "user") {
+  process.stdout.write(${JSON.stringify(login)} + "\\n");
+} else if (args[0] === "issue" && args[1] === "list") {
+  const repoIdx = args.indexOf("--repo");
+  const repo = repoIdx >= 0 ? args[repoIdx + 1] : "?";
+  if (process.env.GH_REPO_LOG) fs.appendFileSync(process.env.GH_REPO_LOG, repo + "\\n");
+  process.stdout.write("[]");
+} else {
+  process.stderr.write("unexpected gh args: " + JSON.stringify(args));
+  process.exit(1);
+}
+`);
+  chmodSync(gh, 0o755);
+  return bin;
+}
+
 test("cli.mjs status — runs against fixture without gh", () => {
   const root = setupFixture();
   try {
@@ -96,7 +121,125 @@ test("cli.mjs triage --help — documents advisory dry-run/live mode", () => {
   assert.match(r.stdout, /triage \[--dry-run\|--live\]/);
   assert.match(r.stdout, /comment-only advisory issue triage/i);
   assert.match(r.stdout, /No labels, closure, or Ralph enqueue/i);
-  assert.doesNotMatch(r.stdout, /--repo/);
+  assert.match(r.stdout, /--repo/);
+});
+
+test("cli.mjs triage --repo — targets the given repo instead of the default", () => {
+  const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-repo-"));
+  const bin = writeTriageGh(root);
+  try {
+    const r = spawnSync("node", [CLI, "triage", "--dry-run", "--json", "--repo", "octocat/hello-world"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.repos.length, 1);
+    assert.equal(result.repos[0].repo, "octocat/hello-world");
+    assert.equal(result.repos[0].query, "label:needs-triage");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs triage — multiple --repo flags produce multiple repo configs", () => {
+  const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-multi-"));
+  const bin = writeTriageGh(root);
+  try {
+    const r = spawnSync("node", [
+      CLI, "triage", "--dry-run", "--json",
+      "--repo", "octocat/hello-world",
+      "--repo", "tjegbejimba/kindleflow",
+    ], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.repos.length, 2);
+    assert.deepEqual(
+      result.repos.map((entry) => entry.repo),
+      ["octocat/hello-world", "tjegbejimba/kindleflow"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs triage — no --repo keeps the default repo unchanged", () => {
+  const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-default-"));
+  const bin = writeTriageGh(root);
+  try {
+    const r = spawnSync("node", [CLI, "triage", "--dry-run", "--json"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.repos.length, 1);
+    assert.equal(result.repos[0].repo, "tjegbejimba/ralph-loop-dashboard");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs triage --repo — composes with --query and --canonical-labels", () => {
+  const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-compose-"));
+  const bin = writeTriageGh(root);
+  try {
+    const custom = spawnSync("node", [
+      CLI, "triage", "--dry-run", "--json",
+      "--repo", "octocat/hello-world",
+      "--query", "label:custom-triage",
+    ], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(custom.status, 0, `stderr: ${custom.stderr}`);
+    const customResult = JSON.parse(custom.stdout);
+    assert.equal(customResult.repos[0].repo, "octocat/hello-world");
+    assert.equal(customResult.repos[0].query, "label:custom-triage");
+
+    const canonical = spawnSync("node", [
+      CLI, "triage", "--dry-run", "--json",
+      "--repo", "octocat/hello-world",
+      "--canonical-labels",
+    ], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(canonical.status, 0, `stderr: ${canonical.stderr}`);
+    const canonicalResult = JSON.parse(canonical.stdout);
+    assert.equal(canonicalResult.repos[0].repo, "octocat/hello-world");
+    assert.equal(canonicalResult.repos[0].query, "label:ralph:needs-triage");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs triage --repo — errors clearly on a malformed value", () => {
+  const malformed = ["not-a-valid-repo", "-owner/name", "owner/-repo", "a$b/c", "a/b/c"];
+  for (const value of malformed) {
+    const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-bad-"));
+    const bin = writeTriageGh(root);
+    try {
+      const r = spawnSync("node", [CLI, "triage", "--dry-run", "--json", "--repo", value], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(r.status, 2, `value ${JSON.stringify(value)} — stdout: ${r.stdout} stderr: ${r.stderr}`);
+      assert.match(r.stderr, /Invalid --repo/);
+      assert.match(r.stderr, /owner\/name/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
 });
 
 test("cli.mjs triage — treats authenticated gh user as the comment owner", () => {
