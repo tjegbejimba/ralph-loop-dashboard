@@ -168,9 +168,15 @@ Ralph, creates PRDs/slices, or launches workers.
 See [ADR 0003](docs/adr/0003-cli-first-hybrid-issue-triage.md) for the full
 ownership boundary.
 
+### Using ralph-issue-triage-agent
+
+Ralph also ships `ralph-issue-triage-agent` for dry-run-only issue triage. It consumes frozen GitHub issue evidence snapshots and produces URL/snapshot-first advisory `Recommendation`, `Confidence`, `Priority`, and `Automation safety` item cards for manual review or later CLI-vs-agent comparisons.
+
+The skill is intentionally non-mutating and does not discover live queues by itself: it must not comment on issues, edit labels, create PRDs/slices, invoke `to-ralph`, or enqueue Ralph workers.
+
 ### Installing skills
 
-`install.sh` symlinks the `to-ralph` skill (and any future skills in `skills/`) into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
+`install.sh` symlinks bundled skills from `skills/` into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
 
 ```bash
 ./install.sh /path/to/your/project      # installs scripts + extension + skills

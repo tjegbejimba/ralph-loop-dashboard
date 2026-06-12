@@ -1,0 +1,99 @@
+{
+  "skill_name": "ralph-issue-triage-agent",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use the ralph-issue-triage-agent skill on this frozen issue snapshot and produce the advisory dry-run output only. Snapshot: issue URL https://github.com/example/project/issues/42; state open; labels [bug, ralph:needs-triage]; assignees []; title 'Dashboard crashes when queue is empty'; body quote: 'Opening the dashboard with no queued slices throws TypeError: cannot read property map of undefined'; opened by @contributor on 2026-05-01; comment @tj, 2026-05-02: 'Good catch. This blocks first-run onboarding; worth fixing, but please make sure the empty queue state has a regression test.'; linked PR URL https://github.com/example/project/pull/43; repo context file preloaded docs/dashboard.md says 'The queue panel should render an empty state when no items exist.'",
+      "expected_output": "A URL-first cited advisory triage item card with Recommendation Pursue or Refine, Priority P1 or P2, Automation safety needs prep or safe after prep, no mutation commands, and a preflight item for regression proof if needed.",
+      "files": [],
+      "expectations": [
+        "The first surfaced item line starts with the canonical issue URL or a Frozen ref containing https://github.com/example/project/issues/42, and the linked PR is cited by URL when discussed.",
+        "The top section uses the exact required field names and enum values.",
+        "The reasoning includes Fit/Risk/Proof/Blocker/Next and a Ralph triage lane such as Immediate / worth shaping.",
+        "Every factual Why bullet cites the frozen issue body, TJ comment, label list, linked PR URL, or docs/dashboard.md.",
+        "The TJ comment is treated as authoritative for value and regression-test preflight guidance.",
+        "Optional trust is N/A because TJ/owner evidence is present or, if mentioned, is factual and weaker than the TJ comment.",
+        "The output does not include gh issue, GraphQL, to-prd, to-issues, to-ralph, or Ralph enqueue commands."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use the ralph-issue-triage-agent skill to triage this frozen snapshot. Snapshot: issue URL https://github.com/example/project/issues/77; state open; labels [enhancement]; title 'Maybe rewrite the worker in Rust'; body quote: 'Rust could make the worker faster. I do not have benchmarks yet.'; opened by @new-user on 2026-04-20; comment @maintainer, 2026-04-21: 'No evidence this is a bottleneck. Please bring profiling data before we consider it.'; no linked PRs; no assignees; repo docs preloaded README.md says 'Worker reliability matters more than raw speed.'",
+      "expected_output": "A conservative URL-first dry-run triage report that does not over-prioritize speculative work, likely Needs info or Defer, with owner signal cited as authoritative.",
+      "files": [],
+      "expectations": [
+        "The first surfaced item line starts with the canonical issue URL or a Frozen ref containing https://github.com/example/project/issues/77.",
+        "The recommendation is conservative and does not imply readiness for Ralph.",
+        "The maintainer comment is cited in TJ/owner signal and treated as stronger than the opener's speculation.",
+        "Optional trust, if present for @new-user, is factual and weak rather than proof.",
+        "Fit/Risk/Proof/Blocker/Next explains the speculative rewrite risk and missing profiling proof.",
+        "No exact apply commands or GitHub mutation instructions are present."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Use the ralph-issue-triage-agent stability protocol on these three frozen agent outputs for the same issue. Run 1 top fields: Recommendation Pursue, Confidence medium, Priority P2, Automation safety needs prep. Run 2 top fields: Recommendation Refine, Confidence medium, Priority P2, Automation safety needs prep. Run 3 top fields: Recommendation Pursue, Confidence low, Priority P3, Automation safety hitl-required. Shared evidence: issue body quote 'Need a clearer deploy story'; comment @tj, 2026-05-04: 'This is real but under-specified.'; labels [needs-design]. Produce the aggregate advisory output and appendix only; do not mutate anything.",
+      "expected_output": "A deterministic stability aggregate that preserves the shared worth-shaping path instead of forcing Uncertain for adjacent Pursue/Refine, confidence, priority, or safety differences; likely Refine because TJ says the issue is real but under-specified.",
+      "files": [],
+      "expectations": [
+        "The output identifies top-line flips across Recommendation, Priority, Automation safety, or Confidence and marks which deltas are material.",
+        "The aggregate/default recommendation is not forced to Uncertain solely because Pursue and Refine differ or confidence wording/level differs.",
+        "The aggregate/default recommendation preserves a useful worth-shaping path, preferably Refine because the TJ comment says the work is real but under-specified.",
+        "The priority and automation-safety tie-breaks are deterministic, such as majority or less-urgent/safer-with-concrete-blocker rules.",
+        "The appendix includes all three run top-field sets."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Use the ralph-issue-triage-agent skill on this request: 'Please triage https://github.com/example/project/issues/108.' No frozen issue body, labels, comments, dates, assignees, linked PR evidence, or local snapshot artifact is provided. Produce the dry-run response only.",
+      "expected_output": "A refusal to invent live evidence and a request for a frozen snapshot/evidence bundle, without browsing broadly or mutating GitHub.",
+      "files": [],
+      "expectations": [
+        "The output explains that a frozen snapshot/evidence bundle is required for this triage run.",
+        "The output does not infer Recommendation/Priority from the URL alone.",
+        "The output does not perform live issue reads, live queue discovery, broad browsing, or current-repo expansion from the URL alone.",
+        "No GitHub write commands, issue comments, PRD/slice creation, or Ralph enqueue actions are present."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Use the ralph-issue-triage-agent skill on this frozen issue snapshot. Snapshot: issue URL https://github.com/example/project/issues/12; state open; labels [bug, duplicate]; title 'Queue worker fails after restart'; body quote: 'Same symptom as #9 after restart'; comment @tj, 2026-05-03: 'Duplicate of #9; closing this one once the tracker is cleaned up.'; linked issue URL https://github.com/example/project/issues/9; no linked PRs; assignees []; opened by @contributor on 2026-05-02. Produce advisory dry-run output only.",
+      "expected_output": "A URL-first Close recommendation with cited explicit duplicate evidence, no exact mutation/apply commands, and a human next action rather than an automated close.",
+      "files": [],
+      "expectations": [
+        "The first surfaced item line starts with the canonical issue URL or a Frozen ref containing https://github.com/example/project/issues/12.",
+        "The recommendation is Close only because explicit duplicate evidence is cited.",
+        "The TJ comment and duplicate label/body evidence are cited in Why or TJ/owner signal.",
+        "The Triage lane is Defer/close/supersede.",
+        "The next action is a human-action sentence and does not include a close/edit command."
+      ]
+    },
+    {
+      "id": 6,
+      "prompt": "Use the ralph-issue-triage-agent skill on this frozen snapshot batch and produce advisory dry-run output only. Snapshot A: issue URL https://github.com/example/project/issues/201; state open; labels [enhancement, work:standalone]; title 'Add a CLI flag to print queue JSON'; body quote: 'The dashboard needs a stable JSON source for queue cards'; opened by @helper on 2026-05-05; no TJ comments; author activity supplied: '@helper acct 2021-04-03; repo 2 PRs/1 issue in 12mo; signal known contributor'; no linked PRs. Snapshot B: issue URL https://github.com/example/project/issues/202; state open; labels [ralph:needs-triage, priority:P1]; title 'Launch workers from triage output'; body quote: 'It would be convenient if the triage agent started Ralph workers automatically'; comment @tj, 2026-05-06: 'No, this experiment must stay dry-run only.'; no linked PRs. Do not read live queues or mutate anything.",
+      "expected_output": "A batch triage response grouped into Ralph lanes where every item card starts URL/snapshot-first, trust appears only as a weak signal for the non-maintainer item, and PRD #86 labels remain advisory taxonomy rather than mutation commands.",
+      "files": [],
+      "expectations": [
+        "Each surfaced item card starts with its canonical issue URL or Frozen ref, not only #201 or #202.",
+        "The output stays within Snapshot A and Snapshot B and does not broaden into live queue discovery.",
+        "The author trust line for @helper is factual and weak, and it is not used as proof of correctness.",
+        "The TJ comment on issue 202 is authoritative over labels like ralph:needs-triage and priority:P1.",
+        "Labels ralph:needs-triage, priority:P1, and work:standalone are treated as advisory taxonomy/preflight classifications only.",
+        "No to-prd, to-issues, to-ralph, enqueue, worker launch, or GitHub mutation commands are present."
+      ]
+    },
+    {
+      "id": 7,
+      "prompt": "Use the ralph-issue-triage-agent stability protocol on these three frozen outputs for the same issue. Run 1 top fields: Recommendation Close, Confidence medium, Priority P3, Automation safety needs prep. Run 2 top fields: Recommendation Pursue, Confidence medium, Priority P1, Automation safety needs prep. Run 3 top fields: Recommendation Refine, Confidence medium, Priority P2, Automation safety needs prep. Shared evidence: issue URL https://github.com/example/project/issues/303; body quote 'The old queue UI might already be replaced'; comments include @contributor: 'I think this is obsolete' and @tj: 'Not sure; the new UI still needs parity proof before we close anything.' Produce the aggregate advisory output and appendix only; do not mutate anything.",
+      "expected_output": "A stability aggregate that treats Close-vs-worth-shaping as a material path conflict, respects TJ's uncertainty about closure, and avoids closing without explicit duplicate/obsolete proof.",
+      "files": [],
+      "expectations": [
+        "The output identifies Close versus Pursue/Refine as a material recommendation-path conflict.",
+        "The aggregate/default recommendation is not Close because closure lacks explicit owner-confirmed obsolete/duplicate proof.",
+        "The TJ comment is authoritative over the contributor's ordinary obsolete speculation.",
+        "The output uses Uncertain or Needs info only with a specific parity-proof blocker, not because of superficial wording differences.",
+        "The appendix includes all three run top-field sets and explains the deterministic tie-break."
+      ]
+    }
+  ]
+}

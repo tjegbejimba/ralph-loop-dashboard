@@ -35,7 +35,7 @@ make_fake_home_no_skills() {
   echo "$h"
 }
 
-skill_link() { echo "$1/.agents/skills/to-ralph"; }
+skill_link() { echo "$1/.agents/skills/${2:-to-ralph}"; }
 
 # ---------------------------------------------------------------------------
 # Test 1 (tracer bullet): SKILL.md file exists with required frontmatter
@@ -76,6 +76,32 @@ else
   fail "SKILL.md must explicitly forbid running launch.sh without --status/--enqueue"
 fi
 
+triage_skill_file="$REPO_ROOT/skills/ralph-issue-triage-agent/SKILL.md"
+
+if [[ ! -f "$triage_skill_file" ]]; then
+  fail "skills/ralph-issue-triage-agent/SKILL.md does not exist"
+else
+  pass "skills/ralph-issue-triage-agent/SKILL.md exists"
+fi
+
+if grep -q '^name: ralph-issue-triage-agent' "$triage_skill_file" 2>/dev/null; then
+  pass "triage SKILL.md has expected name frontmatter"
+else
+  fail "triage SKILL.md missing expected name frontmatter"
+fi
+
+for triage_keyword in \
+  "Recommendation: Pursue / Refine / Needs info / Defer / Close / Uncertain" \
+  "Automation safety: safe after prep / needs prep / hitl-required" \
+  "zero mutations" \
+  "Every factual or evidence claim must cite"; do
+  if grep -q "$triage_keyword" "$triage_skill_file" 2>/dev/null; then
+    pass "triage SKILL.md mentions '$triage_keyword'"
+  else
+    fail "triage SKILL.md missing content for '$triage_keyword'"
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # Test 2: --skills-only creates symlink in ~/.agents/skills/to-ralph
 # ---------------------------------------------------------------------------
@@ -97,6 +123,13 @@ else
   fail "--skills-only should create a symlink at $link"
 fi
 
+triage_link="$(skill_link "$TEST_HOME" "ralph-issue-triage-agent")"
+if [[ -L "$triage_link" ]]; then
+  pass "--skills-only creates symlink at ~/.agents/skills/ralph-issue-triage-agent"
+else
+  fail "--skills-only should create a symlink at $triage_link"
+fi
+
 # Symlink must point to the correct source
 expected_target="$REPO_ROOT/skills/to-ralph"
 actual_target="$(readlink "$link")"
@@ -104,6 +137,14 @@ if [[ "$actual_target" == "$expected_target" ]]; then
   pass "symlink points to correct source: $expected_target"
 else
   fail "symlink points to '$actual_target', expected '$expected_target'"
+fi
+
+expected_triage_target="$REPO_ROOT/skills/ralph-issue-triage-agent"
+actual_triage_target="$(readlink "$triage_link")"
+if [[ "$actual_triage_target" == "$expected_triage_target" ]]; then
+  pass "triage symlink points to correct source: $expected_triage_target"
+else
+  fail "triage symlink points to '$actual_triage_target', expected '$expected_triage_target'"
 fi
 
 # ---------------------------------------------------------------------------
@@ -123,6 +164,13 @@ if [[ "$link_after" == "$expected_target" ]]; then
   pass "symlink still points to correct source after re-run"
 else
   fail "symlink target changed after re-run: $link_after"
+fi
+
+triage_link_after="$(readlink "$(skill_link "$TEST_HOME" "ralph-issue-triage-agent")")"
+if [[ "$triage_link_after" == "$expected_triage_target" ]]; then
+  pass "triage symlink still points to correct source after re-run"
+else
+  fail "triage symlink target changed after re-run: $triage_link_after"
 fi
 
 # ---------------------------------------------------------------------------
@@ -149,6 +197,12 @@ if [[ ! -e "$NO_SKILLS_HOME/.agents/skills/to-ralph" ]]; then
   pass "no symlink created when ~/.agents/skills/ missing"
 else
   fail "should not create symlink when ~/.agents/skills/ doesn't exist"
+fi
+
+if [[ ! -e "$NO_SKILLS_HOME/.agents/skills/ralph-issue-triage-agent" ]]; then
+  pass "no triage symlink created when ~/.agents/skills/ missing"
+else
+  fail "should not create triage symlink when ~/.agents/skills/ doesn't exist"
 fi
 
 # ---------------------------------------------------------------------------
@@ -204,6 +258,13 @@ if [[ -L "$both_link" ]]; then
   pass "--both mode creates skills symlink"
 else
   fail "--both mode should create skills symlink at $both_link"
+fi
+
+both_triage_link="$(skill_link "$BOTH_HOME" "ralph-issue-triage-agent")"
+if [[ -L "$both_triage_link" ]]; then
+  pass "--both mode creates triage skill symlink"
+else
+  fail "--both mode should create triage skill symlink at $both_triage_link"
 fi
 
 # ---------------------------------------------------------------------------
