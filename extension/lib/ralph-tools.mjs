@@ -14,6 +14,11 @@ export function createRalphOrchestrationTool({ orchestrateRun }) {
     parameters: {
       type: "object",
       properties: {
+        repoRoot: {
+          type: "string",
+          description:
+            "Optional absolute local path to the checkout to orchestrate. Defaults to the extension's resolved repo root. A non-default path must be listed in orchestrateAllowedRepoRoots in the Ralph dashboard user config, must exist, and must contain a .ralph/ directory.",
+        },
         issueNumbers: {
           type: "array",
           description:

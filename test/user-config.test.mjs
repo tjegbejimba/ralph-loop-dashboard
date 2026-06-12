@@ -63,6 +63,108 @@ test("loadUserConfig — loads valid config from file", () => {
   }
 });
 
+test("loadUserConfig — orchestrateAllowedRepoRoots defaults to empty array", () => {
+  const tempDir = makeTempDir();
+
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+
+    assert.deepEqual(result.config.orchestrateAllowedRepoRoots, []);
+    assert.deepEqual(result.warnings, []);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig — loads valid orchestrateAllowedRepoRoots", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      orchestrateAllowedRepoRoots: ["/home/user/alisterr", "/home/user/kindleflow"],
+    }),
+    "utf8",
+  );
+
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+
+    assert.deepEqual(result.config.orchestrateAllowedRepoRoots, [
+      "/home/user/alisterr",
+      "/home/user/kindleflow",
+    ]);
+    assert.deepEqual(result.warnings, []);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig — non-array orchestrateAllowedRepoRoots falls back to [] with warning", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+
+  writeFileSync(
+    configPath,
+    JSON.stringify({ orchestrateAllowedRepoRoots: "/not/an/array" }),
+    "utf8",
+  );
+
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+
+    assert.deepEqual(result.config.orchestrateAllowedRepoRoots, []);
+    assert.equal(result.warnings.length, 1);
+    assert.ok(result.warnings[0].message.includes("must be an array"));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("loadUserConfig — filters out non-string orchestrateAllowedRepoRoots items", () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      orchestrateAllowedRepoRoots: ["/valid/path", 123, null, { x: 1 }, "/another/path"],
+    }),
+    "utf8",
+  );
+
+  try {
+    const result = loadUserConfig({ configDir: tempDir });
+
+    assert.deepEqual(result.config.orchestrateAllowedRepoRoots, [
+      "/valid/path",
+      "/another/path",
+    ]);
+    assert.ok(result.warnings.length >= 3);
+    assert.ok(result.warnings.some((w) => w.message.includes("must be string")));
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("saveUserConfig — persists orchestrateAllowedRepoRoots", async () => {
+  const tempDir = makeTempDir();
+  const configPath = join(tempDir, "config.json");
+
+  try {
+    await saveUserConfig(
+      { orchestrateAllowedRepoRoots: ["/home/user/alisterr"] },
+      { configDir: tempDir },
+    );
+
+    const saved = JSON.parse(readFileSync(configPath, "utf8"));
+    assert.deepEqual(saved.orchestrateAllowedRepoRoots, ["/home/user/alisterr"]);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("loadUserConfig — allowAgentLaunch defaults false and can be enabled", () => {
   const tempDir = makeTempDir();
   const configPath = join(tempDir, "config.json");
