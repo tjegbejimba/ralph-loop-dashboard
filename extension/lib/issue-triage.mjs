@@ -326,9 +326,11 @@ function humanComments(comments, botLogin) {
 }
 
 function humanRepliedAfterBot(comments, botComment, botLogin) {
-  if (!botComment?.createdAt) return false;
-  const botTime = Date.parse(botComment.createdAt);
-  if (!Number.isFinite(botTime)) return false;
+  const botTimes = [botComment?.createdAt, botComment?.updatedAt]
+    .map((timestamp) => Date.parse(timestamp || ""))
+    .filter(Number.isFinite);
+  if (botTimes.length === 0) return false;
+  const botTime = Math.max(...botTimes);
   return (Array.isArray(comments) ? comments : []).some((comment) => {
     if (authorLogin(comment) === botLogin) return false;
     const time = Date.parse(comment.createdAt || "");

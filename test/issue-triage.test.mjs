@@ -199,6 +199,69 @@ describe("issue triage advisory automation", () => {
     assert.equal(humanReplyPlan.reason, "human_reply_after_bot");
   });
 
+  it("uses the bot comment update timestamp as the human-reply cutoff", () => {
+    const issue = {
+      number: 208,
+      title: "Make queued worker retries safer",
+      body: "Ralph should avoid wasting quota on doomed retries.\n\nAcceptance criteria:\n- explain retry safety\n- include a regression test",
+      labels: ["needs-triage"],
+    };
+    const botLogin = "ralph-triage[bot]";
+    const createPlan = planTriageComment({
+      issue,
+      comments: [],
+      botLogin,
+    });
+    const originalBotComment = {
+      id: 20,
+      author: { login: botLogin },
+      body: createPlan.commentBody,
+      createdAt: "2026-06-11T10:00:00Z",
+      updatedAt: "2026-06-11T10:00:00Z",
+    };
+    const humanReplyBeforeRefresh = {
+      id: 21,
+      author: { login: "tjegbejimba" },
+      body: "This mostly matters when quota gets wasted on retries.",
+      createdAt: "2026-06-11T10:05:00Z",
+    };
+
+    const refreshPlan = planTriageComment({
+      issue,
+      comments: [originalBotComment, humanReplyBeforeRefresh],
+      botLogin,
+    });
+    assert.equal(refreshPlan.action, "update");
+    assert.equal(refreshPlan.reason, "human_reply_after_bot");
+
+    const refreshedBotComment = {
+      ...originalBotComment,
+      body: refreshPlan.commentBody,
+      updatedAt: "2026-06-11T10:10:00Z",
+    };
+    const unchangedAfterRefreshPlan = planTriageComment({
+      issue,
+      comments: [refreshedBotComment, humanReplyBeforeRefresh],
+      botLogin,
+    });
+    assert.equal(unchangedAfterRefreshPlan.action, "skip");
+    assert.equal(unchangedAfterRefreshPlan.reason, "unchanged");
+
+    const humanReplyAfterRefresh = {
+      id: 22,
+      author: { login: "tjegbejimba" },
+      body: "Also include the retry count in the explanation.",
+      createdAt: "2026-06-11T10:15:00Z",
+    };
+    const newReplyPlan = planTriageComment({
+      issue,
+      comments: [refreshedBotComment, humanReplyBeforeRefresh, humanReplyAfterRefresh],
+      botLogin,
+    });
+    assert.equal(newReplyPlan.action, "update");
+    assert.equal(newReplyPlan.reason, "human_reply_after_bot");
+  });
+
   it("runs dry-run calibration against configured repos without posting comments", async () => {
     const posted = [];
     const issues = Array.from({ length: 25 }, (_, index) => {
