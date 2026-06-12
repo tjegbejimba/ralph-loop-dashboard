@@ -17,7 +17,12 @@ node extension/cli.mjs triage --dry-run --json [--canonical-labels] [--query "<s
   the orchestrator's to call — the deterministic writer/scheduled path owns that.
 - **Default scope:** repo `tjegbejimba/ralph-loop-dashboard`, query
   `label:needs-triage`. `--canonical-labels` switches the query to
-  `label:ralph:needs-triage`; `--query` overrides it entirely.
+  `label:ralph:needs-triage`; `--query` overrides it entirely. There is **no `--repo`
+  flag** — triage always targets this configured default repo (#95). In
+  `repo-maintain` (a per-repo session), triage classification is therefore only
+  available for the default repo; for any other allowlist repo, rely on `gh issue
+  list` ready-work discovery (which does target the session's own repo) and treat
+  cross-repo triage as a prerequisite.
 - Deterministic, idempotent, auditable. Same input → same output.
 
 ### Output shape (consume only these fields)
@@ -64,13 +69,15 @@ one short cited span.
 ## Ready-work vs needs-triage
 
 `triage --json` classifies the **needs-triage backlog** (advisory). It does **not**
-discover runnable work. For `repo-maintain`, *ready-work discovery* uses each repo's
-configured canonical search, read from `.ralph/config.json` `issue.issueSearch`
+discover runnable work. For `repo-maintain` (a per-repo session), *ready-work
+discovery* uses the session repo's configured canonical search, read from
+`.ralph/config.json` `issue.issueSearch`
 (default: `is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)`),
-run read-only (`gh issue list --search "<issueSearch>" --json number,title,labels,url`).
-The orchestrator **never rewrites** `issue.issueSearch`. Triage classification then
-informs confidence/escalation, but only `ralph:ready` + passing preflight issues
-enter the queue.
+run read-only (`gh issue list --search "<issueSearch>" --json number,title,labels,url`,
+which defaults to the session's repo). The orchestrator **never rewrites**
+`issue.issueSearch`. Triage classification (default repo only, per the no-`--repo`
+note above) then informs confidence/escalation, but only `ralph:ready` + passing
+preflight issues enter the queue.
 
 ## When to escalate to the advisory agent
 

@@ -14,7 +14,7 @@ claim, implement, review, or merge — that is the worker's job.
 ```
 grill-me → to-prd → ralph-orchestrator (prd-run) → Ralph workers
                     └ uses to-issues to author slices, then enqueues + launches
-repo-maintain (hourly schedule) → ralph-orchestrator → Ralph workers
+repo-maintain (hourly schedule, per allowlist repo session) → ralph-orchestrator → Ralph workers
 ```
 
 ## Mode detection
@@ -26,7 +26,9 @@ once.
   operator says "run/orchestrate this PRD through Ralph"). → load
   [`modes/prd-run.md`](modes/prd-run.md).
 - **`repo-maintain`** — entry is an hourly Copilot scheduled-workflow tick with no
-  PRD (TJ's "Ready agent automation" sweep). → load
+  PRD (TJ's "Ready agent automation" sweep). Runs **inside one allowlist repo's own
+  session** (`REPO_ROOT` is that repo); the allowlist / round-robin / per-tick cap
+  belong to the fan-out automation, not a single session reaching across repos. → load
   [`modes/repo-maintain.md`](modes/repo-maintain.md).
 
 If the trigger is genuinely ambiguous (e.g. a bare "run Ralph" with no PRD and no
