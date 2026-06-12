@@ -361,16 +361,25 @@ export async function orchestrateRun(options = {}) {
 
   const repoRootResult = resolveOrchestrateRepoRoot({
     requested: options.repoRoot,
-    defaultRepoRoot: options.defaultRepoRoot ?? options.repoRoot,
+    defaultRepoRoot: options.defaultRepoRoot,
     userConfig: options.userConfig,
   });
   if (!repoRootResult.ok) {
     return { ok: false, error: repoRootResult.error };
   }
 
+  // Process detection (running-guard + startup confirmation) must be scoped to
+  // the resolved target repo, not the extension's default repo. Prefer a
+  // target-scoped factory; fall back to a directly provided getLoopProcess.
+  const getLoopProcess =
+    typeof options.getLoopProcessForRepo === "function"
+      ? options.getLoopProcessForRepo(repoRootResult.repoRoot)
+      : options.getLoopProcess;
+
   const launch = await startRalphLoop({
     ...options,
     repoRoot: repoRootResult.repoRoot,
+    getLoopProcess,
     runOptions: {
       runMode: "until-empty",
       ...(options.runOptions || {}),

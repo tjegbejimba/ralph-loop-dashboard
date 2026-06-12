@@ -50,6 +50,7 @@ test("orchestrateRun defaults agent launches to until-empty", async () => {
 
   const result = await orchestrateRun({
     repoRoot: "/repo",
+    defaultRepoRoot: "/repo",
     queue,
     userConfig: { allowAgentLaunch: true },
     verify: false,
@@ -98,6 +99,7 @@ test("orchestrateRun verification reports merged, failed, and skipped distinctly
 
     const result = await orchestrateRun({
       repoRoot: tmpRepo,
+      defaultRepoRoot: tmpRepo,
       queue: mixedQueue,
       runOptions,
       userConfig: { allowAgentLaunch: true },
@@ -154,6 +156,7 @@ test("orchestrateRun verification times out with nonterminal and dead-worker bre
 
     const result = await orchestrateRun({
       repoRoot: tmpRepo,
+      defaultRepoRoot: tmpRepo,
       queue: timeoutQueue,
       runOptions,
       userConfig: { allowAgentLaunch: true },
@@ -326,7 +329,7 @@ test("orchestrateRun is backward compatible when no repoRoot override is provide
   let createdRepoRoot;
 
   const result = await orchestrateRun({
-    repoRoot: "/repo",
+    defaultRepoRoot: "/repo",
     queue,
     runOptions,
     userConfig: { allowAgentLaunch: true },
@@ -342,4 +345,99 @@ test("orchestrateRun is backward compatible when no repoRoot override is provide
 
   assert.equal(result.ok, true);
   assert.equal(createdRepoRoot, "/repo");
+});
+
+test("orchestrateRun does not authorize an arbitrary repoRoot when defaultRepoRoot is omitted", async () => {
+  let launched = false;
+
+  const result = await orchestrateRun({
+    repoRoot: "/home/user/anything",
+    queue,
+    runOptions,
+    userConfig: { allowAgentLaunch: true, orchestrateAllowedRepoRoots: [] },
+    verify: false,
+    getLoopProcess: async () => [],
+    runPreflight: async () => ({ passed: true, checks: [] }),
+    createRun: () => ({ runId: "run-1", runDir: "/x/.ralph/runs/run-1" }),
+    launchLoop: async () => {
+      launched = true;
+      return { success: true, pid: 1234 };
+    },
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /defaultRepoRoot is required/);
+  assert.equal(launched, false);
+});
+
+test("orchestrateRun scopes the running-guard to the target repo (default-repo loop does not block an override launch)", async () => {
+  const tmpRepo = makeRalphRepo();
+  try {
+    const scopeCalls = [];
+    let launched = false;
+
+    const result = await orchestrateRun({
+      repoRoot: tmpRepo,
+      defaultRepoRoot: "/repo",
+      queue,
+      runOptions,
+      userConfig: { allowAgentLaunch: true, orchestrateAllowedRepoRoots: [tmpRepo] },
+      verify: false,
+      // Factory returns a running loop for the DEFAULT repo but an idle target.
+      getLoopProcessForRepo: (repoRoot) => {
+        scopeCalls.push(repoRoot);
+        if (repoRoot === "/repo") {
+          return async () => [{ pid: 99, cmd: "bash /repo/.ralph/ralph.sh" }];
+        }
+        return async () => [];
+      },
+      runPreflight: async () => ({ passed: true, checks: [] }),
+      createRun: () => ({ runId: "run-1", runDir: join(tmpRepo, ".ralph", "runs", "run-1") }),
+      launchLoop: async () => {
+        launched = true;
+        return { success: true, pid: 1234 };
+      },
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(launched, true);
+    // The factory was consulted with the resolved target repo, not the default.
+    assert.ok(scopeCalls.includes(tmpRepo));
+    assert.ok(!scopeCalls.includes("/repo"));
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("orchestrateRun detects an existing run in the override target repo and refuses to launch", async () => {
+  const tmpRepo = makeRalphRepo();
+  try {
+    let launched = false;
+
+    const result = await orchestrateRun({
+      repoRoot: tmpRepo,
+      defaultRepoRoot: "/repo",
+      queue,
+      runOptions,
+      userConfig: { allowAgentLaunch: true, orchestrateAllowedRepoRoots: [tmpRepo] },
+      verify: false,
+      // The target repo already has a running loop.
+      getLoopProcessForRepo: (repoRoot) =>
+        repoRoot === tmpRepo
+          ? async () => [{ pid: 4321, cmd: `bash ${join(tmpRepo, ".ralph", "ralph.sh")}` }]
+          : async () => [],
+      runPreflight: async () => ({ passed: true, checks: [] }),
+      createRun: () => ({ runId: "run-1", runDir: join(tmpRepo, ".ralph", "runs", "run-1") }),
+      launchLoop: async () => {
+        launched = true;
+        return { success: true, pid: 1234 };
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /already running/i);
+    assert.equal(launched, false);
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
 });
