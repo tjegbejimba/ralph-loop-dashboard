@@ -239,7 +239,8 @@ async function cmdFollow(reader, flags) {
 
 function parseRepoSpec(value) {
   const trimmed = typeof value === "string" ? value.trim() : "";
-  const match = /^([^/\s]+)\/([^/\s]+)$/.exec(trimmed);
+  const segment = "[A-Za-z0-9._][A-Za-z0-9._-]*";
+  const match = new RegExp(`^(${segment})\\/(${segment})$`).exec(trimmed);
   if (!match) {
     throw new Error(`Invalid --repo value: ${JSON.stringify(value)}. Expected owner/name.`);
   }

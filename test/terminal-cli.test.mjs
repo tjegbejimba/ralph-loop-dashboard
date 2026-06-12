@@ -223,19 +223,22 @@ test("cli.mjs triage --repo — composes with --query and --canonical-labels", (
 });
 
 test("cli.mjs triage --repo — errors clearly on a malformed value", () => {
-  const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-bad-"));
-  const bin = writeTriageGh(root);
-  try {
-    const r = spawnSync("node", [CLI, "triage", "--dry-run", "--json", "--repo", "not-a-valid-repo"], {
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
-      encoding: "utf8",
-      timeout: 10_000,
-    });
-    assert.equal(r.status, 2, `stdout: ${r.stdout} stderr: ${r.stderr}`);
-    assert.match(r.stderr, /Invalid --repo/);
-    assert.match(r.stderr, /owner\/name/);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+  const malformed = ["not-a-valid-repo", "-owner/name", "owner/-repo", "a$b/c", "a/b/c"];
+  for (const value of malformed) {
+    const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-bad-"));
+    const bin = writeTriageGh(root);
+    try {
+      const r = spawnSync("node", [CLI, "triage", "--dry-run", "--json", "--repo", value], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(r.status, 2, `value ${JSON.stringify(value)} — stdout: ${r.stdout} stderr: ${r.stderr}`);
+      assert.match(r.stderr, /Invalid --repo/);
+      assert.match(r.stderr, /owner\/name/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 
