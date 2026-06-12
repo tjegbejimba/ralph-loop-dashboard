@@ -1,7 +1,7 @@
 // Safe Ralph loop startup orchestration shared by the dashboard UI and agent tool.
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { createRun as createRunImpl } from "./run-store.mjs";
 import { runPreflight as runPreflightImpl } from "./preflight.mjs";
 import { getRunOptions, validateModel, validateParallelism, validateRunMode } from "./run-options.mjs";
@@ -187,6 +187,82 @@ export async function verifyRunStatus({
   }
 }
 
+function isDirectory(path) {
+  try {
+    return existsSync(path) && statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve and authorize the orchestration target repo root.
+ *
+ * The default repo root (the extension's own REPO_ROOT) is always allowed. A
+ * non-default override is gated: it must appear in the user config allowlist
+ * (`orchestrateAllowedRepoRoots`, compared by resolved absolute path), and the
+ * resolved path must exist and contain a `.ralph/` directory. Fails closed.
+ *
+ * @param {Object} options
+ * @param {string} [options.requested] - Requested override (absolute local path)
+ * @param {string} options.defaultRepoRoot - The extension's own repo root (always allowed)
+ * @param {Object} [options.userConfig] - Loaded user config (for the allowlist)
+ * @returns {{ ok: true, repoRoot: string, overridden: boolean } | { ok: false, error: string }}
+ */
+export function resolveOrchestrateRepoRoot({ requested, defaultRepoRoot, userConfig } = {}) {
+  if (!defaultRepoRoot || typeof defaultRepoRoot !== "string") {
+    return { ok: false, error: "defaultRepoRoot is required to resolve the orchestration target." };
+  }
+  const resolvedDefault = resolve(defaultRepoRoot);
+
+  // No override → use the default repo root (always allowed, no extra checks).
+  if (requested === undefined || requested === null || requested === "") {
+    return { ok: true, repoRoot: resolvedDefault, overridden: false };
+  }
+  if (typeof requested !== "string") {
+    return { ok: false, error: "repoRoot must be an absolute path string." };
+  }
+
+  // Normalize to an absolute path so traversal (e.g. `..`) cannot disguise the target.
+  const resolvedRequested = resolve(requested);
+
+  // An override that resolves to the default is treated as the default.
+  if (resolvedRequested === resolvedDefault) {
+    return { ok: true, repoRoot: resolvedDefault, overridden: false };
+  }
+
+  const allowlist = Array.isArray(userConfig?.orchestrateAllowedRepoRoots)
+    ? userConfig.orchestrateAllowedRepoRoots
+    : [];
+  const allowedResolved = allowlist
+    .filter((entry) => typeof entry === "string" && entry.length > 0)
+    .map((entry) => resolve(entry));
+
+  if (!allowedResolved.includes(resolvedRequested)) {
+    return {
+      ok: false,
+      error:
+        `Refusing to orchestrate repoRoot '${resolvedRequested}': it is not listed in ` +
+        `orchestrateAllowedRepoRoots. Add its absolute path to ~/.ralph-dashboard/config.json to allow it.`,
+    };
+  }
+
+  if (!isDirectory(resolvedRequested)) {
+    return {
+      ok: false,
+      error: `Orchestration target does not exist or is not a directory: ${resolvedRequested}`,
+    };
+  }
+  if (!isDirectory(join(resolvedRequested, ".ralph"))) {
+    return {
+      ok: false,
+      error: `Orchestration target is missing a .ralph/ directory: ${resolvedRequested}`,
+    };
+  }
+
+  return { ok: true, repoRoot: resolvedRequested, overridden: true };
+}
+
 export async function startRalphLoop({
   repoRoot,
   queue,
@@ -283,8 +359,27 @@ export async function orchestrateRun(options = {}) {
     };
   }
 
+  const repoRootResult = resolveOrchestrateRepoRoot({
+    requested: options.repoRoot,
+    defaultRepoRoot: options.defaultRepoRoot,
+    userConfig: options.userConfig,
+  });
+  if (!repoRootResult.ok) {
+    return { ok: false, error: repoRootResult.error };
+  }
+
+  // Process detection (running-guard + startup confirmation) must be scoped to
+  // the resolved target repo, not the extension's default repo. Prefer a
+  // target-scoped factory; fall back to a directly provided getLoopProcess.
+  const getLoopProcess =
+    typeof options.getLoopProcessForRepo === "function"
+      ? options.getLoopProcessForRepo(repoRootResult.repoRoot)
+      : options.getLoopProcess;
+
   const launch = await startRalphLoop({
     ...options,
+    repoRoot: repoRootResult.repoRoot,
+    getLoopProcess,
     runOptions: {
       runMode: "until-empty",
       ...(options.runOptions || {}),

@@ -23,6 +23,33 @@ test("ralph orchestration tool calls the gated orchestrator and returns JSON for
   assert.deepEqual(parsed.received, { issueNumbers: [42], verify: true });
 });
 
+test("ralph orchestration tool exposes an optional repoRoot parameter", () => {
+  const tool = createRalphOrchestrationTool({ orchestrateRun: async () => ({ ok: true }) });
+
+  const repoRootParam = tool.parameters.properties.repoRoot;
+  assert.ok(repoRootParam, "repoRoot should be a declared parameter");
+  assert.equal(repoRootParam.type, "string");
+});
+
+test("ralph orchestration tool forwards repoRoot to the gated orchestrator", async () => {
+  let received;
+  const tool = createRalphOrchestrationTool({
+    orchestrateRun: async (args) => {
+      received = args;
+      return { ok: true, runId: "run-1", pid: 1234 };
+    },
+  });
+
+  const result = await tool.handler(
+    { issueNumbers: [7], repoRoot: "/home/user/alisterr" },
+    { toolName: tool.name },
+  );
+
+  assert.equal(result.resultType, "success");
+  assert.equal(received.repoRoot, "/home/user/alisterr");
+  assert.deepEqual(received.issueNumbers, [7]);
+});
+
 test("ralph orchestration tool reports launch failures as failed tool results", async () => {
   const tool = createRalphOrchestrationTool({
     orchestrateRun: async () => ({ ok: false, error: "Preflight failed." }),

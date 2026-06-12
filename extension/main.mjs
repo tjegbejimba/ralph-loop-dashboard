@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { joinSession } from "@github/copilot-sdk/extension";
 import { CopilotWebview } from "./lib/copilot-webview.js";
 import { resolveRepoState } from "./lib/repo-resolver.mjs";
@@ -39,6 +39,24 @@ const statusReader = createStatusReader({
   env: process.env,
 });
 const { getLoopProcess, ghJson } = statusReader;
+
+// Return a getLoopProcess scoped to a specific repo. Orchestration may target
+// an allowlisted repo other than REPO_ROOT, so the running-guard and startup
+// confirmation must inspect processes for the actual target — not the default
+// repo. Reuse the shared reader for REPO_ROOT; build a scoped one otherwise.
+const scopedLoopProcessReaders = new Map();
+function getLoopProcessForRepo(targetRepoRoot) {
+  if (!targetRepoRoot || resolve(targetRepoRoot) === resolve(REPO_ROOT)) {
+    return getLoopProcess;
+  }
+  const key = resolve(targetRepoRoot);
+  let reader = scopedLoopProcessReaders.get(key);
+  if (!reader) {
+    reader = createStatusReader({ repoRoot: key, env: process.env });
+    scopedLoopProcessReaders.set(key, reader);
+  }
+  return reader.getLoopProcess;
+}
 
 // Single-PR and single-issue lookups used by dashboard side panels. These
 // take a number argument so they don't belong in the status reader (which
@@ -94,17 +112,18 @@ async function startLoop({ queue, issueNumbers, runOptions } = {}) {
   });
 }
 
-async function orchestrateRun({ queue, issueNumbers, runOptions, verify, timeoutMinutes } = {}) {
+async function orchestrateRun({ queue, issueNumbers, runOptions, verify, timeoutMinutes, repoRoot } = {}) {
   const { config: userConfig } = loadUserConfig();
   return orchestrateRalphRun({
-    repoRoot: REPO_ROOT,
+    repoRoot,
+    defaultRepoRoot: REPO_ROOT,
     queue,
     issueNumbers,
     runOptions,
     verify,
     timeoutMinutes,
     userConfig,
-    getLoopProcess,
+    getLoopProcessForRepo,
   });
 }
 

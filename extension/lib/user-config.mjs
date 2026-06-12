@@ -11,6 +11,7 @@ const DEFAULTS = {
   defaultModel: null,
   defaultParallelism: null,
   allowAgentLaunch: false,
+  orchestrateAllowedRepoRoots: [],
   recentQueries: [],
 };
 
@@ -78,6 +79,28 @@ export function loadUserConfig({ configDir } = {}) {
             continue;
           }
           config[key] = value;
+        } else if (key === "orchestrateAllowedRepoRoots") {
+          if (!Array.isArray(value)) {
+            warnings.push({
+              field: key,
+              message: `Field 'orchestrateAllowedRepoRoots' must be an array, got ${typeof value}. Using default empty array.`,
+              value: "[redacted]",
+            });
+            continue; // Skip, use default
+          }
+          // Filter out non-string items (each entry must be an absolute path string)
+          const validRoots = value.filter((item) => {
+            if (typeof item !== "string") {
+              warnings.push({
+                field: key,
+                message: `Invalid orchestrateAllowedRepoRoots item (must be string): ${typeof item}`,
+                value: "[redacted]",
+              });
+              return false;
+            }
+            return true;
+          });
+          config[key] = validRoots;
         } else {
           config[key] = value;
         }
