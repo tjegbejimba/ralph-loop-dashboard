@@ -157,9 +157,9 @@ It will **never** start workers — that remains a human decision.
 
 ### Using ralph-issue-triage-agent
 
-Ralph also ships `ralph-issue-triage-agent` for dry-run-only issue triage. It consumes frozen GitHub issue evidence snapshots and produces advisory `Recommendation`, `Confidence`, `Priority`, and `Automation safety` opinions for manual review or later CLI-vs-agent comparisons.
+Ralph also ships `ralph-issue-triage-agent` for dry-run-only issue triage. It consumes frozen GitHub issue evidence snapshots and produces URL/snapshot-first advisory `Recommendation`, `Confidence`, `Priority`, and `Automation safety` item cards for manual review or later CLI-vs-agent comparisons.
 
-The skill is intentionally non-mutating: it must not comment on issues, edit labels, create PRDs/slices, invoke `to-ralph`, or enqueue Ralph workers.
+The skill is intentionally non-mutating and does not discover live queues by itself: it must not comment on issues, edit labels, create PRDs/slices, invoke `to-ralph`, or enqueue Ralph workers.
 
 ### Installing skills
 
