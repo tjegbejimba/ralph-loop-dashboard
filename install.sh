@@ -45,6 +45,10 @@ Skills (installed in --both and --skills-only modes):
   ralph-issue-triage-agent
                     Symlinked to ~/.agents/skills/ralph-issue-triage-agent.
                     Enables dry-run-only advisory triage from frozen issue evidence.
+  ralph-orchestrator
+                    Symlinked to ~/.agents/skills/ralph-orchestrator.
+                    Control-plane orchestrator that drives a PRD (prd-run) or a
+                    scheduled repo sweep (repo-maintain) through the Ralph loop.
 
   If ~/.agents/skills/ does not exist, install.sh prints an actionable hint
   instead of erroring. Skills are best-effort in --both mode.
