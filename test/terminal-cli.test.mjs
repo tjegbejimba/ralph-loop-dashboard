@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
 import { spawnSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -86,6 +86,136 @@ test("cli.mjs help — exits 0 with usage", () => {
   assert.match(r.stdout, /status/);
   assert.match(r.stdout, /watch/);
   assert.match(r.stdout, /follow/);
+  assert.match(r.stdout, /triage/);
+  assert.match(r.stdout, /dry-run/);
+});
+
+test("cli.mjs triage --help — documents advisory dry-run/live mode", () => {
+  const r = spawnSync("node", [CLI, "triage", "--help"], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /triage \[--dry-run\|--live\]/);
+  assert.match(r.stdout, /comment-only advisory issue triage/i);
+  assert.match(r.stdout, /No labels, closure, or Ralph enqueue/i);
+  assert.doesNotMatch(r.stdout, /--repo/);
+});
+
+test("cli.mjs triage — treats authenticated gh user as the comment owner", () => {
+  const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-"));
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const gh = join(bin, "gh");
+  const existingBody = "## Triage opinion\n\n<!-- ralph-triage-opinion:v1 fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
+  writeFileSync(gh, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+if (args[0] === "api" && args[1] === "user") {
+  process.stdout.write("tjegbejimba\\n");
+} else if (args[0] === "issue" && args[1] === "list") {
+  process.stdout.write(JSON.stringify([{
+    number: 77,
+    title: "Make Ralph triage safer",
+    body: "Ralph triage should not duplicate comments.\\n\\nAcceptance criteria:\\n- update existing opinion",
+    labels: [{ name: "needs-triage" }],
+    state: "OPEN",
+    createdAt: "2026-06-01T10:00:00Z",
+    updatedAt: "2026-06-01T10:00:00Z",
+    assignees: [],
+    closedByPullRequestsReferences: [],
+    url: "https://github.com/tjegbejimba/ralph-loop-dashboard/issues/77"
+  }]));
+} else if (args[0] === "issue" && args[1] === "view") {
+  process.stdout.write(JSON.stringify({ comments: [{
+    id: "IC_existing",
+    author: { login: "tjegbejimba" },
+    body: ${JSON.stringify(existingBody)},
+    createdAt: "2026-06-01T10:05:00Z"
+  }] }));
+} else {
+  process.stderr.write("unexpected gh args: " + JSON.stringify(args));
+  process.exit(1);
+}
+`);
+  chmodSync(gh, 0o755);
+  try {
+    const r = spawnSync("node", [CLI, "triage", "--dry-run", "--json"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.repos[0].processed[0].action, "update");
+    assert.equal(result.repos[0].processed[0].commentId, "IC_existing");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs triage --live — updates existing comment by GraphQL node ID", () => {
+  const root = mkdtempSync(join(tmpdir(), "ralph-cli-triage-live-"));
+  const bin = join(root, "bin");
+  const payloadFile = join(root, "graphql-payload.json");
+  mkdirSync(bin, { recursive: true });
+  const gh = join(bin, "gh");
+  const existingBody = "## Triage opinion\n\n<!-- ralph-triage-opinion:v1 fingerprint=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb -->";
+  writeFileSync(gh, `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+if (args[0] === "api" && args[1] === "user") {
+  process.stdout.write("tjegbejimba\\n");
+} else if (args[0] === "issue" && args[1] === "list") {
+  process.stdout.write(JSON.stringify([{
+    number: 78,
+    title: "Make Ralph live triage safer",
+    body: "Ralph triage should update the existing opinion.\\n\\nAcceptance criteria:\\n- update via GraphQL node id",
+    labels: [{ name: "needs-triage" }],
+    state: "OPEN",
+    createdAt: "2026-06-01T10:00:00Z",
+    updatedAt: "2026-06-01T10:00:00Z",
+    assignees: [],
+    closedByPullRequestsReferences: [],
+    url: "https://github.com/tjegbejimba/ralph-loop-dashboard/issues/78"
+  }]));
+} else if (args[0] === "issue" && args[1] === "view") {
+  process.stdout.write(JSON.stringify({ comments: [{
+    id: "IC_existing",
+    author: { login: "tjegbejimba" },
+    body: ${JSON.stringify(existingBody)},
+    createdAt: "2026-06-01T10:05:00Z"
+  }] }));
+} else if (args[0] === "api" && args[1] === "graphql") {
+  let input = "";
+  process.stdin.on("data", chunk => { input += chunk; });
+  process.stdin.on("end", () => {
+    fs.writeFileSync(process.env.GH_GRAPHQL_PAYLOAD, input);
+    process.stdout.write(JSON.stringify({ data: { updateIssueComment: { issueComment: { id: "IC_existing" } } } }));
+  });
+} else {
+  process.stderr.write("unexpected gh args: " + JSON.stringify(args));
+  process.exit(1);
+}
+`);
+  chmodSync(gh, 0o755);
+  try {
+    const r = spawnSync("node", [CLI, "triage", "--live", "--json"], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        GH_GRAPHQL_PAYLOAD: payloadFile,
+      },
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.repos[0].processed[0].action, "update");
+    assert.equal(result.repos[0].processed[0].posted, true);
+    const payload = JSON.parse(readFileSync(payloadFile, "utf8"));
+    assert.match(payload.query, /updateIssueComment/);
+    assert.equal(payload.variables.id, "IC_existing");
+    assert.match(payload.variables.body, /^## Triage opinion/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("cli.mjs — missing .ralph exits 2 with hint", () => {

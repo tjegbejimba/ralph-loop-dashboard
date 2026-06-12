@@ -9,17 +9,20 @@
 //                                        Ctrl-C to exit. Default 2s.
 //   follow [--worker N]                  Tail the active worker's iteration
 //                                        log; re-tails on iter rollover.
+//   triage [--dry-run|--live]            Comment-only advisory issue triage.
 //   help | --help                        Print usage.
 //
 // Repo resolution: $RALPH_REPO_ROOT → walk up from cwd looking for .ralph/.
 // We don't import extension/lib/repo-resolver.mjs here so the CLI keeps
-// working in repos that don't yet have a full .ralph install.
+// working in repos that don't yet have a full .ralph install. The triage
+// subcommand is repo-allowlist based and does not require .ralph/.
 
 import { existsSync, statSync, readFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { join, resolve, dirname } from "node:path";
 import { createStatusReader } from "./lib/status-data.mjs";
 import { renderStatus, renderLocalStatus, shouldUseColor } from "./lib/terminal-render.mjs";
+import { DEFAULT_TRIAGE_CONFIG, runIssueTriage } from "./lib/issue-triage.mjs";
 
 function findRepoRoot(start) {
   if (process.env.RALPH_REPO_ROOT) return process.env.RALPH_REPO_ROOT;
@@ -34,12 +37,30 @@ function findRepoRoot(start) {
 }
 
 function parseFlags(args) {
-  const flags = { color: undefined, withPrs: false, interval: 2, worker: null };
+  const flags = {
+    color: undefined,
+    withPrs: false,
+    interval: 2,
+    worker: null,
+    help: false,
+    json: false,
+    triageMode: "dry-run",
+    triageQuery: null,
+    triageTaxonomyMode: "legacy",
+    triageBotLogin: null,
+  };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
-    if (a === "--no-color") flags.color = false;
+    if (a === "--help" || a === "-h") flags.help = true;
+    else if (a === "--no-color") flags.color = false;
     else if (a === "--color") flags.color = true;
     else if (a === "--with-prs") flags.withPrs = true;
+    else if (a === "--json") flags.json = true;
+    else if (a === "--dry-run") flags.triageMode = "dry-run";
+    else if (a === "--live") flags.triageMode = "live";
+    else if (a === "--canonical-labels") flags.triageTaxonomyMode = "canonical";
+    else if (a === "--query") flags.triageQuery = args[++i] || null;
+    else if (a === "--bot-login") flags.triageBotLogin = args[++i] || null;
     else if (a === "--interval") {
       const n = Number(args[++i]);
       if (Number.isFinite(n) && n > 0) flags.interval = n;
@@ -61,11 +82,36 @@ function printUsage() {
   node cli.mjs status [--with-prs] [--no-color]
   node cli.mjs watch [SEC|--interval SEC] [--no-color]
   node cli.mjs follow [N|--worker N]
+  node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--query QUERY] [--json]
   node cli.mjs help
 
 Reads .ralph/ from cwd (or RALPH_REPO_ROOT). Shows current workers, queue
 progress, and loop.out tail. Designed for terminal users who can't load the
 Ralph dashboard extension.
+
+triage runs comment-only advisory issue triage. It defaults to dry-run
+calibration and prints exact comments without posting. Live mode only
+posts/updates the bot-owned triage comment; no labels, closure, or Ralph
+enqueue happens automatically.
+`);
+}
+
+function printTriageUsage() {
+  process.stdout.write(`Usage:
+  node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--query QUERY] [--json]
+
+Runs comment-only advisory issue triage for configured repositories.
+Default repo: tjegbejimba/ralph-loop-dashboard
+Default query: label:needs-triage
+
+--dry-run           Print exact comments; do not post anything. Default.
+--live              Post/update only the bot-owned triage comment.
+--canonical-labels  Use label:ralph:needs-triage instead of the legacy query.
+--query QUERY       Override the triage issue search query.
+--bot-login LOGIN   Override detected gh login for bot-owned comment matching.
+--json              Emit the structured run summary.
+
+No labels, closure, or Ralph enqueue happens automatically.
 `);
 }
 
@@ -187,6 +233,69 @@ async function cmdFollow(reader, flags) {
   }
 }
 
+function triageReposFromFlags(flags) {
+  const repoOverrides = {
+    taxonomyMode: flags.triageTaxonomyMode,
+  };
+  if (flags.triageQuery) repoOverrides.query = flags.triageQuery;
+  return DEFAULT_TRIAGE_CONFIG.repos.map((repo) => ({ ...repo, ...repoOverrides }));
+}
+
+function currentGithubLogin() {
+  const result = spawnSync("gh", ["api", "user", "--jq", ".login"], {
+    encoding: "utf8",
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(result.stderr || "gh api user failed");
+  }
+  const login = result.stdout.trim();
+  if (!login) throw new Error("Could not determine authenticated gh login");
+  return login;
+}
+
+function renderTriageRun(result) {
+  const lines = [`Ralph issue triage (${result.mode})`];
+  for (const repoResult of result.repos) {
+    lines.push("", `${repoResult.repo} — ${repoResult.query}`);
+    for (const item of repoResult.processed) {
+      lines.push("", `#${item.issueNumber} ${item.action}: ${item.recommendation}`);
+      if (item.commentBody) lines.push(item.commentBody);
+    }
+    for (const item of repoResult.skipped) {
+      lines.push(`#${item.issueNumber} skipped: ${item.reason}`);
+    }
+    for (const error of repoResult.errors) {
+      const prefix = error.issueNumber ? `#${error.issueNumber}` : repoResult.repo;
+      lines.push(`${prefix} error: ${error.message}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+async function cmdTriage(flags) {
+  if (flags.help) {
+    printTriageUsage();
+    return;
+  }
+  const result = await runIssueTriage({
+    mode: flags.triageMode,
+    config: {
+      repos: triageReposFromFlags(flags),
+      botLogin: flags.triageBotLogin || currentGithubLogin(),
+    },
+  });
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    process.stdout.write(`${renderTriageRun(result)}\n`);
+  }
+  if (result.repos.length > 0 && result.repos.every((repo) => repo.errors.length > 0 && repo.processed.length === 0)) {
+    process.exitCode = 1;
+  }
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
@@ -194,6 +303,10 @@ async function main() {
     process.exit(0);
   }
   const flags = parseFlags(rest);
+  if (cmd === "triage") {
+    await cmdTriage(flags);
+    return;
+  }
   const repoRoot = findRepoRoot();
   if (!repoRoot) {
     process.stderr.write(
