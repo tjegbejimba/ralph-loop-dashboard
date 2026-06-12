@@ -102,6 +102,42 @@ for triage_keyword in \
   fi
 done
 
+orchestrator_skill_file="$REPO_ROOT/skills/ralph-orchestrator/SKILL.md"
+
+if [[ ! -f "$orchestrator_skill_file" ]]; then
+  fail "skills/ralph-orchestrator/SKILL.md does not exist"
+else
+  pass "skills/ralph-orchestrator/SKILL.md exists"
+fi
+
+if grep -q '^name: ralph-orchestrator' "$orchestrator_skill_file" 2>/dev/null; then
+  pass "orchestrator SKILL.md has expected name frontmatter"
+else
+  fail "orchestrator SKILL.md missing expected name frontmatter"
+fi
+
+# Thin control plane: must do mode detection and point at lazy-loaded mode files.
+for orchestrator_keyword in "prd-run" "repo-maintain" "allowAgentLaunch" "orchestrateRun"; do
+  if grep -q "$orchestrator_keyword" "$orchestrator_skill_file" 2>/dev/null; then
+    pass "orchestrator SKILL.md mentions '$orchestrator_keyword'"
+  else
+    fail "orchestrator SKILL.md missing content for '$orchestrator_keyword'"
+  fi
+done
+
+# Lazy-loaded mode files and shared references must exist.
+for orchestrator_part in \
+  "skills/ralph-orchestrator/modes/prd-run.md" \
+  "skills/ralph-orchestrator/modes/repo-maintain.md" \
+  "skills/ralph-orchestrator/references/policy.md" \
+  "skills/ralph-orchestrator/references/triage-contract.md"; do
+  if [[ -f "$REPO_ROOT/$orchestrator_part" ]]; then
+    pass "orchestrator part exists: $orchestrator_part"
+  else
+    fail "orchestrator part missing: $orchestrator_part"
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # Test 2: --skills-only creates symlink in ~/.agents/skills/to-ralph
 # ---------------------------------------------------------------------------
@@ -147,6 +183,21 @@ else
   fail "triage symlink points to '$actual_triage_target', expected '$expected_triage_target'"
 fi
 
+orchestrator_link="$(skill_link "$TEST_HOME" "ralph-orchestrator")"
+if [[ -L "$orchestrator_link" ]]; then
+  pass "--skills-only creates symlink at ~/.agents/skills/ralph-orchestrator"
+else
+  fail "--skills-only should create a symlink at $orchestrator_link"
+fi
+
+expected_orchestrator_target="$REPO_ROOT/skills/ralph-orchestrator"
+actual_orchestrator_target="$(readlink "$orchestrator_link")"
+if [[ "$actual_orchestrator_target" == "$expected_orchestrator_target" ]]; then
+  pass "orchestrator symlink points to correct source: $expected_orchestrator_target"
+else
+  fail "orchestrator symlink points to '$actual_orchestrator_target', expected '$expected_orchestrator_target'"
+fi
+
 # ---------------------------------------------------------------------------
 # Test 3: --skills-only is idempotent (re-run doesn't fail)
 # ---------------------------------------------------------------------------
@@ -171,6 +222,13 @@ if [[ "$triage_link_after" == "$expected_triage_target" ]]; then
   pass "triage symlink still points to correct source after re-run"
 else
   fail "triage symlink target changed after re-run: $triage_link_after"
+fi
+
+orchestrator_link_after="$(readlink "$(skill_link "$TEST_HOME" "ralph-orchestrator")")"
+if [[ "$orchestrator_link_after" == "$expected_orchestrator_target" ]]; then
+  pass "orchestrator symlink still points to correct source after re-run"
+else
+  fail "orchestrator symlink target changed after re-run: $orchestrator_link_after"
 fi
 
 # ---------------------------------------------------------------------------
@@ -203,6 +261,12 @@ if [[ ! -e "$NO_SKILLS_HOME/.agents/skills/ralph-issue-triage-agent" ]]; then
   pass "no triage symlink created when ~/.agents/skills/ missing"
 else
   fail "should not create triage symlink when ~/.agents/skills/ doesn't exist"
+fi
+
+if [[ ! -e "$NO_SKILLS_HOME/.agents/skills/ralph-orchestrator" ]]; then
+  pass "no orchestrator symlink created when ~/.agents/skills/ missing"
+else
+  fail "should not create orchestrator symlink when ~/.agents/skills/ doesn't exist"
 fi
 
 # ---------------------------------------------------------------------------
@@ -265,6 +329,13 @@ if [[ -L "$both_triage_link" ]]; then
   pass "--both mode creates triage skill symlink"
 else
   fail "--both mode should create triage skill symlink at $both_triage_link"
+fi
+
+both_orchestrator_link="$(skill_link "$BOTH_HOME" "ralph-orchestrator")"
+if [[ -L "$both_orchestrator_link" ]]; then
+  pass "--both mode creates orchestrator skill symlink"
+else
+  fail "--both mode should create orchestrator skill symlink at $both_orchestrator_link"
 fi
 
 # ---------------------------------------------------------------------------

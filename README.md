@@ -125,19 +125,26 @@ parallel workers and is the most thoroughly tested path.
 
 ## Agent skill workflow
 
-Ralph includes a `to-ralph` skill that closes the loop between planning and execution. The full agent-driven workflow:
+Ralph includes a `to-ralph` skill that closes the loop between planning and execution, and a `ralph-orchestrator` skill that drives the whole pipeline autonomously. The full agent-driven workflow:
 
 ```
-grill-me → to-prd → to-issues → to-ralph → .ralph/launch.sh
+grill-me → to-prd → ralph-orchestrator (prd-run) → Ralph workers
+                    └ uses to-issues to author slices, then enqueues + launches (gated)
+
+repo-maintain (hourly schedule) → ralph-orchestrator → Ralph workers
 ```
 
 | Step | Skill / Command | What it does |
 |------|-----------------|--------------|
 | 1 | `grill-me` | Interview the user until the plan is fully understood |
-| 2 | `to-prd` | Synthesize context into a PRD and publish it as a GitHub issue |
-| 3 | `to-issues` | Break the PRD into independently-grabbable slice issues |
-| 4 | `to-ralph` | Enqueue issues into Ralph and surface preflight warnings |
-| 5 | `.ralph/launch.sh` | **Human decision** — start workers when ready |
+| 2 | `to-prd` | Synthesize context into a PRD, publish it as a GitHub issue, and hand the PRD number to the orchestrator |
+| 3 | `ralph-orchestrator` (`prd-run`) | Validate the PRD, author slices via `to-issues`, enqueue, launch behind the gate, monitor, and drain |
+| — | `to-issues` | Invoked by the orchestrator to break the PRD into independently-grabbable slice issues |
+| — | Ralph workers | Headless claim → implement → review → merge per `.ralph/RALPH.md` |
+
+`ralph-orchestrator` is a thin control plane: it consumes structured CLI signals, applies authorization gates, builds a bounded queue, launches **only** through `orchestrateRun()` behind `allowAgentLaunch` + preflight, monitors run state, raises owner-decision briefs on hard stops, and keeps a compact ledger at `.ralph/orchestrator/ledger.json`. It never claims, implements, or merges work itself. Its second mode, `repo-maintain`, is TJ's "Ready agent automation" — an hourly scheduled sweep that discovers canonical ready work across an allowlist and launches a bounded run behind the same gates. The two modes are lazy-loaded (`modes/prd-run.md`, `modes/repo-maintain.md`) so only the active one sits in context; shared policy lives in `references/policy.md`.
+
+`to-ralph` remains available as the manual, one-shot alternative: enqueue a PRD and surface preflight without launching.
 
 ### Using to-ralph
 
@@ -154,6 +161,12 @@ The skill will:
 4. Print either a ✅ **Ready to launch** summary or a ⚠️ list of blockers paired with exact `gh issue edit` / `git commit` commands the operator can copy.
 
 It will **never** start workers — that remains a human decision.
+
+### Using ralph-orchestrator
+
+For an end-to-end autonomous run, `to-prd` hands the PRD issue number to the `ralph-orchestrator` skill. In `prd-run` mode it validates the PRD (`work:prd` + `ralph:evaluated`), authors slices via `to-issues`, enqueues with `.ralph/launch.sh --enqueue-prd <N>`, and — only when `allowAgentLaunch` is enabled and preflight passes — launches workers through `orchestrateRun()`, then monitors run state and drains. In `repo-maintain` mode (an hourly schedule tick) it discovers canonical ready work across an allowlist and launches a small bounded run behind the same gates.
+
+Unlike `to-ralph`, the orchestrator *can* launch — but every launch is gated by `allowAgentLaunch: true` in `~/.ralph-dashboard/config.json` (default `false`) plus a passing preflight, both enforced inside `orchestrateRun()`. On any hard stop (gate not met, unresolved preflight, product decision, repeated worker stall, destructive action, missing access) it pauses and sends an owner-decision brief instead of improvising. It never claims, implements, reviews, or merges work itself. A dry-run/plan request performs zero mutations and emits the planned mode detection, triage summary, slice plan, enqueue plan, gated launch decision, and ledger JSON.
 
 ### Issue triage boundary
 
