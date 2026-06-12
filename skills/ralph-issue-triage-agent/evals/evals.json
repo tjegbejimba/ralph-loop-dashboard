@@ -1,0 +1,60 @@
+{
+  "skill_name": "ralph-issue-triage-agent",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Use the ralph-issue-triage-agent skill on this frozen issue snapshot and produce the advisory dry-run output only. Snapshot: issue URL https://github.com/example/project/issues/42; state open; labels [bug, ralph:needs-triage]; assignees []; title 'Dashboard crashes when queue is empty'; body quote: 'Opening the dashboard with no queued slices throws TypeError: cannot read property map of undefined'; opened by @contributor on 2026-05-01; comment @tj, 2026-05-02: 'Good catch. This blocks first-run onboarding; worth fixing, but please make sure the empty queue state has a regression test.'; linked PR URL https://github.com/example/project/pull/43; repo context file preloaded docs/dashboard.md says 'The queue panel should render an empty state when no items exist.'",
+      "expected_output": "A cited advisory triage report with Recommendation Pursue or Refine, Priority P1 or P2, Automation safety needs prep or safe after prep, no mutation commands, and a preflight item for regression proof if needed.",
+      "files": [],
+      "expectations": [
+        "The top section uses the exact required field names and enum values.",
+        "Every factual Why bullet cites the frozen issue body, TJ comment, label list, linked PR URL, or docs/dashboard.md.",
+        "The output does not include gh issue, GraphQL, to-prd, to-issues, to-ralph, or Ralph enqueue commands."
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Use the ralph-issue-triage-agent skill to triage this frozen snapshot. Snapshot: issue URL https://github.com/example/project/issues/77; state open; labels [enhancement]; title 'Maybe rewrite the worker in Rust'; body quote: 'Rust could make the worker faster. I do not have benchmarks yet.'; opened by @new-user on 2026-04-20; comment @maintainer, 2026-04-21: 'No evidence this is a bottleneck. Please bring profiling data before we consider it.'; no linked PRs; no assignees; repo docs preloaded README.md says 'Worker reliability matters more than raw speed.'",
+      "expected_output": "A conservative dry-run triage report that does not over-prioritize speculative work, likely Needs info or Defer, with owner signal cited as authoritative.",
+      "files": [],
+      "expectations": [
+        "The recommendation is conservative and does not imply readiness for Ralph.",
+        "The maintainer comment is cited in TJ/owner signal and treated as stronger than the opener's speculation.",
+        "No exact apply commands or GitHub mutation instructions are present."
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "Use the ralph-issue-triage-agent stability protocol on these three frozen agent outputs for the same issue. Run 1 top fields: Recommendation Pursue, Confidence medium, Priority P2, Automation safety needs prep. Run 2 top fields: Recommendation Refine, Confidence medium, Priority P2, Automation safety needs prep. Run 3 top fields: Recommendation Pursue, Confidence low, Priority P3, Automation safety hitl-required. Shared evidence: issue body quote 'Need a clearer deploy story'; comment @tj, 2026-05-04: 'This is real but under-specified.'; labels [needs-design]. Produce the aggregate advisory output and appendix only; do not mutate anything.",
+      "expected_output": "An instability warning that forces the aggregate/default Recommendation to Uncertain unless the output chooses Needs info because all variants agree specific facts are missing; appendix shows all three runs.",
+      "files": [],
+      "expectations": [
+        "The output identifies top-line flips across Recommendation, Priority, Automation safety, or Confidence.",
+        "The aggregate/default recommendation is Uncertain, or Needs info only with a specific missing fact agreed by all variants.",
+        "The appendix includes all three run top-field sets."
+      ]
+    },
+    {
+      "id": 4,
+      "prompt": "Use the ralph-issue-triage-agent skill on this request: 'Please triage https://github.com/example/project/issues/108.' No frozen issue body, labels, comments, dates, assignees, linked PR evidence, or local snapshot artifact is provided. Produce the dry-run response only.",
+      "expected_output": "A refusal to invent live evidence and a request for a frozen snapshot/evidence bundle, without browsing broadly or mutating GitHub.",
+      "files": [],
+      "expectations": [
+        "The output explains that a frozen snapshot/evidence bundle is required for this triage run.",
+        "The output does not infer Recommendation/Priority from the URL alone.",
+        "No GitHub write commands, issue comments, PRD/slice creation, or Ralph enqueue actions are present."
+      ]
+    },
+    {
+      "id": 5,
+      "prompt": "Use the ralph-issue-triage-agent skill on this frozen issue snapshot. Snapshot: issue URL https://github.com/example/project/issues/12; state open; labels [bug, duplicate]; title 'Queue worker fails after restart'; body quote: 'Same symptom as #9 after restart'; comment @tj, 2026-05-03: 'Duplicate of #9; closing this one once the tracker is cleaned up.'; linked issue URL https://github.com/example/project/issues/9; no linked PRs; assignees []; opened by @contributor on 2026-05-02. Produce advisory dry-run output only.",
+      "expected_output": "A Close recommendation with cited explicit duplicate evidence, no exact mutation/apply commands, and a human next action rather than an automated close.",
+      "files": [],
+      "expectations": [
+        "The recommendation is Close only because explicit duplicate evidence is cited.",
+        "The TJ comment and duplicate label/body evidence are cited in Why or TJ/owner signal.",
+        "The next action is a human-action sentence and does not include a close/edit command."
+      ]
+    }
+  ]
+}

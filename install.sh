@@ -6,8 +6,8 @@
 #      the target repo so the loop is git-tracked per-project.
 #   2. The dashboard extension gets copied into ~/.copilot/extensions/
 #      so it's available in every Copilot CLI session, not just one repo.
-#   3. The to-ralph skill gets symlinked into ~/.agents/skills/to-ralph
-#      so the global agent gains the "publish PRD → load Ralph" capability.
+#   3. Bundled skills get symlinked into ~/.agents/skills/
+#      so the global agent gains Ralph-specific workflows.
 #
 # Usage (from inside this repo):
 #   ./install.sh /path/to/your/project
@@ -29,7 +29,7 @@ Modes (default: --both):
   --both            Install loop scripts, dashboard extension, and skills (default)
   --scripts-only    Install only the .ralph/ loop scripts into the target repo
   --extension-only  Install only the dashboard extension into ~/.copilot/extensions/
-  --skills-only     Symlink agent skills (e.g. to-ralph) into ~/.agents/skills/
+  --skills-only     Symlink bundled agent skills into ~/.agents/skills/
                     No target repo is required for this mode.
 
 Options:
@@ -42,6 +42,9 @@ Skills (installed in --both and --skills-only modes):
   to-ralph          Symlinked to ~/.agents/skills/to-ralph.
                     Enables the agent to enqueue a PRD into Ralph and surface
                     preflight warnings before you launch workers.
+  ralph-issue-triage-agent
+                    Symlinked to ~/.agents/skills/ralph-issue-triage-agent.
+                    Enables dry-run-only advisory triage from frozen issue evidence.
 
   If ~/.agents/skills/ does not exist, install.sh prints an actionable hint
   instead of erroring. Skills are best-effort in --both mode.
@@ -374,29 +377,48 @@ install_extension() {
 
 install_skills() {
   local skills_dir="$HOME/.agents/skills"
-  local install_target="$skills_dir/to-ralph"
-  local source="$REPO_DIR/skills/to-ralph"
+  local skill_sources=()
+  local source skill_name install_target
 
   if [[ ! -d "$skills_dir" ]]; then
-    echo "ℹ️  ~/.agents/skills/ not found — to-ralph skill not installed."
-    echo "   Create the directory and re-run to install the skill:"
+    echo "ℹ️  ~/.agents/skills/ not found — bundled skills not installed."
+    echo "   Create the directory and re-run to install skills:"
     echo "   mkdir -p ~/.agents/skills && $0 --skills-only"
     return 0
   fi
 
-  if [[ -e "$install_target" && ! -L "$install_target" ]]; then
-    echo "⚠️  $install_target exists and is not a symlink — leaving untouched." >&2
-    echo "   Remove it manually to install the to-ralph skill." >&2
-    return 1
+  for source in "$REPO_DIR"/skills/*; do
+    [[ -d "$source" && -f "$source/SKILL.md" ]] || continue
+    skill_sources+=("$source")
+  done
+
+  if [[ "${#skill_sources[@]}" -eq 0 ]]; then
+    echo "ℹ️  No bundled skills found in $REPO_DIR/skills."
+    return 0
   fi
 
-  # Remove stale symlink before re-creating (idempotent).
-  if [[ -L "$install_target" ]]; then
-    rm "$install_target"
-  fi
+  for source in "${skill_sources[@]}"; do
+    skill_name="$(basename "$source")"
+    install_target="$skills_dir/$skill_name"
+    if [[ -e "$install_target" && ! -L "$install_target" ]]; then
+      echo "⚠️  $install_target exists and is not a symlink — leaving untouched." >&2
+      echo "   Remove it manually to install the $skill_name skill." >&2
+      return 1
+    fi
+  done
 
-  ln -s "$source" "$install_target"
-  echo "✅ to-ralph skill symlinked: $install_target -> $source"
+  for source in "${skill_sources[@]}"; do
+    skill_name="$(basename "$source")"
+    install_target="$skills_dir/$skill_name"
+
+    # Remove stale symlink before re-creating (idempotent).
+    if [[ -L "$install_target" ]]; then
+      rm "$install_target"
+    fi
+
+    ln -s "$source" "$install_target"
+    echo "✅ $skill_name skill symlinked: $install_target -> $source"
+  done
 }
 
 case "$MODE" in

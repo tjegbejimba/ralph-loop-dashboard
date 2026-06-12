@@ -155,9 +155,15 @@ The skill will:
 
 It will **never** start workers — that remains a human decision.
 
+### Using ralph-issue-triage-agent
+
+Ralph also ships `ralph-issue-triage-agent` for dry-run-only issue triage. It consumes frozen GitHub issue evidence snapshots and produces advisory `Recommendation`, `Confidence`, `Priority`, and `Automation safety` opinions for manual review or later CLI-vs-agent comparisons.
+
+The skill is intentionally non-mutating: it must not comment on issues, edit labels, create PRDs/slices, invoke `to-ralph`, or enqueue Ralph workers.
+
 ### Installing skills
 
-`install.sh` symlinks the `to-ralph` skill (and any future skills in `skills/`) into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
+`install.sh` symlinks bundled skills from `skills/` into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
 
 ```bash
 ./install.sh /path/to/your/project      # installs scripts + extension + skills
