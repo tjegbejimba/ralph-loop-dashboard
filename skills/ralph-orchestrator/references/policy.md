@@ -160,13 +160,16 @@ object per repo (the file holds the most recent state for the active target).
     { "kind": "allowAgentLaunch | preflight | product | worker-stall | destructive | access", "ref": "https://github.com/owner/repo/issues/N", "detail": "short span" }
   ],
   "lastOwnerDecision": { "at": "ISO-8601", "question": "", "choice": "", "by": "" },
+  "ownerBriefsSent": { "<repo-or-target>:<topic>": true },
   "concurrency": { "activeRunDetected": false, "deferred": false },
   "updatedAt": "ISO-8601"
 }
 ```
 
 `prd` is null/0 for `repo-maintain`. `run` stays null until a gated launch
-succeeds. On clean drain, set `phase: "done"` and write a closeout (summary + final
+succeeds. `ownerBriefsSent` keys are one-time-brief de-dupe markers (e.g.
+`alisterr:labels`) so `repo-maintain` does not re-send the same precondition brief
+each tick. On clean drain, set `phase: "done"` and write a closeout (summary + final
 queue outcomes); do **not** auto-start another mode.
 
 ## Non-negotiables
