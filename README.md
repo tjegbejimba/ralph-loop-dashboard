@@ -2,7 +2,7 @@
 
 A self-driving TDD loop for [Copilot CLI](https://github.com/github/copilot-cli) that:
 
-1. **Runs Copilot headless** through GitHub issues one at a time, enforcing red-green-refactor TDD with mandatory dual-model code review (`gpt-5.5` + `claude-opus-4.7`).
+1. **Runs Copilot headless** through GitHub issues one at a time, enforcing red-green-refactor TDD with mandatory dual-model code review (`gpt-5.5` + `claude-opus-4.8`).
 2. **Ships a desktop dashboard** (Copilot CLI extension) showing live loop status — current iteration, stage, PR/CI status, queue, history, and start/stop controls.
 3. **Works from the terminal alone** when the extension isn't loadable (e.g., GitHub Copilot inside the desktop app): `.ralph/launch.sh --status | --watch | --follow` exposes the same data via the same JS layer the dashboard reads — see [Tracking a run from the terminal](#tracking-a-run-from-the-terminal).
 
@@ -471,7 +471,7 @@ The agent (in `RALPH.md`) is locked into:
 - All local checks pass before push (`lint`, `typecheck`, `test`, `e2e`, `build` — adapt to your repo)
 - PR body must include `Closes #<N>` for auto-close on merge
 - PR bodies are created through a repo-local `.ralph-pr-body-<N>.md` file and passed with `gh pr create --body-file` to avoid unsafe inline shell bodies
-- Dual-model code review (parallel `gpt-5.5` + `claude-opus-4.7`) before merge
+- Dual-model code review (parallel `gpt-5.5` + `claude-opus-4.8`) before merge
 - Pre-merge rebase, force-push with lease, watch CI, squash-merge
 
 If anything fails, the iteration halts loudly. No "I'll get to it later" half-ships.
