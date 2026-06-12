@@ -155,6 +155,19 @@ The skill will:
 
 It will **never** start workers — that remains a human decision.
 
+### Issue triage boundary
+
+Ralph issue triage is **CLI-first hybrid**: deterministic triage output is the
+source of truth for future orchestration, while LLM triage is advisory over a
+frozen snapshot only. The CLI owns issue discovery, taxonomy/preflight checks,
+structured JSON, and any bounded bot-owned comment writer. The LLM triage skill
+adds maintainer-facing nuance for low-confidence, conflicting, suspicious
+close/defer, or owner-decision cases, but it never mutates GitHub, enqueues
+Ralph, creates PRDs/slices, or launches workers.
+
+See [ADR 0003](docs/adr/0003-cli-first-hybrid-issue-triage.md) for the full
+ownership boundary.
+
 ### Installing skills
 
 `install.sh` symlinks the `to-ralph` skill (and any future skills in `skills/`) into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
