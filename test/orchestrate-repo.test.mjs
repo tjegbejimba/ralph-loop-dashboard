@@ -43,7 +43,7 @@ function readyIssue(number, extra = {}) {
     labels: [{ name: "ralph:ready" }, { name: "work:standalone" }, { name: "priority:P2" }],
     milestone: null,
     url: `https://github.com/octo/alisterr/issues/${number}`,
-    closingPullRequestsReferences: [],
+    closedByPullRequestsReferences: [],
     ...extra,
   };
 }
@@ -261,7 +261,7 @@ test("discovery drops issues with an open linked PR and non-ready issues", async
         execIssueList: ghIssueList([
           readyIssue(5),
           readyIssue(6, {
-            closingPullRequestsReferences: [
+            closedByPullRequestsReferences: [
               { state: "OPEN", url: "https://github.com/octo/alisterr/pull/99" },
             ],
           }),

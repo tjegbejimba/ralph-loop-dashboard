@@ -128,7 +128,7 @@ describe("issue triage advisory automation", () => {
         title: "Slice task with conflicting metadata",
         body: "Implement the final step.\n\n## Blocked by\n- #17",
         labels: ["ralph:ready", "priority:P1", "priority:P3", "work:slice"],
-        closingPullRequestsReferences: [
+        closedByPullRequestsReferences: [
           { state: "OPEN", url: "https://github.com/tjegbejimba/ralph-loop-dashboard/pull/88" },
         ],
       },

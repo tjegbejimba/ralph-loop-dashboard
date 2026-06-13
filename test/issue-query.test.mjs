@@ -16,7 +16,7 @@ test("queryIssues — successful query returns issue metadata", () => {
       labels: [{ name: "feature" }, { name: "backend" }, { name: "ready-for-agent" }],
       milestone: { title: "v1.0" },
       url: "https://github.com/owner/repo/issues/42",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
     {
       number: 43,
@@ -25,7 +25,7 @@ test("queryIssues — successful query returns issue metadata", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/43",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -58,6 +58,30 @@ test("queryIssues — successful query returns issue metadata", () => {
   assert.equal(result.warnings.length, 0);
 });
 
+// Regression: gh issue list argv must request the valid closedByPullRequestsReferences field
+test("queryIssues — requests the valid closedByPullRequestsReferences gh field", () => {
+  let capturedArgs = null;
+  const mockExec = (args) => {
+    capturedArgs = args;
+    return "[]";
+  };
+
+  const result = queryIssues({
+    repoOwner: "owner",
+    repoName: "repo",
+    searchQuery: "is:open",
+    execCommand: mockExec,
+  });
+
+  assert.equal(result.error, null);
+  assert.ok(Array.isArray(capturedArgs), "execCommand should receive the gh argv");
+  const jsonFlagIdx = capturedArgs.indexOf("--json");
+  assert.notEqual(jsonFlagIdx, -1, "argv should include --json");
+  const jsonFields = capturedArgs[jsonFlagIdx + 1];
+  assert.match(jsonFields, /closedByPullRequestsReferences/);
+  assert.doesNotMatch(jsonFields, /closingPullRequestsReferences/);
+});
+
 // RED: Empty issue body generates nonblocking warning
 test("queryIssues — empty issue body generates warning", () => {
   const mockOutput = JSON.stringify([
@@ -68,7 +92,7 @@ test("queryIssues — empty issue body generates warning", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/50",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
     {
       number: 51,
@@ -77,7 +101,7 @@ test("queryIssues — empty issue body generates warning", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/51",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -110,7 +134,7 @@ test("queryIssues — linked open PR generates warning", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/60",
-      closingPullRequestsReferences: [
+      closedByPullRequestsReferences: [
         {
           url: "https://github.com/owner/repo/pull/100",
           state: "OPEN",
@@ -124,7 +148,7 @@ test("queryIssues — linked open PR generates warning", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/61",
-      closingPullRequestsReferences: [
+      closedByPullRequestsReferences: [
         {
           url: "https://github.com/owner/repo/pull/101",
           state: "MERGED",
@@ -138,7 +162,7 @@ test("queryIssues — linked open PR generates warning", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/62",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -209,7 +233,7 @@ test("queryIssues — claimed issue generates warning", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/70",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
     {
       number: 71,
@@ -218,7 +242,7 @@ test("queryIssues — claimed issue generates warning", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/71",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -266,7 +290,7 @@ test("queryIssues — handles malformed labels array gracefully", () => {
       labels: "not-an-array",
       milestone: null,
       url: "https://github.com/owner/repo/issues/80",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -293,7 +317,7 @@ test("queryIssues — handles malformed PR references gracefully", () => {
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/81",
-      closingPullRequestsReferences: "not-an-array",
+      closedByPullRequestsReferences: "not-an-array",
     },
   ]);
 
@@ -327,7 +351,7 @@ test("queryIssues — attaches canonical taxonomy metadata without dropping repo
       ],
       milestone: null,
       url: "https://github.com/owner/repo/issues/90",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -363,7 +387,7 @@ test("queryIssues — canonical dimension conflicts produce blocking preview war
       ],
       milestone: null,
       url: "https://github.com/owner/repo/issues/95",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -391,7 +415,7 @@ test("queryIssues — legacy compatibility aliases warn only when explicitly ena
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/97",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -430,7 +454,7 @@ test("queryIssues — parsedDependencies with open blocker emits unresolved_bloc
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/100",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -464,7 +488,7 @@ test("queryIssues — closed blocker does not generate unresolved_blocker warnin
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/101",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -494,7 +518,7 @@ test("queryIssues — open blocker within the same result set (in-queue) still w
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/102",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
     {
       number: 103,
@@ -503,7 +527,7 @@ test("queryIssues — open blocker within the same result set (in-queue) still w
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/103",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -535,7 +559,7 @@ test("queryIssues — open blocker outside result set (outside queue) still warn
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/104",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -566,7 +590,7 @@ test("queryIssues — null parsedDependencies skips blocker checks (graceful deg
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/105",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
@@ -591,7 +615,7 @@ test("queryIssues — malformed parsedDependencies entry does not crash", () => 
       labels: [{ name: "ready-for-agent" }],
       milestone: null,
       url: "https://github.com/owner/repo/issues/106",
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ]);
 
