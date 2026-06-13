@@ -61,7 +61,9 @@ Full gate, launch-contract, and availability details in
 Pause + owner brief, never auto-resolve: (1) unresolved preflight blockers;
 (2) `allowAgentLaunch` off; (3) a product decision the PRD/issue doesn't answer;
 (4) a worker failing/stalling repeatedly on one slice; (5) destructive/irreversible
-actions (force-push `main`, delete issue, close without merge, label migration);
+actions (force-push `main`, delete issue, close without merge, label migration) —
+with one carve-out: the orchestrator **owns** closing a fully-delivered `work:prd`
+parent (all child slices closed via merged PRs) as completed;
 (6) missing credentials/access. Everything else is autonomous. Details and the
 auto-resolvable-vs-hard-stop split: [`references/policy.md`](references/policy.md).
 
@@ -71,7 +73,8 @@ Triage is **CLI-first hybrid** (ADR 0003): the orchestrator consumes
 `node extension/cli.mjs triage --dry-run --json` as the deterministic source of
 truth and escalates to the advisory `ralph-issue-triage-agent` (frozen snapshot,
 zero mutations) only by exception. `to-issues` owns slice authoring; the
-orchestrator owns gating/queueing/launch/monitor/ledger; workers own
+orchestrator owns gating/queueing/launch/monitor/ledger **and closing a
+fully-delivered `work:prd` parent** (its one issue-closure power); workers own
 claim→implement→review→merge. Interface in
 [`references/triage-contract.md`](references/triage-contract.md); full ownership
 table in [`references/policy.md`](references/policy.md).
@@ -91,8 +94,9 @@ record it in the ledger and do not modify that repo.
 - **Ledger:** compact, repo-scoped at `.ralph/orchestrator/ledger.json` (no raw
   triage dumps or full issue bodies). Schema in
   [`references/policy.md`](references/policy.md).
-- **Drain closeout (prd-run):** post a summary, write the ledger closeout, and
-  **stop cleanly** — do not auto-jump into `repo-maintain`.
+- **Drain closeout (prd-run):** post a summary, **close the PRD parent as completed
+  if all its child slices closed via merged PRs** (policy "PRD parent close"), write
+  the ledger closeout, and **stop cleanly** — do not auto-jump into `repo-maintain`.
 
 ## Non-negotiables
 

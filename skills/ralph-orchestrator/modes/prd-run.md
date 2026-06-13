@@ -22,8 +22,9 @@ by the authorization gates in policy. The single human hand was PRD creation.
 2. **Validate the PRD.** Require: open, exactly `work:prd`, exactly `ralph:evaluated`
    (PRD parents are evaluated, never a runnable state). If the labels/state are
    wrong or ambiguous, this is a **product/labeling hard stop** — emit an owner brief
-   (the PRD is not shaped for autonomous slicing) and stop. Do not relabel the PRD
-   yourself.
+   (the PRD is not shaped for autonomous slicing) and stop. Do not **relabel** a
+   mislabeled PRD yourself. (Closing a *fully-delivered* PRD is different and is the
+   orchestrator's to own — see step 8 and policy "PRD parent close".)
 
 3. **Author slices via `to-issues`.** Invoke the existing `to-issues` skill to turn
    the PRD into independently-grabbable child slices. Slice authoring is a reasoning
@@ -58,11 +59,24 @@ by the authorization gates in policy. The single human hand was PRD creation.
    that fails or stalls repeatedly on the same slice gets a worker-stall owner brief;
    do not resume or finish the slice yourself.
 
-8. **Drain and stop cleanly.** When the queue is empty:
+8. **Drain, close the PRD, and stop cleanly.** When the queue is empty and every
+   slice is terminal:
    - Post a summary (merged / failed / skipped per slice, with PR URLs).
-   - Write a ledger closeout (`phase: "done"`, final per-issue outcomes).
+   - **Close the PRD parent if it is fully delivered.** Evaluate policy's "PRD
+     parent close" rule against the PRD and its child slices: the parent is OPEN
+     and `work:prd`, it has ≥1 child (exact `Parent #N` marker), and **every**
+     child is CLOSED via a **merged** PR. If all hold, close it as completed —
+     `gh issue close <N> --reason completed` with a comment cross-linking the
+     completed child slices and their merge PRs. If **any** slice is still open,
+     was closed without a merged PR, or there are zero children, do **not** close
+     the parent (leave it open; a failed/abandoned slice is a worker-stall or
+     product decision, not a close). This is the only issue the orchestrator may
+     close, and it never closes a slice/standalone or uses `--admin`.
+   - Write a ledger closeout (`phase: "done"`, final per-issue outcomes, and the
+     parent-close result).
    - **Stop.** Do **not** auto-jump into `repo-maintain` or pick up unrelated work.
-     The run is finished when the PRD's slices are terminal.
+     The run is finished when the PRD's slices are terminal and the parent is
+     closed (or recorded as not-yet-closable).
 
 ## Dry-run / plan mode (zero mutations)
 
