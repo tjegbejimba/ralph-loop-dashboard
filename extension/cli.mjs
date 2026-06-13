@@ -24,7 +24,8 @@ import { createStatusReader } from "./lib/status-data.mjs";
 import { renderStatus, renderLocalStatus, shouldUseColor } from "./lib/terminal-render.mjs";
 import { DEFAULT_TRIAGE_CONFIG, runIssueTriage } from "./lib/issue-triage.mjs";
 import { loadUserConfig } from "./lib/user-config.mjs";
-import { runOrchestrateRepo, renderPlan, renderSummary } from "./lib/orchestrate-repo.mjs";
+import { runOrchestrateRepo, renderPlan, renderSummary, resolveRepoSlug } from "./lib/orchestrate-repo.mjs";
+import { runCloseCompletedPrds, renderCloseCompletedPrds } from "./lib/close-completed-prds.mjs";
 
 function findRepoRoot(start) {
   if (process.env.RALPH_REPO_ROOT) return process.env.RALPH_REPO_ROOT;
@@ -57,6 +58,7 @@ function parseFlags(args) {
     maxIssues: null,
     parallelism: null,
     runMode: null,
+    closeCompletedPrds: false,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -73,6 +75,7 @@ function parseFlags(args) {
     else if (a === "--repo") flags.triageRepos.push(args[++i]);
     else if (a === "--repo-root") flags.repoRoot = args[++i] || null;
     else if (a === "--run-mode") flags.runMode = args[++i] || null;
+    else if (a === "--close-completed-prds") flags.closeCompletedPrds = true;
     else if (a === "--max-issues") {
       const n = Number(args[++i]);
       if (Number.isInteger(n) && n > 0) flags.maxIssues = n;
@@ -104,6 +107,7 @@ function printUsage() {
   node cli.mjs follow [N|--worker N]
   node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--repo OWNER/NAME] [--query QUERY] [--json]
   node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
+  node cli.mjs orchestrate-repo --close-completed-prds [--repo-root PATH] [--dry-run] [--json]
   node cli.mjs help
 
 Reads .ralph/ from cwd (or RALPH_REPO_ROOT). Shows current workers, queue
@@ -119,6 +123,11 @@ orchestrate-repo runs the ralph-orchestrator repo-maintain sweep from a repo's
 MAIN checkout (where the local-only .ralph/ lives) for a local scheduler. It
 discovers ready work read-only and launches a bounded run only through the
 gated orchestrateRun path (allowAgentLaunch + preflight). Use --dry-run first.
+The default sweep is read-only/launch-only and closes nothing.
+
+With --close-completed-prds it instead reconciles open work:prd parents,
+closing (as completed) only those whose every child slice is closed via a
+merged PR. OFF by default; honors --dry-run for a zero-mutation preview.
 `);
 }
 
@@ -348,6 +357,7 @@ async function cmdTriage(flags) {
 function printOrchestrateRepoUsage() {
   process.stdout.write(`Usage:
   node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
+  node cli.mjs orchestrate-repo --close-completed-prds [--repo-root PATH] [--dry-run] [--json]
 
 Runs the ralph-orchestrator repo-maintain sweep from a repo's MAIN checkout
 (where the gitignored, local-only .ralph/ lives) for a local scheduler
@@ -361,14 +371,23 @@ labels, discovers ready work READ-ONLY, builds a bounded queue, and launches
 ONLY through the gated orchestrateRun path (allowAgentLaunch + preflight). It
 never calls launch.sh --start and never mutates GitHub during discovery.
 
---repo-root PATH   Repo MAIN checkout to operate on (default: cwd). Must contain
-                   .ralph/config.json and .ralph/RALPH.md.
---dry-run          Read-only: print the plan + would-be ledger; no launch, no
-                   ledger write, no mutations.
---json             Emit the structured run summary.
---max-issues N     Cap issues per run (default 3).
---parallelism N    Workers (default 1).
---run-mode MODE    one-pass | until-empty (default until-empty).
+--repo-root PATH         Repo MAIN checkout to operate on (default: cwd). Must
+                         contain .ralph/config.json and .ralph/RALPH.md.
+--dry-run                Read-only: print the plan + would-be ledger; no launch,
+                         no ledger write, no mutations.
+--json                   Emit the structured run summary.
+--max-issues N           Cap issues per run (default 3).
+--parallelism N          Workers (default 1).
+--run-mode MODE          one-pass | until-empty (default until-empty).
+--close-completed-prds   OPT-IN reconcile: instead of the launch sweep, close
+                         (as completed) every OPEN work:prd parent whose every
+                         child slice is closed via a merged PR. Cross-links the
+                         delivered children + their merge PRs in a close comment.
+                         OFF by default. Combine with --dry-run to preview which
+                         parents WOULD close (and why others are skipped) with
+                         ZERO mutations. Closes nothing else: never a work:slice
+                         / work:standalone, never a parent with any open or zero
+                         children, never with --admin.
 
 Launch is gated by allowAgentLaunch: true in ~/.ralph-dashboard/config.json
 (default false) plus a passing preflight. On a hard stop it prints an owner
@@ -376,9 +395,60 @@ brief and exits non-zero.
 `);
 }
 
+async function cmdCloseCompletedPrds(flags) {
+  const repoRoot = flags.repoRoot ? resolve(flags.repoRoot) : process.cwd();
+  const configPath = join(repoRoot, ".ralph", "config.json");
+  if (!existsSync(configPath)) {
+    process.stderr.write(
+      `No .ralph/config.json found at ${repoRoot}. ` +
+        "--close-completed-prds runs from a repo's MAIN checkout where .ralph/ lives.\n",
+    );
+    process.exitCode = 2;
+    return;
+  }
+  let config = {};
+  try {
+    config = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch (err) {
+    process.stderr.write(`Could not parse .ralph/config.json: ${String(err.message || err)}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const slugInfo = resolveRepoSlug({ repoRoot, config });
+  if (!slugInfo) {
+    process.stderr.write(
+      `Could not resolve the GitHub owner/name for ${repoRoot}. Set "repo" in ` +
+        ".ralph/config.json or add an origin remote.\n",
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  let result;
+  try {
+    result = await runCloseCompletedPrds({ slug: slugInfo.slug, dryRun: flags.dryRun });
+  } catch (err) {
+    process.stderr.write(`close-completed-prds error: ${String(err.message || err)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    process.stdout.write(`${renderCloseCompletedPrds(result)}\n`);
+  }
+
+  if (result.errors.length > 0) process.exitCode = 1;
+}
+
 async function cmdOrchestrateRepo(flags) {
   if (flags.help) {
     printOrchestrateRepoUsage();
+    return;
+  }
+  if (flags.closeCompletedPrds) {
+    await cmdCloseCompletedPrds(flags);
     return;
   }
   if (Number.isNaN(flags.maxIssues)) {

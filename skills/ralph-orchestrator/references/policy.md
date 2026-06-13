@@ -15,12 +15,13 @@ the headless Ralph worker's job (see "Worker contract").
 | **Ralph CLI** (`extension/cli.mjs`, `.ralph/launch.sh`) | Query/snapshot, taxonomy + preflight, baseline triage JSON, fingerprinted advisory comment create/update, enqueue, launch (`orchestrateRun`), verify. |
 | **`to-issues` skill** | PRD → slice authoring (a reasoning task — never build a CLI slicer). |
 | **`ralph-issue-triage-agent` skill** | Optional advisory reasoning over a **frozen** triage snapshot only. No writes/discovery/enqueue/launch. |
-| **orchestrator** (this skill) | Consume structured output, apply gates, build the queue, launch behind gates, poll/monitor, owner briefs, ledger. Spawns a sub-agent ONLY for shaping/owner-brief reasoning — never one agent per slice. |
+| **orchestrator** (this skill) | Consume structured output, apply gates, build the queue, launch behind gates, poll/monitor, owner briefs, ledger, and close a fully-delivered `work:prd` parent as completed (the one closure it owns — see "PRD parent close"). Spawns a sub-agent ONLY for shaping/owner-brief reasoning — never one agent per slice. |
 | **Ralph headless workers** | Claim + implement + test + dual-review + open/merge PR per `.ralph/RALPH.md`. |
 
-The orchestrator never claims or merges. It never edits a worker's branch, PR, or
-issue state. It observes worker progress through run state and triage/preflight CLI
-output only.
+The orchestrator never claims or merges. It never edits a worker's branch or PR,
+and never changes a slice/standalone issue's state. The sole exception is closing a
+fully-delivered `work:prd` parent as completed (see "PRD parent close"); otherwise
+it observes worker progress through run state and triage/preflight CLI output only.
 
 ## Authorization gates
 
@@ -68,13 +69,49 @@ Pause and emit an owner-decision brief (never auto-resolve) on any of:
 4. **A worker that fails or stalls repeatedly** on the same slice (e.g. repeated
    `ralph:failed`, or a dead worker / non-terminal slice across poll cycles).
 5. **Destructive or irreversible actions**: force-push to `main`, delete an issue,
-   close an issue without a merged PR, rewrite history, label migration.
+   close an issue without a merged PR, rewrite history, label migration. The one
+   carve-out is closing a fully-delivered `work:prd` parent — see "PRD parent
+   close" below; that is the orchestrator's to own, not a hard stop.
 6. **Missing credentials or access** (`gh` auth, repo permissions, run dir
    unwritable).
 
 Everything else is autonomous. The only human hand is at PRD creation; after
 `to-prd` hands off a PRD number, the orchestrator creates/labels/enqueues/launches
 without further confirmation, gated only by the authorization gates above.
+
+## PRD parent close (the one closure the orchestrator owns)
+
+This is the **single source of truth** for the parent-close rule; the mode files
+reference it. A `work:prd` parent is a tracking issue with no code of its own —
+its completion is defined entirely by its child slices, each of which closes via
+its own merged PR. So the orchestrator **owns** closing a fully-delivered PRD
+parent, and this is the **only** issue closure it may ever perform.
+
+The orchestrator MAY close a `work:prd` parent as **completed** ONLY when **all**
+of these hold:
+
+1. the parent is **OPEN** and labeled **`work:prd`**;
+2. it has **at least one child slice** — a child is an issue whose body carries
+   the exact `Parent #<parent>` marker (the same marker preflight, enqueue, and
+   `label-taxonomy.parseParentNumber` use to identify slices);
+3. **every** child slice is **CLOSED**, and **each was closed via a merged PR**
+   (state completed / closed-by-merged-PR — i.e. a `closedByPullRequestsReferences`
+   entry in the `MERGED` state). If **any** child is still open, or a child was
+   closed **without** a merged PR, the parent is **not** closed.
+
+On close: `gh issue close <parent> --reason completed` with a comment
+cross-linking the completed child slices and their merge PRs.
+
+The orchestrator must **still never**:
+
+- close a `work:slice` / `work:standalone` issue directly — those close only via
+  their own merged PR, by the worker;
+- close a `work:prd` parent that has **any** open child or **zero** children;
+- use `--admin` or otherwise bypass branch protection.
+
+Because the parent's closure is justified by the children's merged PRs, this is a
+narrow carve-out from the "close an issue without a merged PR" hard stop above —
+not a general license to close issues. Everything else stays prohibited.
 
 ## Auto-resolvable vs hard-stop preflight
 
@@ -105,6 +142,12 @@ target repo's `.ralph/RALPH.md` — treat that file as the single source of trut
 do not hardcode model versions here (they drift per repo/version). The orchestrator
 must not pre-empt, resume, or finish a worker's slice; on repeated worker failure it
 emits a hard-stop brief and leaves the evidence in place.
+
+Closure of a **slice/standalone** issue is the worker's alone (via its merged PR).
+The orchestrator's only closure power is over a fully-delivered `work:prd` parent
+(see "PRD parent close"): a tracking issue with no code of its own, closed as
+completed once every child slice has merged. It never closes a slice/standalone
+itself and never bypasses protection.
 
 ## Monitoring
 
