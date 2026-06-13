@@ -19,17 +19,24 @@
     2. Make sure `allowAgentLaunch: true` is set in
          ~/.ralph-dashboard/config.json   (default false — without it the runner
          discovers work but hard-stops at the gate instead of launching).
-    3. Dry-run it by hand first:
+    3. Add this repo's ABSOLUTE --repo-root path to `orchestrateAllowedRepoRoots`
+         in ~/.ralph-dashboard/config.json. --repo-root is treated as an override
+         and must be allowlisted, e.g.:
+           { "allowAgentLaunch": true,
+             "orchestrateAllowedRepoRoots": ["/Users/tjegbejimba/Code/alisterr"] }
+         Without this the runner hard-stops at the gate instead of launching.
+    4. Dry-run it by hand first:
          node <ext>/cli.mjs orchestrate-repo --repo-root /Users/tjegbejimba/Code/alisterr --dry-run
-    4. Copy this file to ~/Library/LaunchAgents/ and load it:
+    5. Copy this file to ~/Library/LaunchAgents/ and load it:
          cp docs/examples/com.tj.ralph-orchestrate-repo.alisterr.plist ~/Library/LaunchAgents/
          launchctl load ~/Library/LaunchAgents/com.tj.ralph-orchestrate-repo.alisterr.plist
        Unload with:
          launchctl unload ~/Library/LaunchAgents/com.tj.ralph-orchestrate-repo.alisterr.plist
 
   The runner is conservative: discovery is read-only, launches go ONLY through
-  the gated orchestrateRun() path (allowAgentLaunch + preflight), and an active
-  run for the repo causes it to defer. Safe to schedule hourly.
+  the gated orchestrateRun() path (allowAgentLaunch + orchestrateAllowedRepoRoots
+  + preflight), and an active run for the repo causes it to defer. Safe to
+  schedule hourly.
 -->
 <plist version="1.0">
 <dict>

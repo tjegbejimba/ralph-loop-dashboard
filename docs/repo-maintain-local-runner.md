@@ -48,18 +48,41 @@ Operating on `--repo-root` (default: the current directory), it:
 Discovery and `--dry-run` are strictly **read-only**: no `gh` writes, no enqueue,
 no launch.
 
-## The `allowAgentLaunch` gate
+## The launch gate (`allowAgentLaunch` + `orchestrateAllowedRepoRoots`)
 
-A launch happens **only** when both are true (both enforced inside
+A launch happens **only** when all of these hold (each enforced inside
 `orchestrateRun()`):
 
 - `allowAgentLaunch: true` in `~/.ralph-dashboard/config.json` (default
-  `false`), and
+  `false`),
+- the target `--repo-root` is **allowlisted** — its absolute path is listed in
+  `orchestrateAllowedRepoRoots` in `~/.ralph-dashboard/config.json`, and
 - preflight passes (clean worktree, `.ralph/` present, `gh` authenticated,
   canonical labels).
 
-If the gate is off, the runner still discovers work but **hard-stops** and prints
-an owner brief telling you to enable the gate — it does not launch.
+### Why the allowlist matters here
+
+`--repo-root` is operator-supplied and this is the most dangerous unattended
+entry point (a scheduler launching auto-merging workers). To prevent an
+arbitrary path from launching, the runner treats `--repo-root` as an
+**override** and validates it against `orchestrateAllowedRepoRoots` — the trusted
+default is the extension's own repo, never the path you pass in. Any repo other
+than the extension itself (e.g. `/Users/tjegbejimba/Code/alisterr`) **must** be
+added to the allowlist or the runner hard-stops with an owner brief:
+
+```jsonc
+// ~/.ralph-dashboard/config.json
+{
+  "allowAgentLaunch": true,
+  "orchestrateAllowedRepoRoots": [
+    "/Users/tjegbejimba/Code/alisterr"
+  ]
+}
+```
+
+If the gate is off, the path is not allowlisted, or preflight fails, the runner
+still discovers work but **hard-stops** and prints an owner brief telling you
+exactly what to fix — it does not launch.
 
 ## Run it manually (always dry-run first)
 
@@ -95,8 +118,11 @@ It is **not** loaded automatically. To enable it:
 
 1. Confirm a few dry-runs look right.
 2. Set `allowAgentLaunch: true` in `~/.ralph-dashboard/config.json`.
-3. Edit the absolute paths in the plist (`node`, `cli.mjs`, `--repo-root`).
-4. Copy it into `~/Library/LaunchAgents/` and `launchctl load` it (commands are
+3. Add the target repo's absolute path to `orchestrateAllowedRepoRoots` in
+   `~/.ralph-dashboard/config.json` (see the gate section above). Without this
+   the runner hard-stops instead of launching.
+4. Edit the absolute paths in the plist (`node`, `cli.mjs`, `--repo-root`).
+5. Copy it into `~/Library/LaunchAgents/` and `launchctl load` it (commands are
    in the plist comments). Unload with `launchctl unload`.
 
 The job is safe to run hourly: discovery is read-only, an active run causes a

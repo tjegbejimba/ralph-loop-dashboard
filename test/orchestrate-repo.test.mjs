@@ -310,6 +310,7 @@ test("launch → orchestrateRun called with gated args; ledger written with run"
   try {
     const result = await runOrchestrateRepo({
       repoRoot: root,
+      trustedRepoRoot: root,
       parallelism: 1,
       runMode: "until-empty",
       ...baseDeps({
@@ -329,7 +330,8 @@ test("launch → orchestrateRun called with gated args; ledger written with run"
 
     assert.equal(result.outcome, "launched");
     assert.equal(result.exitCode, 0);
-    // Gated launch args.
+    // Gated launch args — defaultRepoRoot is the TRUSTED root, not a blind echo
+    // of the operator-supplied repoRoot (that would bypass the allowlist).
     assert.equal(receivedArgs.repoRoot, root);
     assert.equal(receivedArgs.defaultRepoRoot, root);
     assert.deepEqual(receivedArgs.issueNumbers, [3, 7]);
@@ -354,31 +356,29 @@ test("launch → orchestrateRun called with gated args; ledger written with run"
   }
 });
 
-test("allowAgentLaunch=false → gate hard stop surfaced (orchestrateRun gate)", async () => {
+test("allowAgentLaunch=false → gate hard stop, orchestrateRun never called", async () => {
   const root = makeRepo();
-  let receivedArgs = null;
+  let orchestrateCalled = false;
   try {
     const result = await runOrchestrateRepo({
       repoRoot: root,
+      trustedRepoRoot: root,
       ...baseDeps({
         userConfig: { allowAgentLaunch: false },
         execIssueList: ghIssueList([readyIssue(7)]),
-        orchestrateRunFn: async (args) => {
-          receivedArgs = args;
-          return {
-            ok: false,
-            error:
-              "Agent Ralph launch requires allowAgentLaunch: true in the Ralph dashboard user config.",
-          };
+        orchestrateRunFn: async () => {
+          orchestrateCalled = true;
+          return { ok: true };
         },
       }),
     });
-    // orchestrateRun was invoked with the right queue, and its gate failure
-    // is surfaced as a hard stop (not bypassed).
-    assert.deepEqual(receivedArgs.issueNumbers, [7]);
+    // The gate is evaluated up front; with launch disabled we refuse without
+    // ever invoking orchestrateRun, and surface a clear owner brief.
+    assert.equal(orchestrateCalled, false);
     assert.equal(result.ok, false);
     assert.equal(result.outcome, "hard-stop");
     assert.equal(result.exitCode, 1);
+    assert.equal(result.gate.allowAgentLaunch, false);
     assert.match(result.ownerBrief, /allowAgentLaunch/);
     const ledger = JSON.parse(readFileSync(ledgerPath(root), "utf8"));
     assert.equal(ledger.blockers[0].kind, "allowAgentLaunch");
@@ -387,11 +387,76 @@ test("allowAgentLaunch=false → gate hard stop surfaced (orchestrateRun gate)",
   }
 });
 
+test("non-allowlisted --repo-root → gate hard stop, no launch (allowlist enforced)", async () => {
+  const root = makeRepo();
+  const otherTrusted = mkdtempSync(join(tmpdir(), "ralph-orch-trusted-"));
+  let orchestrateCalled = false;
+  try {
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      // Trusted default is a DIFFERENT repo, and root is not in the allowlist,
+      // so the operator-supplied --repo-root must be rejected by the real
+      // resolveOrchestrateRepoRoot (not injected here).
+      trustedRepoRoot: otherTrusted,
+      ...baseDeps({
+        userConfig: { allowAgentLaunch: true, orchestrateAllowedRepoRoots: [] },
+        execIssueList: ghIssueList([readyIssue(7)]),
+        orchestrateRunFn: async () => {
+          orchestrateCalled = true;
+          return { ok: true };
+        },
+      }),
+    });
+    assert.equal(orchestrateCalled, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, "hard-stop");
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.gate.repoRootAllowed, false);
+    assert.match(result.ownerBrief, /orchestrateAllowedRepoRoots/);
+    const ledger = JSON.parse(readFileSync(ledgerPath(root), "utf8"));
+    assert.equal(ledger.blockers[0].kind, "allowlist");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(otherTrusted, { recursive: true, force: true });
+  }
+});
+
+test("allowlisted --repo-root → launches; orchestrateRun gets the TRUSTED default", async () => {
+  const root = makeRepo();
+  const otherTrusted = mkdtempSync(join(tmpdir(), "ralph-orch-trusted-"));
+  let receivedArgs = null;
+  try {
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: otherTrusted,
+      ...baseDeps({
+        // root differs from the trusted default, so it must be allowlisted.
+        userConfig: { allowAgentLaunch: true, orchestrateAllowedRepoRoots: [root] },
+        execIssueList: ghIssueList([readyIssue(7)]),
+        orchestrateRunFn: async (args) => {
+          receivedArgs = args;
+          return { ok: true, runId: "run-9", runDir: join(root, ".ralph", "runs", "run-9"), queue: [{ number: 7 }] };
+        },
+      }),
+    });
+    assert.equal(result.outcome, "launched");
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.gate.repoRootAllowed, true);
+    // The fix: defaultRepoRoot is the trusted constant, repoRoot is the target.
+    assert.equal(receivedArgs.repoRoot, root);
+    assert.equal(receivedArgs.defaultRepoRoot, otherTrusted);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(otherTrusted, { recursive: true, force: true });
+  }
+});
+
 test("preflight failure from orchestrateRun → hard stop with preflight blocker", async () => {
   const root = makeRepo();
   try {
     const result = await runOrchestrateRepo({
       repoRoot: root,
+      trustedRepoRoot: root,
       ...baseDeps({
         execIssueList: ghIssueList([readyIssue(7)]),
         orchestrateRunFn: async () => ({
@@ -406,6 +471,47 @@ test("preflight failure from orchestrateRun → hard stop with preflight blocker
     assert.equal(result.exitCode, 1);
     const ledger = JSON.parse(readFileSync(ledgerPath(root), "utf8"));
     assert.equal(ledger.blockers[0].kind, "preflight");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("local in-flight claims feed active-run detection and discovery (no duplicate queueing)", async () => {
+  const root = makeRepo();
+  let activeRunArgs = null;
+  let queryArgs = null;
+  try {
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        readLocalClaimsFn: () => [7],
+        // No active run found, but the local claim must still reach both calls.
+        resolveActiveRunFn: (_root, opts) => {
+          activeRunArgs = opts;
+          return null;
+        },
+        queryIssuesFn: (args) => {
+          queryArgs = args;
+          // Issue 7 is locally claimed → already_claimed warning → skipped.
+          return {
+            issues: [
+              { number: 7, title: "claimed", url: "u7", taxonomy: { state: "ralph:ready", runnable: true, priority: "priority:P2" } },
+              { number: 9, title: "free", url: "u9", taxonomy: { state: "ralph:ready", runnable: true, priority: "priority:P2" } },
+            ],
+            warnings: [{ type: "already_claimed", issueNumber: 7 }],
+          };
+        },
+        orchestrateRunFn: async () => ({ ok: true, runId: "run-2", runDir: join(root, ".ralph", "runs", "run-2"), queue: [{ number: 9 }] }),
+      }),
+    });
+    // Live claims threaded into active-run detection...
+    assert.deepEqual(activeRunArgs.liveIssues, [7]);
+    // ...and into discovery as claimedIssues.
+    assert.deepEqual(queryArgs.claimedIssues, [7]);
+    // The claimed issue is skipped, only the free one is queued.
+    assert.deepEqual(result.queue.map((i) => i.number), [9]);
+    assert.ok(result.skipped.some((s) => s.number === 7));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

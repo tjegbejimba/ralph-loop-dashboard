@@ -20,12 +20,20 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
-import { orchestrateRun as orchestrateRalphRun } from "./loop-launch-controller.mjs";
+import { orchestrateRun as orchestrateRalphRun, resolveOrchestrateRepoRoot } from "./loop-launch-controller.mjs";
 import { resolveActiveRun } from "./status-data.mjs";
 import { queryIssues } from "./issue-query.mjs";
 import { classifyIssue, RALPH_STATES, CANONICAL_LABELS } from "./label-taxonomy.mjs";
 
 export const LEDGER_SCHEMA_VERSION = "ralph-orchestrator/v1";
+
+// The extension's own repo root (where this code is installed). Used as the
+// trusted default when validating an operator-supplied --repo-root against the
+// orchestrateAllowedRepoRoots allowlist: a --repo-root that differs from this is
+// an OVERRIDE and must be allowlisted (PR #97 posture). Derived from this
+// module's location (extension/lib/), never from operator-controlled cwd/env, so
+// it can't be redirected to disable the allowlist on this headless entry point.
+const DEFAULT_TRUSTED_REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 
 // V1 repo-maintain parameters (repo-maintain.md "V1 parameters"): at most 3
 // issues and 1 worker per new run, run until the bounded queue drains.
@@ -108,6 +116,22 @@ function defaultListLabels(slug) {
   if (result.status !== 0) throw new Error(result.stderr || "gh label list failed");
   const parsed = JSON.parse(result.stdout || "[]");
   return parsed.map((entry) => entry?.name).filter(Boolean);
+}
+
+// Read the repo's currently-claimed issue numbers from `.ralph/state.json`
+// (canonical for live workers). These feed both active-run detection and
+// discovery so a locally-claimed issue is never re-queued before its run's
+// status.json catches up.
+function defaultReadLocalClaims(repoRoot) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(repoRoot, ".ralph", "state.json"), "utf8"));
+    const claims = parsed?.claims && typeof parsed.claims === "object" ? parsed.claims : {};
+    return Object.keys(claims)
+      .map((key) => Number(key))
+      .filter((n) => Number.isFinite(n));
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -203,8 +227,14 @@ export async function runOrchestrateRepo(options = {}) {
     runMode = REPO_MAINTAIN_DEFAULTS.runMode,
     userConfig = {},
     now = () => new Date(),
+    // The extension's trusted repo root. An operator-supplied repoRoot that
+    // differs from this is an allowlist OVERRIDE (must be in
+    // orchestrateAllowedRepoRoots). Defaults to this module's install location.
+    trustedRepoRoot = DEFAULT_TRUSTED_REPO_ROOT,
     // Injectable collaborators:
     resolveActiveRunFn = resolveActiveRun,
+    resolveRepoRootFn = resolveOrchestrateRepoRoot,
+    readLocalClaimsFn = defaultReadLocalClaims,
     listLabels = defaultListLabels,
     execIssueList, // execCommand for queryIssues (returns gh stdout JSON string)
     queryIssuesFn = queryIssues,
@@ -301,10 +331,19 @@ export async function runOrchestrateRepo(options = {}) {
     ownerBrief: null,
   };
 
+  // Local live claims (state.json) feed both active-run detection and discovery
+  // so a locally-claimed Ralph duplicate is deferred/skipped, never re-queued.
+  let localClaims = [];
+  try {
+    localClaims = readLocalClaimsFn(repoRoot) || [];
+  } catch {
+    localClaims = [];
+  }
+
   // Step 4: concurrency — one active run per repo. Defer if a run is live.
   let activeRun = null;
   try {
-    activeRun = resolveActiveRunFn(repoRoot);
+    activeRun = resolveActiveRunFn(repoRoot, { liveIssues: localClaims });
   } catch {
     activeRun = null;
   }
@@ -364,7 +403,7 @@ export async function runOrchestrateRepo(options = {}) {
     repoName: slugInfo.name,
     searchQuery: issueSearch,
     execCommand: execIssueList,
-    claimedIssues: [],
+    claimedIssues: localClaims,
   });
   if (discovery.error) {
     return hardStop({
@@ -422,11 +461,31 @@ export async function runOrchestrateRepo(options = {}) {
   const queue = buildBoundedQueue(eligible, { maxIssues });
   result.queue = queue;
 
-  const gateOk = userConfig?.allowAgentLaunch === true;
+  const allowLaunch = userConfig?.allowAgentLaunch === true;
+  // Validate the operator-supplied repoRoot as an OVERRIDE against the trusted
+  // default. A repoRoot equal to the trusted default is allowed; anything else
+  // must be in orchestrateAllowedRepoRoots. This is the same gate orchestrateRun
+  // enforces — we evaluate it up front so a non-allowlisted target hard-stops
+  // with a clear owner brief and never reaches a launch.
+  const repoRootDecision = resolveRepoRootFn({
+    requested: repoRoot,
+    defaultRepoRoot: trustedRepoRoot,
+    userConfig,
+  });
+  const repoRootAllowed = repoRootDecision?.ok === true;
+  const gateOk = allowLaunch && repoRootAllowed;
+  let gateReason = null;
+  if (!allowLaunch) {
+    gateReason = "allowAgentLaunch is not enabled in ~/.ralph-dashboard/config.json";
+  } else if (!repoRootAllowed) {
+    gateReason = repoRootDecision?.error
+      || `repoRoot ${repoRoot} is not listed in orchestrateAllowedRepoRoots.`;
+  }
   result.gate = {
-    allowAgentLaunch: gateOk,
+    allowAgentLaunch: allowLaunch,
+    repoRootAllowed,
     status: gateOk ? "LAUNCH" : "HARD STOP",
-    reason: gateOk ? null : "allowAgentLaunch is not enabled in ~/.ralph-dashboard/config.json",
+    reason: gateReason,
   };
 
   ledger.queuedIssues = queue.map((issue) => ({
@@ -455,12 +514,33 @@ export async function runOrchestrateRepo(options = {}) {
     return result;
   }
 
+  // Gate hard stop — refuse to launch and surface an owner brief. We never
+  // bypass the gate or call launch.sh; orchestrateRun re-enforces this too.
+  if (!gateOk) {
+    const issueNumbers = queue.map((issue) => issue.number);
+    const kind = !allowLaunch ? "allowAgentLaunch" : "allowlist";
+    ledger.phase = "paused";
+    ledger.blockers = [{ kind, ref: slug, detail: gateReason }];
+    ledger.lastOwnerDecision = null;
+    ledger.updatedAt = now().toISOString();
+    writeLedger(repoRoot, ledger);
+    return {
+      ...result,
+      ok: false,
+      outcome: "hard-stop",
+      exitCode: 1,
+      ownerBrief: gateHardStopBrief({ slug, kind, repoRoot, issueNumbers }),
+      ledgerWritten: true,
+    };
+  }
+
   // Step 8: launch behind the gate. orchestrateRun enforces allowAgentLaunch +
-  // preflight; we never bypass it or call launch.sh --start directly.
+  // the allowlist + preflight against the TRUSTED default; we never bypass it or
+  // call launch.sh --start directly.
   const issueNumbers = queue.map((issue) => issue.number);
   const launch = await orchestrateRunFn({
     repoRoot,
-    defaultRepoRoot: repoRoot,
+    defaultRepoRoot: trustedRepoRoot,
     issueNumbers,
     runOptions: { parallelism, runMode },
     userConfig,
@@ -504,9 +584,28 @@ export async function runOrchestrateRepo(options = {}) {
 function classifyLaunchFailure(launch) {
   if (launch?.preflight) return "preflight";
   const error = String(launch?.error || "");
+  if (/orchestrateAllowedRepoRoots|not listed in/i.test(error)) return "allowlist";
   if (/allowAgentLaunch/i.test(error)) return "allowAgentLaunch";
   if (/already running/i.test(error)) return "worker-stall";
   return "access";
+}
+
+// Owner brief for an up-front gate hard stop (gate evaluated before launch).
+function gateHardStopBrief({ slug, kind, repoRoot, issueNumbers }) {
+  const queued = issueNumbers.map((n) => `#${n}`).join(", ");
+  const count = issueNumbers.length;
+  if (kind === "allowlist") {
+    return (
+      `repo-maintain found ${count} ready issue(s) for ${slug} (${queued}) but its ` +
+      `checkout ${repoRoot} is not allowlisted. Add its absolute path to ` +
+      `"orchestrateAllowedRepoRoots" in ~/.ralph-dashboard/config.json, then re-run.`
+    );
+  }
+  return (
+    `repo-maintain has ${count} ready issue(s) for ${slug} (${queued}) but agent ` +
+    `launch is gated off. Set "allowAgentLaunch": true in ` +
+    `~/.ralph-dashboard/config.json to let the runner launch, then re-run.`
+  );
 }
 
 function launchHardStopBrief({ slug, kind, detail, issueNumbers }) {
@@ -530,28 +629,39 @@ function launchHardStopBrief({ slug, kind, detail, issueNumbers }) {
 
 /**
  * Render the dry-run / plan text (zero-mutation plan output).
+ *
+ * A hard-stop result (e.g. missing .ralph) carries only partial fields, so this
+ * defers to renderSummary for those rather than dereferencing absent sections.
  */
 export function renderPlan(result) {
+  if (result?.ok === false || result?.outcome === "hard-stop") {
+    return renderSummary(result);
+  }
+  const concurrency = result.concurrency || { activeRunDetected: false, activeRunId: null };
+  const labelPrecondition = result.labelPrecondition || { ok: true, missing: [] };
+  const discovered = result.discovered || [];
+  const skipped = result.skipped || [];
+  const queue = result.queue || [];
   const lines = [];
   lines.push(`Ralph repo-maintain — plan (dry-run)`);
   lines.push(`  repo:          ${result.repo}`);
   lines.push(`  repoRoot:      ${result.repoRoot}`);
   lines.push(`  issueSearch:   ${result.issueSearch}`);
   lines.push(
-    `  concurrency:   ${result.concurrency.activeRunDetected ? `active run ${result.concurrency.activeRunId || ""} — would DEFER` : "no active run"}`,
+    `  concurrency:   ${concurrency.activeRunDetected ? `active run ${concurrency.activeRunId || ""} — would DEFER` : "no active run"}`,
   );
   lines.push(
-    `  labels:        ${result.labelPrecondition.ok ? "canonical ralph:* present" : `MISSING ${result.labelPrecondition.missing.join(", ")} — would SKIP`}`,
+    `  labels:        ${labelPrecondition.ok ? "canonical ralph:* present" : `MISSING ${labelPrecondition.missing.join(", ")} — would SKIP`}`,
   );
-  lines.push(`  discovered:    ${result.discovered.length} eligible`);
-  for (const issue of result.discovered) {
+  lines.push(`  discovered:    ${discovered.length} eligible`);
+  for (const issue of discovered) {
     lines.push(`    #${issue.number} [${issue.priority || "?"}] ${issue.title}`);
   }
-  if (result.skipped.length > 0) {
+  if (skipped.length > 0) {
     lines.push(`  skipped:`);
-    for (const s of result.skipped) lines.push(`    #${s.number} — ${s.reason}`);
+    for (const s of skipped) lines.push(`    #${s.number} — ${s.reason}`);
   }
-  lines.push(`  bounded queue: ${result.queue.map((i) => `#${i.number}`).join(", ") || "(none)"}`);
+  lines.push(`  bounded queue: ${queue.map((i) => `#${i.number}`).join(", ") || "(none)"}`);
   if (result.gate) {
     lines.push(`  gate:          ${result.gate.status}${result.gate.reason ? ` — ${result.gate.reason}` : ""}`);
   }

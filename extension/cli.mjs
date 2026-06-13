@@ -400,6 +400,11 @@ async function cmdOrchestrateRepo(flags) {
   const repoRoot = flags.repoRoot ? resolve(flags.repoRoot) : process.cwd();
   const { config: userConfig } = loadUserConfig();
 
+  // The extension's own repo root (cli.mjs lives in extension/). An operator
+  // --repo-root that differs from this is an allowlist override enforced by
+  // orchestrateRun against orchestrateAllowedRepoRoots.
+  const trustedRepoRoot = resolve(import.meta.dirname, "..");
+
   const overrides = {};
   if (flags.maxIssues != null) overrides.maxIssues = flags.maxIssues;
   if (flags.parallelism != null) overrides.parallelism = flags.parallelism;
@@ -411,6 +416,7 @@ async function cmdOrchestrateRepo(flags) {
       repoRoot,
       dryRun: flags.dryRun,
       userConfig,
+      trustedRepoRoot,
       getLoopProcessForRepo: (targetRoot) =>
         createStatusReader({ repoRoot: targetRoot, env: process.env }).getLoopProcess,
       ...overrides,
@@ -421,9 +427,10 @@ async function cmdOrchestrateRepo(flags) {
     return;
   }
 
+  const isHardStop = result.ok === false || result.outcome === "hard-stop";
   if (flags.json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  } else if (result.dryRun) {
+  } else if (result.dryRun && !isHardStop) {
     process.stdout.write(`${renderPlan(result)}\n`);
   } else {
     process.stdout.write(`${renderSummary(result)}\n`);

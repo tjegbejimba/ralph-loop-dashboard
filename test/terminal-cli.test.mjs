@@ -539,6 +539,24 @@ test("cli.mjs orchestrate-repo — missing .ralph hard-stops with a non-zero exi
   }
 });
 
+test("cli.mjs orchestrate-repo --dry-run — missing .ralph prints the owner brief, no crash, exit 1", () => {
+  const empty = mkdtempSync(join(tmpdir(), "ralph-orch-dry-empty-"));
+  try {
+    const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", empty, "--dry-run"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 1, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+    // A hard-stop dry-run must render the owner brief, not crash in renderPlan.
+    assert.match(r.stdout, /HARD STOP/);
+    assert.match(r.stdout, /No \.ralph\/config\.json/);
+    assert.doesNotMatch(r.stderr, /TypeError|Cannot read properties/);
+    assert.equal(existsSync(join(empty, ".ralph")), false);
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
+});
+
 test("cli.mjs orchestrate-repo — rejects a non-positive --max-issues", () => {
   const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", ".", "--max-issues", "0"], {
     encoding: "utf8",
