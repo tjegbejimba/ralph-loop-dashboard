@@ -37,7 +37,6 @@ function authorLogin(comment) {
 }
 
 function pullRequestReferences(issue) {
-  if (Array.isArray(issue?.closingPullRequestsReferences)) return issue.closingPullRequestsReferences;
   if (Array.isArray(issue?.closedByPullRequestsReferences)) return issue.closedByPullRequestsReferences;
   return [];
 }

@@ -412,7 +412,7 @@ function setupOrchestrateRepo({ slug = "octo/alisterr", issues } = {}) {
       labels: [{ name: "ralph:ready" }, { name: "work:standalone" }, { name: "priority:P2" }],
       milestone: null,
       url: `https://github.com/${slug}/issues/12`,
-      closingPullRequestsReferences: [],
+      closedByPullRequestsReferences: [],
     },
   ];
 
@@ -504,7 +504,7 @@ test("cli.mjs orchestrate-repo — bounds discovery to --max-issues, lowest numb
     labels: [{ name: "ralph:ready" }, { name: "work:standalone" }, { name: "priority:P2" }],
     milestone: null,
     url: `https://github.com/octo/alisterr/issues/${number}`,
-    closingPullRequestsReferences: [],
+    closedByPullRequestsReferences: [],
   }));
   const { root, bin } = setupOrchestrateRepo({ issues });
   try {

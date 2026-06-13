@@ -32,14 +32,15 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
     }
     
     // Execute gh CLI to search issues (or use test mock)
-    const output = execCommand ? execCommand() : (() => {
-      const result = spawnSync("gh", [
-        "issue", "list",
-        "--repo", `${repoOwner}/${repoName}`,
-        "--search", searchQuery,
-        "--json", "number,title,body,labels,milestone,url,closingPullRequestsReferences",
-        "--limit", "1000",
-      ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+    const ghArgs = [
+      "issue", "list",
+      "--repo", `${repoOwner}/${repoName}`,
+      "--search", searchQuery,
+      "--json", "number,title,body,labels,milestone,url,closedByPullRequestsReferences",
+      "--limit", "1000",
+    ];
+    const output = execCommand ? execCommand(ghArgs) : (() => {
+      const result = spawnSync("gh", ghArgs, { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
       
       if (result.error) {
         throw result.error;
@@ -74,8 +75,8 @@ export function queryIssues({ repoOwner, repoName, searchQuery, execCommand, cla
       }
       
       // Check for linked open PR
-      const prRefs = Array.isArray(issue.closingPullRequestsReferences) 
-        ? issue.closingPullRequestsReferences 
+      const prRefs = Array.isArray(issue.closedByPullRequestsReferences) 
+        ? issue.closedByPullRequestsReferences 
         : [];
       const openPRs = prRefs.filter(pr => pr && pr.state === "OPEN");
       
