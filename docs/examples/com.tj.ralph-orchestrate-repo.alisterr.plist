@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example launchd agent for the headless `orchestrate-repo` repo-maintain runner.
+
+  WHY launchd (and not a Copilot scheduled workflow):
+    repo-maintain must run from a repo's MAIN checkout, because the only place
+    the local-only, gitignored `.ralph/` directory exists is the main checkout.
+    Copilot scheduled workflows run in throwaway git worktrees that never
+    contain `.ralph/`, so they can't discover work or launch a run. A local
+    launchd (or cron) job pointed at the main checkout is the headless
+    equivalent of the agent-session `repo-maintain` mode.
+
+  THIS FILE IS A SAMPLE — it is NOT loaded automatically.
+  To enable it (only when you're ready — see docs/repo-maintain-local-runner.md):
+    1. Edit the paths below to match your machine:
+         - the `node` binary           (run `command -v node`)
+         - the cli.mjs path            (your ralph-loop-dashboard SOURCE checkout)
+         - the --repo-root path        (the target repo's MAIN checkout)
+    2. Make sure `allowAgentLaunch: true` is set in
+         ~/.ralph-dashboard/config.json   (default false — without it the runner
+         discovers work but hard-stops at the gate instead of launching).
+    3. Dry-run it by hand first:
+         node <ext>/cli.mjs orchestrate-repo --repo-root /Users/tjegbejimba/Code/alisterr --dry-run
+    4. Copy this file to ~/Library/LaunchAgents/ and load it:
+         cp docs/examples/com.tj.ralph-orchestrate-repo.alisterr.plist ~/Library/LaunchAgents/
+         launchctl load ~/Library/LaunchAgents/com.tj.ralph-orchestrate-repo.alisterr.plist
+       Unload with:
+         launchctl unload ~/Library/LaunchAgents/com.tj.ralph-orchestrate-repo.alisterr.plist
+
+  The runner is conservative: discovery is read-only, launches go ONLY through
+  the gated orchestrateRun() path (allowAgentLaunch + preflight), and an active
+  run for the repo causes it to defer. Safe to schedule hourly.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.tj.ralph-orchestrate-repo.alisterr</string>
+
+  <!--
+    argv: node  <cli.mjs>  orchestrate-repo  --repo-root <main checkout>
+    Use ABSOLUTE paths — launchd does not expand ~, $HOME, or PATH lookups.
+    Add --max-issues / --parallelism / --run-mode here to override the V1
+    defaults (<=3 issues, 1 worker, until-empty).
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/Users/tjegbejimba/Code/ralph-loop-dashboard/extension/cli.mjs</string>
+    <string>orchestrate-repo</string>
+    <string>--repo-root</string>
+    <string>/Users/tjegbejimba/Code/alisterr</string>
+  </array>
+
+  <!--
+    launchd starts with a minimal environment. `gh` and `git` must be reachable
+    on PATH, and `gh` must already be authenticated for the target repo.
+    Adjust PATH to include wherever Homebrew/node/gh live on your machine.
+  -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>HOME</key>
+    <string>/Users/tjegbejimba</string>
+  </dict>
+
+  <!-- Run hourly. Swap StartInterval for a StartCalendarInterval block (below)
+       if you'd rather run once a day at a fixed time. -->
+  <key>StartInterval</key>
+  <integer>3600</integer>
+
+  <!--
+    Daily-at-09:05 alternative (remove StartInterval above and uncomment):
+
+    <key>StartCalendarInterval</key>
+    <dict>
+      <key>Hour</key><integer>9</integer>
+      <key>Minute</key><integer>5</integer>
+    </dict>
+  -->
+
+  <!-- Don't fire a catch-up run if the Mac was asleep at the scheduled time. -->
+  <key>RunAtLoad</key>
+  <false/>
+
+  <!-- Capture output so you can inspect deferrals, owner briefs, and launches. -->
+  <key>StandardOutPath</key>
+  <string>/Users/tjegbejimba/Library/Logs/ralph-orchestrate-repo.alisterr.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/tjegbejimba/Library/Logs/ralph-orchestrate-repo.alisterr.err.log</string>
+</dict>
+</plist>
