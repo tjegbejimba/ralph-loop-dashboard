@@ -23,6 +23,8 @@ import { join, resolve, dirname } from "node:path";
 import { createStatusReader } from "./lib/status-data.mjs";
 import { renderStatus, renderLocalStatus, shouldUseColor } from "./lib/terminal-render.mjs";
 import { DEFAULT_TRIAGE_CONFIG, runIssueTriage } from "./lib/issue-triage.mjs";
+import { loadUserConfig } from "./lib/user-config.mjs";
+import { runOrchestrateRepo, renderPlan, renderSummary } from "./lib/orchestrate-repo.mjs";
 
 function findRepoRoot(start) {
   if (process.env.RALPH_REPO_ROOT) return process.env.RALPH_REPO_ROOT;
@@ -49,6 +51,12 @@ function parseFlags(args) {
     triageTaxonomyMode: "legacy",
     triageBotLogin: null,
     triageRepos: [],
+    // orchestrate-repo flags
+    dryRun: false,
+    repoRoot: null,
+    maxIssues: null,
+    parallelism: null,
+    runMode: null,
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -57,13 +65,23 @@ function parseFlags(args) {
     else if (a === "--color") flags.color = true;
     else if (a === "--with-prs") flags.withPrs = true;
     else if (a === "--json") flags.json = true;
-    else if (a === "--dry-run") flags.triageMode = "dry-run";
+    else if (a === "--dry-run") { flags.triageMode = "dry-run"; flags.dryRun = true; }
     else if (a === "--live") flags.triageMode = "live";
     else if (a === "--canonical-labels") flags.triageTaxonomyMode = "canonical";
     else if (a === "--query") flags.triageQuery = args[++i] || null;
     else if (a === "--bot-login") flags.triageBotLogin = args[++i] || null;
     else if (a === "--repo") flags.triageRepos.push(args[++i]);
-    else if (a === "--interval") {
+    else if (a === "--repo-root") flags.repoRoot = args[++i] || null;
+    else if (a === "--run-mode") flags.runMode = args[++i] || null;
+    else if (a === "--max-issues") {
+      const n = Number(args[++i]);
+      if (Number.isInteger(n) && n > 0) flags.maxIssues = n;
+      else flags.maxIssues = NaN;
+    } else if (a === "--parallelism") {
+      const n = Number(args[++i]);
+      if (Number.isInteger(n) && n > 0) flags.parallelism = n;
+      else flags.parallelism = NaN;
+    } else if (a === "--interval") {
       const n = Number(args[++i]);
       if (Number.isFinite(n) && n > 0) flags.interval = n;
     } else if (a === "--worker") {
@@ -85,6 +103,7 @@ function printUsage() {
   node cli.mjs watch [SEC|--interval SEC] [--no-color]
   node cli.mjs follow [N|--worker N]
   node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--repo OWNER/NAME] [--query QUERY] [--json]
+  node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
   node cli.mjs help
 
 Reads .ralph/ from cwd (or RALPH_REPO_ROOT). Shows current workers, queue
@@ -95,6 +114,11 @@ triage runs comment-only advisory issue triage. It defaults to dry-run
 calibration and prints exact comments without posting. Live mode only
 posts/updates the bot-owned triage comment; no labels, closure, or Ralph
 enqueue happens automatically.
+
+orchestrate-repo runs the ralph-orchestrator repo-maintain sweep from a repo's
+MAIN checkout (where the local-only .ralph/ lives) for a local scheduler. It
+discovers ready work read-only and launches a bounded run only through the
+gated orchestrateRun path (allowAgentLaunch + preflight). Use --dry-run first.
 `);
 }
 
@@ -321,6 +345,102 @@ async function cmdTriage(flags) {
   }
 }
 
+function printOrchestrateRepoUsage() {
+  process.stdout.write(`Usage:
+  node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
+
+Runs the ralph-orchestrator repo-maintain sweep from a repo's MAIN checkout
+(where the gitignored, local-only .ralph/ lives) for a local scheduler
+(launchd/cron). Copilot scheduled workflows run in throwaway worktrees that
+never contain .ralph/, so repo-maintain cannot run there — this is the headless
+equivalent.
+
+It resolves the repo, reads issue.issueSearch from .ralph/config.json verbatim,
+defers when a run is already active, skips repos missing canonical ralph:*
+labels, discovers ready work READ-ONLY, builds a bounded queue, and launches
+ONLY through the gated orchestrateRun path (allowAgentLaunch + preflight). It
+never calls launch.sh --start and never mutates GitHub during discovery.
+
+--repo-root PATH   Repo MAIN checkout to operate on (default: cwd). Must contain
+                   .ralph/config.json and .ralph/RALPH.md.
+--dry-run          Read-only: print the plan + would-be ledger; no launch, no
+                   ledger write, no mutations.
+--json             Emit the structured run summary.
+--max-issues N     Cap issues per run (default 3).
+--parallelism N    Workers (default 1).
+--run-mode MODE    one-pass | until-empty (default until-empty).
+
+Launch is gated by allowAgentLaunch: true in ~/.ralph-dashboard/config.json
+(default false) plus a passing preflight. On a hard stop it prints an owner
+brief and exits non-zero.
+`);
+}
+
+async function cmdOrchestrateRepo(flags) {
+  if (flags.help) {
+    printOrchestrateRepoUsage();
+    return;
+  }
+  if (Number.isNaN(flags.maxIssues)) {
+    process.stderr.write("Invalid --max-issues: must be a positive integer.\n");
+    process.exitCode = 2;
+    return;
+  }
+  if (Number.isNaN(flags.parallelism)) {
+    process.stderr.write("Invalid --parallelism: must be a positive integer.\n");
+    process.exitCode = 2;
+    return;
+  }
+  if (flags.runMode != null && flags.runMode !== "one-pass" && flags.runMode !== "until-empty") {
+    process.stderr.write(`Invalid --run-mode: ${JSON.stringify(flags.runMode)}. Expected one-pass or until-empty.\n`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const repoRoot = flags.repoRoot ? resolve(flags.repoRoot) : process.cwd();
+  const { config: userConfig } = loadUserConfig();
+
+  // The extension's own repo root (cli.mjs lives in extension/). An operator
+  // --repo-root that differs from this is an allowlist override enforced by
+  // orchestrateRun against orchestrateAllowedRepoRoots.
+  const trustedRepoRoot = resolve(import.meta.dirname, "..");
+
+  const overrides = {};
+  if (flags.maxIssues != null) overrides.maxIssues = flags.maxIssues;
+  if (flags.parallelism != null) overrides.parallelism = flags.parallelism;
+  if (flags.runMode != null) overrides.runMode = flags.runMode;
+
+  let result;
+  try {
+    result = await runOrchestrateRepo({
+      repoRoot,
+      dryRun: flags.dryRun,
+      userConfig,
+      trustedRepoRoot,
+      getLoopProcessForRepo: (targetRoot) =>
+        createStatusReader({ repoRoot: targetRoot, env: process.env }).getLoopProcess,
+      ...overrides,
+    });
+  } catch (err) {
+    process.stderr.write(`orchestrate-repo error: ${String(err.message || err)}\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const isHardStop = result.ok === false || result.outcome === "hard-stop";
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else if (result.dryRun && !isHardStop) {
+    process.stdout.write(`${renderPlan(result)}\n`);
+  } else {
+    process.stdout.write(`${renderSummary(result)}\n`);
+  }
+
+  if (Number.isInteger(result.exitCode) && result.exitCode !== 0) {
+    process.exitCode = result.exitCode;
+  }
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   if (!cmd || cmd === "help" || cmd === "--help" || cmd === "-h") {
@@ -330,6 +450,10 @@ async function main() {
   const flags = parseFlags(rest);
   if (cmd === "triage") {
     await cmdTriage(flags);
+    return;
+  }
+  if (cmd === "orchestrate-repo") {
+    await cmdOrchestrateRepo(flags);
     return;
   }
   const repoRoot = findRepoRoot();

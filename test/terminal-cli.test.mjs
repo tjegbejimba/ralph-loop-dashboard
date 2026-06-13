@@ -3,7 +3,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, appendFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, appendFileSync, existsSync } from "node:fs";
 import { spawnSync, spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -112,6 +112,7 @@ test("cli.mjs help — exits 0 with usage", () => {
   assert.match(r.stdout, /watch/);
   assert.match(r.stdout, /follow/);
   assert.match(r.stdout, /triage/);
+  assert.match(r.stdout, /orchestrate-repo/);
   assert.match(r.stdout, /dry-run/);
 });
 
@@ -381,6 +382,197 @@ test("cli.mjs unknown command — exits 2", () => {
   const r = spawnSync("node", [CLI, "bogus"], { encoding: "utf8", timeout: 5_000 });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /Unknown command/);
+});
+
+// --- orchestrate-repo integration --------------------------------------------
+
+const ORCH_CANONICAL_LABELS = [
+  "ralph:needs-triage", "ralph:evaluated", "ralph:ready", "ralph:blocked",
+  "ralph:hitl", "ralph:queued", "ralph:running", "ralph:done", "ralph:failed",
+  "work:standalone", "priority:P2",
+];
+
+// Fixture MAIN-checkout repo with a real .ralph/ (config.json + RALPH.md) and a
+// fake `gh` that answers `label list` (canonical labels) and `issue list`
+// (one ready issue) so a dry-run can run fully read-only without the network.
+function setupOrchestrateRepo({ slug = "octo/alisterr", issues } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "ralph-orch-"));
+  mkdirSync(join(root, ".ralph"), { recursive: true });
+  writeFileSync(join(root, ".ralph", "config.json"), JSON.stringify({
+    repo: slug,
+    issue: { issueSearch: "label:ralph:ready is:open no:assignee" },
+  }));
+  writeFileSync(join(root, ".ralph", "RALPH.md"), "# Worker prompt\n");
+
+  const readyIssues = issues || [
+    {
+      number: 12,
+      title: "Add retry to fetcher",
+      body: "",
+      labels: [{ name: "ralph:ready" }, { name: "work:standalone" }, { name: "priority:P2" }],
+      milestone: null,
+      url: `https://github.com/${slug}/issues/12`,
+      closingPullRequestsReferences: [],
+    },
+  ];
+
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const gh = join(bin, "gh");
+  writeFileSync(gh, `#!/usr/bin/env node
+const fs = require("fs");
+const args = process.argv.slice(2);
+if (process.env.GH_CALL_LOG) fs.appendFileSync(process.env.GH_CALL_LOG, args.join(" ") + "\\n");
+if (args[0] === "label" && args[1] === "list") {
+  process.stdout.write(JSON.stringify(${JSON.stringify(ORCH_CANONICAL_LABELS)}.map((name) => ({ name }))));
+} else if (args[0] === "issue" && args[1] === "list") {
+  process.stdout.write(JSON.stringify(${JSON.stringify(readyIssues)}));
+} else {
+  process.stderr.write("unexpected gh args: " + JSON.stringify(args));
+  process.exit(1);
+}
+`);
+  chmodSync(gh, 0o755);
+  return { root, bin };
+}
+
+test("cli.mjs orchestrate-repo --help — documents the headless repo-maintain runner", () => {
+  const r = spawnSync("node", [CLI, "orchestrate-repo", "--help"], { encoding: "utf8", timeout: 5_000 });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.match(r.stdout, /orchestrate-repo \[--repo-root PATH\]/);
+  assert.match(r.stdout, /MAIN checkout/);
+  assert.match(r.stdout, /allowAgentLaunch/);
+  assert.match(r.stdout, /never calls launch\.sh --start/i);
+});
+
+test("cli.mjs orchestrate-repo --dry-run — prints plan, writes no ledger, makes zero gh mutations", () => {
+  const { root, bin } = setupOrchestrateRepo();
+  const callLog = join(root, "gh-calls.log");
+  try {
+    const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", root, "--dry-run"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, GH_CALL_LOG: callLog },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    assert.match(r.stdout, /Ralph repo-maintain — plan \(dry-run\)/);
+    assert.match(r.stdout, /repo:\s+octo\/alisterr/);
+    assert.match(r.stdout, /bounded queue: #12/);
+    assert.match(r.stdout, /Would-be ledger:/);
+
+    // Zero mutations: no ledger file written during a dry-run.
+    assert.equal(existsSync(join(root, ".ralph", "orchestrator", "ledger.json")), false);
+
+    // Discovery is strictly read-only: gh was only asked to list, never mutate.
+    const calls = readFileSync(callLog, "utf8").trim().split("\n");
+    assert.ok(calls.some((c) => c.startsWith("label list")), `expected label list; got ${calls}`);
+    assert.ok(calls.some((c) => c.startsWith("issue list")), `expected issue list; got ${calls}`);
+    assert.ok(
+      calls.every((c) => c.startsWith("label list") || c.startsWith("issue list")),
+      `dry-run must only read; got ${calls}`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs orchestrate-repo --dry-run --json — emits a structured read-only summary", () => {
+  const { root, bin } = setupOrchestrateRepo();
+  try {
+    const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", root, "--dry-run", "--json"], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    const result = JSON.parse(r.stdout);
+    assert.equal(result.dryRun, true);
+    assert.equal(result.outcome, "dry-run");
+    assert.equal(result.repo, "octo/alisterr");
+    assert.deepEqual(result.queue.map((i) => i.number), [12]);
+    assert.equal(result.ledgerWritten, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs orchestrate-repo — bounds discovery to --max-issues, lowest numbers first", () => {
+  const issues = [40, 12, 31, 5].map((number) => ({
+    number,
+    title: `Issue ${number}`,
+    body: "",
+    labels: [{ name: "ralph:ready" }, { name: "work:standalone" }, { name: "priority:P2" }],
+    milestone: null,
+    url: `https://github.com/octo/alisterr/issues/${number}`,
+    closingPullRequestsReferences: [],
+  }));
+  const { root, bin } = setupOrchestrateRepo({ issues });
+  try {
+    const r = spawnSync("node", [
+      CLI, "orchestrate-repo", "--repo-root", root, "--dry-run", "--json", "--max-issues", "2",
+    ], {
+      env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+    assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+    const result = JSON.parse(r.stdout);
+    assert.deepEqual(result.queue.map((i) => i.number), [5, 12]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs orchestrate-repo — missing .ralph hard-stops with a non-zero exit", () => {
+  const empty = mkdtempSync(join(tmpdir(), "ralph-orch-empty-"));
+  try {
+    const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", empty], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 1, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+    assert.match(r.stdout, /HARD STOP/);
+    assert.match(r.stdout, /No \.ralph\/config\.json/);
+    assert.equal(existsSync(join(empty, ".ralph")), false);
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs orchestrate-repo --dry-run — missing .ralph prints the owner brief, no crash, exit 1", () => {
+  const empty = mkdtempSync(join(tmpdir(), "ralph-orch-dry-empty-"));
+  try {
+    const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", empty, "--dry-run"], {
+      encoding: "utf8",
+      timeout: 10_000,
+    });
+    assert.equal(r.status, 1, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+    // A hard-stop dry-run must render the owner brief, not crash in renderPlan.
+    assert.match(r.stdout, /HARD STOP/);
+    assert.match(r.stdout, /No \.ralph\/config\.json/);
+    assert.doesNotMatch(r.stderr, /TypeError|Cannot read properties/);
+    assert.equal(existsSync(join(empty, ".ralph")), false);
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test("cli.mjs orchestrate-repo — rejects a non-positive --max-issues", () => {
+  const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", ".", "--max-issues", "0"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /Invalid --max-issues/);
+});
+
+test("cli.mjs orchestrate-repo — rejects an unknown --run-mode", () => {
+  const r = spawnSync("node", [CLI, "orchestrate-repo", "--repo-root", ".", "--run-mode", "turbo"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /Invalid --run-mode/);
 });
 
 test("cli.mjs watch — renders at least 2 frames and exits cleanly on SIGINT", async () => {
