@@ -26,7 +26,9 @@ gated by the authorization gates in policy.
 > slices, not PRDs. Closing a fully-delivered `work:prd` parent is a **separate,
 > opt-in reconcile** (policy "PRD parent close"), exposed only via
 > `node extension/cli.mjs orchestrate-repo --close-completed-prds [--dry-run]`. It
-> is OFF by default and never runs as part of this sweep.
+> is OFF by default and never runs as part of this sweep. Like the launch path, a
+> non-default `--repo-root` is validated against `orchestrateAllowedRepoRoots`
+> before any close, so the reconcile can only ever touch an allowlisted checkout.
 
 ## V1 parameters (reuse exactly)
 

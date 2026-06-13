@@ -93,11 +93,18 @@ of these hold:
 1. the parent is **OPEN** and labeled **`work:prd`**;
 2. it has **at least one child slice** — a child is an issue whose body carries
    the exact `Parent #<parent>` marker (the same marker preflight, enqueue, and
-   `label-taxonomy.parseParentNumber` use to identify slices);
-3. **every** child slice is **CLOSED**, and **each was closed via a merged PR**
-   (state completed / closed-by-merged-PR — i.e. a `closedByPullRequestsReferences`
-   entry in the `MERGED` state). If **any** child is still open, or a child was
-   closed **without** a merged PR, the parent is **not** closed.
+   `label-taxonomy.parseParentNumber` use to identify slices). Markers that appear
+   only inside fenced or inline **code blocks** are ignored, so a documentation
+   example like `` `Parent #N` `` never counts as a real child;
+3. **every** child slice is **CLOSED**, and **each was closed via a merged PR**.
+   A child counts only if it is `CLOSED` **and** at least one of its closing PRs is
+   merged — verified by looking up the PR's `mergedAt` (`gh pr view <n> --json
+   mergedAt`, non-null), the same way `ralph/lib/state.sh` confirms delivery. The
+   `closedByPullRequestsReferences` entries identify the closing PRs but carry no
+   merge field, so the `mergedAt` lookup is required. This check is **fail-safe**:
+   if merge status can't be determined, the child is treated as **not** merged. If
+   **any** child is still open, or a child was closed **without** a merged PR
+   (closed manually / `not_planned` / unmerged PR), the parent is **not** closed.
 
 On close: `gh issue close <parent> --reason completed` with a comment
 cross-linking the completed child slices and their merge PRs.

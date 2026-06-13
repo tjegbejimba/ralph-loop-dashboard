@@ -25,6 +25,7 @@ import { renderStatus, renderLocalStatus, shouldUseColor } from "./lib/terminal-
 import { DEFAULT_TRIAGE_CONFIG, runIssueTriage } from "./lib/issue-triage.mjs";
 import { loadUserConfig } from "./lib/user-config.mjs";
 import { runOrchestrateRepo, renderPlan, renderSummary, resolveRepoSlug } from "./lib/orchestrate-repo.mjs";
+import { resolveOrchestrateRepoRoot } from "./lib/loop-launch-controller.mjs";
 import { runCloseCompletedPrds, renderCloseCompletedPrds } from "./lib/close-completed-prds.mjs";
 
 function findRepoRoot(start) {
@@ -396,7 +397,29 @@ brief and exits non-zero.
 }
 
 async function cmdCloseCompletedPrds(flags) {
-  const repoRoot = flags.repoRoot ? resolve(flags.repoRoot) : process.cwd();
+  const requestedRepoRoot = flags.repoRoot ? resolve(flags.repoRoot) : process.cwd();
+  const { config: userConfig } = loadUserConfig();
+
+  // Enforce the SAME orchestrateAllowedRepoRoots allowlist the launch path uses
+  // (PR #97/#98 posture). A --repo-root that differs from the extension's own
+  // trusted repo root is an OVERRIDE and must be allowlisted — otherwise an
+  // operator could redirect destructive closes to an arbitrary checkout. The
+  // trusted root is derived from this module's location (the dashboard repo
+  // root, mirroring orchestrate-repo.mjs DEFAULT_TRUSTED_REPO_ROOT), never from
+  // operator cwd/env.
+  const trustedRepoRoot = resolve(import.meta.dirname, "..");
+  const repoRootDecision = resolveOrchestrateRepoRoot({
+    requested: requestedRepoRoot,
+    defaultRepoRoot: trustedRepoRoot,
+    userConfig,
+  });
+  if (!repoRootDecision.ok) {
+    process.stderr.write(`${repoRootDecision.error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const repoRoot = repoRootDecision.repoRoot;
+
   const configPath = join(repoRoot, ".ralph", "config.json");
   if (!existsSync(configPath)) {
     process.stderr.write(
