@@ -16,6 +16,7 @@ conflict and fail closed until repaired.
 | --- | --- |
 | `ralph:needs-triage` | Not yet scoped for Ralph. |
 | `ralph:evaluated` | Reviewed, but not runnable by workers. Used for PRD parent issues. |
+| `ralph:fast-lane` | AUTO-eligible candidate; triage marked it but it still needs one-tap promotion to `ralph:ready`. Not runnable. |
 | `ralph:ready` | Runnable by Ralph when paired with a runnable work type and no blockers. |
 | `ralph:blocked` | Explicitly blocked before worker pickup. |
 | `ralph:hitl` | Human-in-the-loop; not safe for autonomous work. |
@@ -73,6 +74,7 @@ Example setup commands for a repo that has not created Ralph labels yet:
 ```bash
 gh label create ralph:needs-triage --color E4E669 --description "Needs human triage before Ralph work"
 gh label create ralph:evaluated    --color C5DEF5 --description "Reviewed PRD or issue, not worker-runnable"
+gh label create ralph:fast-lane     --color BFD4F2 --description "AUTO-eligible candidate; awaiting one-tap promotion to ralph:ready"
 gh label create ralph:ready        --color 0E8A16 --description "Ready for Ralph workers"
 gh label create ralph:blocked      --color D93F0B --description "Blocked before Ralph pickup"
 gh label create ralph:hitl         --color B60205 --description "Human-in-the-loop; not autonomous"

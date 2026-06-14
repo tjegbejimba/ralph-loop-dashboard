@@ -387,7 +387,7 @@ test("cli.mjs unknown command — exits 2", () => {
 // --- orchestrate-repo integration --------------------------------------------
 
 const ORCH_CANONICAL_LABELS = [
-  "ralph:needs-triage", "ralph:evaluated", "ralph:ready", "ralph:blocked",
+  "ralph:needs-triage", "ralph:evaluated", "ralph:fast-lane", "ralph:ready", "ralph:blocked",
   "ralph:hitl", "ralph:queued", "ralph:running", "ralph:done", "ralph:failed",
   "work:standalone", "priority:P2",
 ];
