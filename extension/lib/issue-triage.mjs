@@ -14,7 +14,7 @@ export const DEFAULT_TRIAGE_CONFIG = {
     {
       owner: "tjegbejimba",
       name: "ralph-loop-dashboard",
-      taxonomyMode: "legacy",
+      taxonomyMode: "canonical",
     },
   ],
   limits: {

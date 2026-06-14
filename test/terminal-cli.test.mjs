@@ -138,7 +138,7 @@ test("cli.mjs triage --repo — targets the given repo instead of the default", 
     const result = JSON.parse(r.stdout);
     assert.equal(result.repos.length, 1);
     assert.equal(result.repos[0].repo, "octocat/hello-world");
-    assert.equal(result.repos[0].query, "label:needs-triage");
+    assert.equal(result.repos[0].query, "label:ralph:needs-triage");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
