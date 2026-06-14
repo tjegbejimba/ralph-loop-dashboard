@@ -13,13 +13,14 @@ hourly Copilot scheduled tick (one per allowlist repo session)
 ```
 
 Entry: an hourly scheduled-workflow tick (no PRD). **A tick runs inside one allowlist
-repo's own session** — `REPO_ROOT` is that repo, and the orchestrator acts on that
-repo only. It does **not** pick among repos or launch a different repo remotely: the
-current `ralph_dashboard_orchestrate` tool can only launch its own session's
-`REPO_ROOT` (see "Tooling prerequisites"). The allowlist, round-robin, and
-≤1-new-run-per-tick cap are enforced by the **fan-out automation** that decides which
-repo sessions tick — not by one session reaching across repos. Fully autonomous,
-gated by the authorization gates in policy.
+repo's own session** — `REPO_ROOT` is that repo, and by design the orchestrator acts
+on that repo only. The allowlist, round-robin, and ≤1-new-run-per-tick cap are
+enforced by the **fan-out automation** that decides which repo sessions tick. A tick
+launches its own session's `REPO_ROOT`; launching a *different* allowlisted checkout
+is supported by the tooling (`ralph_dashboard_orchestrate` accepts an absolute
+`repoRoot` gated by `orchestrateAllowedRepoRoots` — see "Tooling prerequisites") but
+remains the fan-out automation's job, not something one session does ad hoc. Fully
+autonomous, gated by the authorization gates in policy.
 
 > **Read-only / launch-only sweep.** A repo-maintain tick discovers ready work
 > read-only and, behind the gate, launches workers. It **closes nothing** — not
@@ -41,6 +42,12 @@ automation** (the scheduler that ticks repo sessions), not of a single session:
 - **Selection order:** round-robin by *last successful automated start* (oldest
   first), tracked in the ledger.
 
+> **Current deployment note (informational, not the spec).** The orchestrator
+> workflows actually enabled today are `ralph-loop-dashboard` (daily) and `alisterr`
+> (daily); `kindleflow` is on the normative V1 allowlist above but is not yet ticked.
+> This note records what is wired up now — the bullet list above remains the V1
+> design spec and is the source of truth for the allowlist.
+
 Within a single repo session's tick:
 
 - **Per new run:** at most **3** issues, **1** worker.
@@ -51,20 +58,25 @@ Within a single repo session's tick:
 
 ## Tooling prerequisites
 
-Cross-repo orchestration from a *single* session is not yet supported, which is why
-repo-maintain runs as a **per-repo session**:
+repo-maintain runs as a **per-repo session** by design — the fan-out automation owns
+the allowlist, round-robin, and per-tick cap. The underlying tools now support
+targeting other repos (#94 and #95 have landed); a single session simply defers that
+fan-out to the scheduler rather than reaching across repos ad hoc:
 
-- `ralph_dashboard_orchestrate` exposes only `issueNumbers` / `queue` / `runOptions` /
-  `verify` / `timeoutMinutes` — it has **no repo parameter** and always launches the
-  extension's resolved `REPO_ROOT`. A single session cannot launch a different
-  allowlist repo. (Tracked: #94.)
-- `triage` is hardcoded to the default repo (`tjegbejimba/ralph-loop-dashboard`) with
-  **no `--repo` flag**, so the triage primitive can only classify that repo. (Tracked:
-  #95.)
+- `ralph_dashboard_orchestrate` accepts `issueNumbers` / `queue` / `runOptions` /
+  `verify` / `timeoutMinutes` **and** an optional absolute `repoRoot`. A non-default
+  `repoRoot` is gated by `orchestrateAllowedRepoRoots` and must be a real local
+  checkout that contains `.ralph/` (the gitignored, local-only Ralph install). Absent
+  `repoRoot`, it launches the extension's resolved `REPO_ROOT`. (#94, landed.)
+- `triage` accepts a repeatable **`--repo OWNER/NAME`** flag, so the triage primitive
+  can classify one or more explicit repos in a single run (the scheduled triage
+  workflow uses it). Without `--repo` it targets the configured default repo. `--repo`
+  selects repos **by name** and is independent of the `orchestrateAllowedRepoRoots`
+  launch allowlist. (#95, landed.)
 
-Until #94 and #95 land, each allowlist repo must be swept by its own session, and
-launch targets that session's `REPO_ROOT`. Do not attempt to launch or triage another
-repo from this session.
+A repo-maintain tick still operates on its own session's `REPO_ROOT`: cross-checkout
+launch is possible only against an allowlisted local checkout that contains `.ralph/`,
+and choosing which repos tick is the fan-out automation's job, not one session's.
 
 ## Steps
 
@@ -91,10 +103,10 @@ tick fired for. The orchestrator does not reach into other repos.
    `.ralph/config.json` and run it read-only (`gh issue list --search "<issueSearch>"
    --json number,title,labels,url` — `gh` defaults to the session's repo). Only
    `ralph:ready` + `work:slice|standalone`, open, unassigned, no unresolved blocker
-   issues qualify. Triage classification is available only for the default repo
-   (`triage` has no `--repo` flag — see "Tooling prerequisites" and
-   `../references/triage-contract.md`); escalate to the advisory agent only by
-   exception.
+   issues qualify. Triage classification covers this session's repo by default and can
+   also cover explicit repos via `triage --repo OWNER/NAME` (see "Tooling
+   prerequisites" and `../references/triage-contract.md`); escalate to the advisory
+   agent only by exception.
 
 5. **Build a bounded queue.** Take up to 3 qualifying issues (lowest-number first
    within the ready set), dropping any with an open linked PR or a local Ralph
@@ -104,7 +116,9 @@ tick fired for. The orchestrator does not reach into other repos.
 6. **Launch behind the gate.** With policy's authorization gates satisfied, launch
    through the `ralph_dashboard_orchestrate` tool (wraps `orchestrateRun()`) with the
    bounded queue and `parallelism: 1`. The launch targets this session's `REPO_ROOT`
-   (the tool has no repo parameter — see "Tooling prerequisites"). If
+   (a repo-maintain tick does not pass a non-default `repoRoot`; cross-checkout launch
+   via the gated `repoRoot` is the fan-out automation's job — see "Tooling
+   prerequisites"). If
    `allowAgentLaunch` is not enabled (or `orchestrateRun` is unavailable), do not
    launch — emit the gate hard stop and stop. Never call
    `launch.sh --start`/`--foreground`.
@@ -138,8 +152,8 @@ only read-only calls (`gh issue list --search …`, `launch.sh --status`,
    qualifying issues (compact, one line each).
 5. **Bounded queue** — the ≤3 issues that would be queued, with skips explained.
 6. **Gated launch decision** — each authorization gate + status; LAUNCH or HARD STOP.
-   The launch would target this session's `REPO_ROOT` (no cross-repo target — see
-   "Tooling prerequisites").
+   The launch would target this session's `REPO_ROOT` (a tick does not pass a
+   non-default `repoRoot` — see "Tooling prerequisites").
 7. **Ledger JSON** — the object that *would* be written. Shown, not written.
 
 If a hard stop or label precondition is reached, also render the owner-decision

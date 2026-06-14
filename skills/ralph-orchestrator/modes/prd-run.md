@@ -30,8 +30,12 @@ by the authorization gates in policy. The single human hand was PRD creation.
    the PRD into independently-grabbable child slices. Slice authoring is a reasoning
    task — **never** build or call a CLI slicer. `to-issues` creates each child with
    an exact `Parent #N` marker and canonical labels (`work:slice`, a `priority:*`,
-   and the state it assigns). The orchestrator consumes the resulting issue numbers;
-   it does not hand-edit slice bodies.
+   and the state it assigns). Because the PRD grilling that produced these slices is
+   itself the triage step, `to-issues` labels AFK slices as **born-runnable**
+   (`ralph:ready` on canonical repos, `ready-for-agent` on legacy repos) and reserves
+   a triage state only for HITL slices that still need a human decision — so AFK
+   slices normally reach enqueue already runnable. The orchestrator consumes the
+   resulting issue numbers; it does not hand-edit slice bodies.
 
 4. **Enqueue via the Ralph CLI.** Run `./.ralph/launch.sh --enqueue-prd <N>` when the
    child slices are canonically labelled and carry the exact `Parent #N` marker, or
@@ -44,7 +48,13 @@ by the authorization gates in policy. The single human hand was PRD creation.
    auto-resolvable ones via the canonical CLI path (see policy "Auto-resolvable vs
    hard-stop preflight"); re-run `--enqueue-prd` if you fixed a placeholder/priority
    default. Any label/state/blocker/dirty-tree finding is a **hard stop** → owner
-   brief, then stop. Record queued issues + blockers in the ledger.
+   brief, then stop. A slice found in a non-runnable state (e.g.
+   `not_runnable_state(ralph:needs-triage)`) is today one of these hard stops —
+   though, because `to-issues` now births AFK slices runnable (step 3), it should be
+   rare. (A future deterministic promotion path — the lane router / `ralph:evaluated`
+   promotion in #106/#109 — may auto-recover this once implemented; until that code
+   lands it is **not** an available recovery route and the hard stop stands.) Record
+   queued issues + blockers in the ledger.
 
 6. **Launch behind the gate.** Only when preflight verdict is ✅ and policy's
    authorization gates all hold, launch through the `ralph_dashboard_orchestrate`
