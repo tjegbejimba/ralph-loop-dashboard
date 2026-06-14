@@ -36,8 +36,8 @@ autonomous, gated by the authorization gates in policy.
 The **allowlist** and **round-robin / per-tick cap** are properties of the **fan-out
 automation** (the scheduler that ticks repo sessions), not of a single session:
 
-- **Allowlist:** `alisterr`, `kindleflow`. No other repos in V1 — only these repos'
-  sessions are ticked.
+- **Allowlist:** `alisterr`, `kindleflow`, `ralph-loop-dashboard`. No other repos in
+  V1 — only these repos' sessions are ticked.
 - **Per tick (global):** at most **1** new repo run across the allowlist.
 - **Selection order:** round-robin by *last successful automated start* (oldest
   first), tracked in the ledger.
@@ -45,6 +45,7 @@ automation** (the scheduler that ticks repo sessions), not of a single session:
 > **Current deployment note (informational, not the spec).** The orchestrator
 > workflows actually enabled today are `ralph-loop-dashboard` (daily) and `alisterr`
 > (daily); `kindleflow` is on the normative V1 allowlist above but is not yet ticked.
+> All three are now on the normative V1 allowlist above.
 > This note records what is wired up now — the bullet list above remains the V1
 > design spec and is the source of truth for the allowlist.
 
@@ -85,7 +86,8 @@ tick fired for. The orchestrator does not reach into other repos.
 
 1. **Confirm the target.** This tick runs inside one allowlist repo's session;
    `REPO_ROOT` is that repo. Confirm it is on the allowlist (`alisterr`,
-   `kindleflow`); if not, stop — repo-maintain only runs for allowlist repos. The
+   `kindleflow`, `ralph-loop-dashboard`); if not, stop — repo-maintain only runs for
+   allowlist repos. The
    fan-out automation already applied round-robin and the ≤1-new-run-per-tick cap when
    it chose to tick this session.
 
