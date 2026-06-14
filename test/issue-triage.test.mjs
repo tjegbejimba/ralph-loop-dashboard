@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  DEFAULT_TRIAGE_CONFIG,
   buildTriageQuery,
   evaluateIssueForTriage,
   planTriageComment,
@@ -14,6 +15,13 @@ describe("issue triage advisory automation", () => {
     assert.equal(buildTriageQuery({}), "label:needs-triage");
     assert.equal(buildTriageQuery({ taxonomyMode: "canonical" }), "label:ralph:needs-triage");
     assert.equal(buildTriageQuery({ query: "label:custom-triage" }), "label:custom-triage");
+  });
+
+  it("defaults the configured repo to the canonical needs-triage query", () => {
+    for (const repoConfig of DEFAULT_TRIAGE_CONFIG.repos) {
+      assert.equal(repoConfig.taxonomyMode, "canonical");
+      assert.equal(buildTriageQuery(repoConfig), "label:ralph:needs-triage");
+    }
   });
 
   it("recommends pursuing clear Ralph safety work and renders a complete triage opinion", () => {

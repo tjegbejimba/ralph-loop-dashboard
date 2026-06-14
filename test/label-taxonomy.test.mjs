@@ -21,6 +21,7 @@ describe("Ralph label taxonomy", () => {
       [
         { name: "ralph:needs-triage", color: "FBCA04", description: "Needs human triage before Ralph automation" },
         { name: "ralph:evaluated", color: "C5DEF5", description: "Reviewed and accepted, but not yet queued for Ralph" },
+        { name: "ralph:fast-lane", color: "BFD4F2", description: "AUTO-eligible candidate; awaiting one-tap promotion to ralph:ready" },
         { name: "ralph:ready", color: "0E8A16", description: "Safe for Ralph to queue and run" },
         { name: "ralph:blocked", color: "D93F0B", description: "Ralph-ready but waiting on unsatisfied dependencies" },
         { name: "ralph:hitl", color: "B60205", description: "Requires human judgment/action; Ralph must not run" },

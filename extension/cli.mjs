@@ -50,7 +50,7 @@ function parseFlags(args) {
     json: false,
     triageMode: "dry-run",
     triageQuery: null,
-    triageTaxonomyMode: "legacy",
+    triageTaxonomyMode: "canonical",
     triageBotLogin: null,
     triageRepos: [],
     // orchestrate-repo flags
@@ -138,11 +138,12 @@ function printTriageUsage() {
 
 Runs comment-only advisory issue triage for configured repositories.
 Default repo: tjegbejimba/ralph-loop-dashboard
-Default query: label:needs-triage
+Default query: label:ralph:needs-triage
 
 --dry-run           Print exact comments; do not post anything. Default.
 --live              Post/update only the bot-owned triage comment.
---canonical-labels  Use label:ralph:needs-triage instead of the legacy query.
+--canonical-labels  Use label:ralph:needs-triage (now the default; kept for
+                    backward compatibility).
 --repo OWNER/NAME   Triage this repo instead of the default. Repeatable to
                     triage several repos in one run.
 --query QUERY       Override the triage issue search query.

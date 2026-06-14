@@ -138,7 +138,7 @@ test("cli.mjs triage --repo — targets the given repo instead of the default", 
     const result = JSON.parse(r.stdout);
     assert.equal(result.repos.length, 1);
     assert.equal(result.repos[0].repo, "octocat/hello-world");
-    assert.equal(result.repos[0].query, "label:needs-triage");
+    assert.equal(result.repos[0].query, "label:ralph:needs-triage");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -387,7 +387,7 @@ test("cli.mjs unknown command — exits 2", () => {
 // --- orchestrate-repo integration --------------------------------------------
 
 const ORCH_CANONICAL_LABELS = [
-  "ralph:needs-triage", "ralph:evaluated", "ralph:ready", "ralph:blocked",
+  "ralph:needs-triage", "ralph:evaluated", "ralph:fast-lane", "ralph:ready", "ralph:blocked",
   "ralph:hitl", "ralph:queued", "ralph:running", "ralph:done", "ralph:failed",
   "work:standalone", "priority:P2",
 ];
