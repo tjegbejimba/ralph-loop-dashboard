@@ -410,7 +410,7 @@ describe("issue triage advisory automation", () => {
       title: "Prevent unsafe launches when generated files are dirty",
       body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
       labels: ["ralph:needs-triage"],
-      author: { login: "tjegbejimba" },
+      author: { login: "tjegbejimba", is_bot: false },
       authorAssociation: "OWNER",
     };
 
@@ -419,8 +419,25 @@ describe("issue triage advisory automation", () => {
       title: "Prevent unsafe launches when generated files are dirty",
       body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
       labels: ["ralph:needs-triage"],
-      author: { login: "external-contributor" },
+      author: { login: "external-contributor", is_bot: false },
       authorAssociation: "CONTRIBUTOR",
+    };
+
+    const memberIssue = {
+      number: 403,
+      title: "Prevent unsafe launches when generated files are dirty",
+      body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
+      labels: ["ralph:needs-triage"],
+      author: { login: "team-member", is_bot: false },
+      authorAssociation: "MEMBER",
+    };
+
+    const botIssue = {
+      number: 404,
+      title: "Prevent unsafe launches when generated files are dirty",
+      body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
+      labels: ["ralph:needs-triage"],
+      author: { login: "github-actions[bot]", is_bot: true },
     };
 
     const opinion1 = evaluateIssueForTriage({ issue: tjAuthoredIssue });
@@ -432,15 +449,25 @@ describe("issue triage advisory automation", () => {
     assert.equal(opinion2.recommendation, "Pursue");
     assert.equal(opinion2.confidence, "high");
     assert.equal(opinion2.fastLaneCandidate, false);
+
+    const opinion3 = evaluateIssueForTriage({ issue: memberIssue });
+    assert.equal(opinion3.recommendation, "Pursue");
+    assert.equal(opinion3.confidence, "high");
+    assert.equal(opinion3.fastLaneCandidate, true);
+
+    const opinion4 = evaluateIssueForTriage({ issue: botIssue });
+    assert.equal(opinion4.recommendation, "Pursue");
+    assert.equal(opinion4.confidence, "high");
+    assert.equal(opinion4.fastLaneCandidate, true);
   });
 
   it("excludes issues with blockers from fast-lane candidacy", () => {
     const blockedIssue = {
-      number: 403,
+      number: 405,
       title: "Prevent unsafe launches when generated files are dirty",
       body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files\n\n## Blocked by\n- #17",
       labels: ["ralph:needs-triage"],
-      author: { login: "tjegbejimba" },
+      author: { login: "tjegbejimba", is_bot: false },
       authorAssociation: "OWNER",
     };
 
@@ -452,11 +479,11 @@ describe("issue triage advisory automation", () => {
 
   it("requires high confidence and safe after prep for fast-lane", () => {
     const mediumConfidenceIssue = {
-      number: 404,
+      number: 406,
       title: "Maybe improve Ralph safety",
       body: "Ralph could be better somehow.",
       labels: ["ralph:needs-triage"],
-      author: { login: "tjegbejimba" },
+      author: { login: "tjegbejimba", is_bot: false },
       authorAssociation: "OWNER",
     };
 
@@ -466,20 +493,20 @@ describe("issue triage advisory automation", () => {
 
   it("accepts both work:slice and work:standalone for fast-lane", () => {
     const standaloneIssue = {
-      number: 405,
+      number: 407,
       title: "Prevent unsafe launches when generated files are dirty",
       body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
       labels: ["ralph:needs-triage"],
-      author: { login: "tjegbejimba" },
+      author: { login: "tjegbejimba", is_bot: false },
       authorAssociation: "OWNER",
     };
 
     const sliceIssue = {
-      number: 406,
+      number: 408,
       title: "Slice 3: Add preflight check for dirty generated files",
       body: "Implement the preflight check.\n\nParent #100\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
       labels: ["ralph:needs-triage"],
-      author: { login: "tjegbejimba" },
+      author: { login: "tjegbejimba", is_bot: false },
       authorAssociation: "OWNER",
     };
 

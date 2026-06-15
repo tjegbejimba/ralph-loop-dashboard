@@ -230,10 +230,19 @@ function nextActionFor(recommendation, workTypeRecommendation) {
 
 function isTrustedAuthor(issue) {
   const authorLogin = issue?.author?.login || "";
+  const isBot = issue?.author?.is_bot === true;
   const authorAssociation = issue?.authorAssociation || "";
+  
+  // TJ-authored issues are always trusted
   if (authorLogin === "tjegbejimba") return true;
-  if (authorAssociation === "OWNER") return true;
-  if (authorLogin.endsWith("[bot]")) return true;
+  
+  // OWNER/MEMBER associations are trusted (team members)
+  if (authorAssociation === "OWNER" || authorAssociation === "MEMBER") return true;
+  
+  // Bot-authored issues (e.g., issue forms) are trusted
+  if (isBot) return true;
+  
+  // Future: check for issue-form sourced intake (tracked separately as #111)
   return false;
 }
 
@@ -495,12 +504,57 @@ async function defaultFetchIssues({ repo, query }) {
     "--search",
     query,
     "--json",
-    "number,title,body,labels,state,createdAt,updatedAt,assignees,closedByPullRequestsReferences,url,author,authorAssociation",
+    "number,title,body,labels,state,createdAt,updatedAt,assignees,closedByPullRequestsReferences,url,author",
     "--limit",
     "100",
   ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
   assertCommandOk(result, "gh issue list");
-  return JSON.parse(result.stdout || "[]");
+  const issues = JSON.parse(result.stdout || "[]");
+  
+  // Enrich with authorAssociation from GraphQL (gh issue list doesn't support it)
+  // Use a single GraphQL call to batch-fetch authorAssociation for all issues
+  if (issues.length > 0) {
+    try {
+      const issueNumbers = issues.map((issue) => issue.number);
+      const query = `
+        query($owner: String!, $name: String!, $numbers: [Int!]!) {
+          repository(owner: $owner, name: $name) {
+            ${issueNumbers.map((num, idx) => `
+              issue${idx}: issue(number: ${num}) {
+                number
+                authorAssociation
+              }
+            `).join("\n")}
+          }
+        }
+      `;
+      const [owner, name] = repo.split("/");
+      const gqlResult = spawnSync("gh", [
+        "api",
+        "graphql",
+        "-f",
+        `query=${query}`,
+        "-f",
+        `owner=${owner}`,
+        "-f",
+        `name=${name}`,
+      ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+      
+      if (gqlResult.status === 0) {
+        const data = JSON.parse(gqlResult.stdout || "{}").data?.repository || {};
+        issues.forEach((issue, idx) => {
+          const gqlIssue = data[`issue${idx}`];
+          if (gqlIssue?.authorAssociation) {
+            issue.authorAssociation = gqlIssue.authorAssociation;
+          }
+        });
+      }
+    } catch (err) {
+      // Fall back to fetching individually if batch fails
+    }
+  }
+  
+  return issues;
 }
 
 async function defaultFetchComments({ repo, issueNumber }) {

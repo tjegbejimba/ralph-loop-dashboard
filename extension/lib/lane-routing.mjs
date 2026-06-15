@@ -122,18 +122,25 @@ function buildRefineReason(issue, opinion) {
 
 /**
  * Check if issue author is trusted for AUTO-lane promotion.
- * Trusted authors: OWNER, MEMBER, or issue-form sourced intake.
+ * Trusted authors: TJ, OWNER, MEMBER, or bot-sourced intake.
  *
  * @param {object} issue
  * @returns {boolean}
  */
 function isTrustedAuthor(issue) {
+  const authorLogin = issue?.author?.login || "";
+  const isBot = issue?.author?.is_bot === true;
   const authorAssociation = issue?.authorAssociation;
-  if (authorAssociation === "OWNER" || authorAssociation === "MEMBER") {
-    return true;
-  }
-
+  
+  // TJ-authored issues are always trusted
+  if (authorLogin === "tjegbejimba") return true;
+  
+  // OWNER/MEMBER associations are trusted (team members)
+  if (authorAssociation === "OWNER" || authorAssociation === "MEMBER") return true;
+  
+  // Bot-authored issues (e.g., issue forms) are trusted
+  if (isBot) return true;
+  
   // Future: check for issue-form sourced intake (tracked separately as #111)
-  // For now, only OWNER/MEMBER are trusted
   return false;
 }
