@@ -100,6 +100,11 @@ label) regardless of how well-specified the issue is, when it involves:
 - broad architecture, product, or design decisions (design review needed);
 - anything needing owner judgment before implementation.
 
+On a repo with no `ralph:hitl` label, also add a visible `HITL: <reason>` line to
+the issue body so the danger signal survives the `ralph:needs-triage` fallback —
+both states are non-runnable, but a later operator promotion must not lose the
+carve-out reason.
+
 ### Auditable evidence (required in the issue body)
 
 Any agent-born `ralph:ready` issue must carry a short **`## Born-ready
@@ -111,7 +116,7 @@ checklist`** section in its body with evidence — labels alone are not enough:
 - Regression test: <what a new failing test will prove>
 - Validation command / target test file: `<cmd or path>`
 - Acceptance criteria: at least one tied to observable behavior / a failing test
-- Blocked by: None
+- Blocked by: None  (declared in an explicit `## Blocked by` section)
 - Parent #N                                          # slices only
 - Not a duplicate / superseded; worth automating
 ```

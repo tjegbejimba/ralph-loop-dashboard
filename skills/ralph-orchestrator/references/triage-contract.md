@@ -97,8 +97,9 @@ There are two distinct moments, and only one of them is in scope here:
 - **Runtime (the live loop).** Nothing in this orchestrator/triage path promotes
   an *existing* issue. The deterministic CLI stays the source of truth; the
   advisory agent and the orchestrator never flip a live `ralph:needs-triage`
-  issue to `ralph:ready`, never drive the queue, and never launch off
-  probabilistic output.
+  issue to `ralph:ready`, and never let probabilistic triage output drive the
+  queue or a launch — the orchestrator's own deterministic queue control (see
+  `policy.md` / `prd-run.md`) is unaffected.
 
 > ADR 0003 keystone: LLM authoring may choose initial labels for newly created
 > issues; LLM triage must never promote existing live issues or drive

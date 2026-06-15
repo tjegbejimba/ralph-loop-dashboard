@@ -36,7 +36,7 @@ by the authorization gates in policy. The single human hand was PRD creation.
    pass: each slice is born `ralph:ready` only if it independently passes the
    born-ready checklist (clear scope, verifiable acceptance criteria tied to a
    test, PR-sized runnable work, an in-body `## Born-ready checklist` evidence
-   section, `## Blocked by: None`, not a duplicate) **and** trips no HITL carve-out
+   section, an explicit `## Blocked by` section saying `None`, not a duplicate) **and** trips no HITL carve-out
    (destructive/migration/security/credentials/billing/privacy/architecture/owner-
    judgment → `ralph:hitl`). Slices that are underspecified stay `ralph:needs-triage`;
    slices needing a human/product/design decision stay `ralph:hitl`. So most AFK
