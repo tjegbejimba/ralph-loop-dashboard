@@ -10,6 +10,8 @@
 //   follow [--worker N]                  Tail the active worker's iteration
 //                                        log; re-tails on iter rollover.
 //   triage [--dry-run|--live]            Comment-only advisory issue triage.
+//   promote-lanes [--dry-run|--live]     Apply lane routing decisions as guarded
+//                                        state transitions.
 //   help | --help                        Print usage.
 //
 // Repo resolution: $RALPH_REPO_ROOT → walk up from cwd looking for .ralph/.
@@ -23,6 +25,7 @@ import { join, resolve, dirname } from "node:path";
 import { createStatusReader } from "./lib/status-data.mjs";
 import { renderStatus, renderLocalStatus, shouldUseColor } from "./lib/terminal-render.mjs";
 import { DEFAULT_TRIAGE_CONFIG, runIssueTriage } from "./lib/issue-triage.mjs";
+import { runPromoteLanes } from "./lib/lane-promotion.mjs";
 import { loadUserConfig } from "./lib/user-config.mjs";
 import { runOrchestrateRepo, renderPlan, renderSummary, resolveRepoSlug } from "./lib/orchestrate-repo.mjs";
 import { resolveOrchestrateRepoRoot } from "./lib/loop-launch-controller.mjs";
@@ -53,6 +56,9 @@ function parseFlags(args) {
     triageTaxonomyMode: "canonical",
     triageBotLogin: null,
     triageRepos: [],
+    promoteLanesMode: "dry-run",
+    promoteLanesQuery: null,
+    promoteLanesRepos: [],
     // orchestrate-repo flags
     dryRun: false,
     repoRoot: null,
@@ -68,12 +74,27 @@ function parseFlags(args) {
     else if (a === "--color") flags.color = true;
     else if (a === "--with-prs") flags.withPrs = true;
     else if (a === "--json") flags.json = true;
-    else if (a === "--dry-run") { flags.triageMode = "dry-run"; flags.dryRun = true; }
-    else if (a === "--live") flags.triageMode = "live";
+    else if (a === "--dry-run") {
+      flags.triageMode = "dry-run";
+      flags.promoteLanesMode = "dry-run";
+      flags.dryRun = true;
+    }
+    else if (a === "--live") {
+      flags.triageMode = "live";
+      flags.promoteLanesMode = "live";
+    }
     else if (a === "--canonical-labels") flags.triageTaxonomyMode = "canonical";
-    else if (a === "--query") flags.triageQuery = args[++i] || null;
+    else if (a === "--query") {
+      const val = args[++i] || null;
+      flags.triageQuery = val;
+      flags.promoteLanesQuery = val;
+    }
     else if (a === "--bot-login") flags.triageBotLogin = args[++i] || null;
-    else if (a === "--repo") flags.triageRepos.push(args[++i]);
+    else if (a === "--repo") {
+      const val = args[++i];
+      flags.triageRepos.push(val);
+      flags.promoteLanesRepos.push(val);
+    }
     else if (a === "--repo-root") flags.repoRoot = args[++i] || null;
     else if (a === "--run-mode") flags.runMode = args[++i] || null;
     else if (a === "--close-completed-prds") flags.closeCompletedPrds = true;
@@ -107,6 +128,7 @@ function printUsage() {
   node cli.mjs watch [SEC|--interval SEC] [--no-color]
   node cli.mjs follow [N|--worker N]
   node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--repo OWNER/NAME] [--query QUERY] [--json]
+  node cli.mjs promote-lanes [--dry-run|--live] [--repo OWNER/NAME] [--query QUERY] [--json]
   node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
   node cli.mjs orchestrate-repo --close-completed-prds [--repo-root PATH] [--dry-run] [--json]
   node cli.mjs help
@@ -119,6 +141,11 @@ triage runs comment-only advisory issue triage. It defaults to dry-run
 calibration and prints exact comments without posting. Live mode only
 posts/updates the bot-owned triage comment; no labels, closure, or Ralph
 enqueue happens automatically.
+
+promote-lanes applies lane routing decisions as guarded state transitions.
+Defaults to dry-run; --live is required to write labels. Reads triaged issues
+(default: label:ralph:needs-triage), evaluates each, routes to a lane, and
+applies the target label while removing conflicting ralph:* state labels.
 
 orchestrate-repo runs the ralph-orchestrator repo-maintain sweep from a repo's
 MAIN checkout (where the local-only .ralph/ lives) for a local scheduler. It
@@ -351,8 +378,143 @@ async function cmdTriage(flags) {
   } else {
     process.stdout.write(`${renderTriageRun(result)}\n`);
   }
-  if (result.repos.length > 0 && result.repos.every((repo) => repo.errors.length > 0 && repo.processed.length === 0)) {
+}
+
+async function cmdPromoteLanes(flags) {
+  if (flags.help) {
+    process.stdout.write(`Usage:
+  node cli.mjs promote-lanes [--dry-run|--live] [--repo OWNER/NAME] [--query QUERY] [--json]
+
+Applies lane routing decisions as guarded state transitions.
+Default repo: tjegbejimba/ralph-loop-dashboard
+Default query: label:ralph:needs-triage
+
+--dry-run           Print planned mutations; do not apply. Default.
+--live              Apply the label mutations via gh.
+--repo OWNER/NAME   Promote lanes in this repo instead of the default.
+--query QUERY       Override the issue search query.
+--json              Emit the structured run summary.
+
+Promotion is guarded: refuses to promote issues with taxonomy conflicts,
+open linked PRs, assignees, unresolved blockers (except HOLD lane), missing
+Parent markers for work:slice, or open questions/TBD evidence.
+`);
+    return;
+  }
+
+  const repo = flags.promoteLanesRepos.length > 0
+    ? parseRepoSpec(flags.promoteLanesRepos[0])
+    : { owner: "tjegbejimba", name: "ralph-loop-dashboard" };
+
+  const query = flags.promoteLanesQuery || "label:ralph:needs-triage";
+  const live = flags.promoteLanesMode === "live";
+
+  // Fetch triaged issues from GitHub
+  const ghResult = spawnSync(
+    "gh",
+    [
+      "issue",
+      "list",
+      "--repo",
+      `${repo.owner}/${repo.name}`,
+      "--search",
+      query,
+      "--state",
+      "open",
+      "--json",
+      "number,title,body,labels,author,assignees,closedByPullRequestsReferences",
+      "--limit",
+      "100",
+    ],
+    { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 }
+  );
+
+  if (ghResult.error) {
+    process.stderr.write(`gh error: ${ghResult.error.message}\n`);
     process.exitCode = 1;
+    return;
+  }
+
+  if (ghResult.status !== 0) {
+    process.stderr.write(`gh failed: ${ghResult.stderr}\n`);
+    process.exitCode = ghResult.status;
+    return;
+  }
+
+  const issues = JSON.parse(ghResult.stdout);
+
+  // The gh CLI doesn't return authorAssociation, so we need to enrich issues.
+  // For simplicity, we'll set a default authorAssociation value for now.
+  // In production, we'd fetch this via gh api or assume OWNER for tjegbejimba.
+  for (const issue of issues) {
+    issue.authorAssociation = issue.author?.login === "tjegbejimba" ? "OWNER" : "NONE";
+  }
+
+  // Run lane promotion
+  const result = runPromoteLanes({ issues, live });
+
+  // Apply mutations if live
+  if (live) {
+    for (const promotion of result.promotions) {
+      if (promotion.skipped) continue;
+      if (promotion.labelsAdded.length === 0 && promotion.labelsRemoved.length === 0) continue;
+
+      const addArgs = promotion.labelsAdded.length > 0
+        ? ["--add-label", promotion.labelsAdded.join(",")]
+        : [];
+      const removeArgs = promotion.labelsRemoved.length > 0
+        ? ["--remove-label", promotion.labelsRemoved.join(",")]
+        : [];
+
+      const labelResult = spawnSync(
+        "gh",
+        [
+          "issue",
+          "edit",
+          String(promotion.issueNumber),
+          "--repo",
+          `${repo.owner}/${repo.name}`,
+          ...addArgs,
+          ...removeArgs,
+        ],
+        { encoding: "utf8" }
+      );
+
+      if (labelResult.status !== 0) {
+        process.stderr.write(`Failed to update #${promotion.issueNumber}: ${labelResult.stderr}\n`);
+        process.exitCode = 1;
+      }
+    }
+  }
+
+  // Render output
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    const lines = [`Lane promotion (${live ? "live" : "dry-run"})\n`];
+    lines.push(`Repository: ${repo.owner}/${repo.name}`);
+    lines.push(`Query: ${query}\n`);
+
+    lines.push(`Summary:`);
+    lines.push(`  Total: ${result.summary.total}`);
+    lines.push(`  Promoted: ${result.summary.promoted}`);
+    lines.push(`  No-op (idempotent): ${result.summary.noOp}`);
+    lines.push(`  Skipped (guards): ${result.summary.skipped}\n`);
+
+    for (const promotion of result.promotions) {
+      if (promotion.skipped) {
+        lines.push(`#${promotion.issueNumber} → SKIPPED: ${promotion.skipReason}`);
+      } else if (promotion.labelsAdded.length === 0 && promotion.labelsRemoved.length === 0) {
+        lines.push(`#${promotion.issueNumber} → ${promotion.lane} (no-op, already correct)`);
+      } else {
+        const added = promotion.labelsAdded.length > 0 ? `+${promotion.labelsAdded.join(", ")}` : "";
+        const removed = promotion.labelsRemoved.length > 0 ? `-${promotion.labelsRemoved.join(", ")}` : "";
+        const changes = [added, removed].filter(Boolean).join(" ");
+        lines.push(`#${promotion.issueNumber} → ${promotion.lane}: ${changes}`);
+      }
+    }
+
+    process.stdout.write(lines.join("\n") + "\n");
   }
 }
 
@@ -544,6 +706,10 @@ async function main() {
   const flags = parseFlags(rest);
   if (cmd === "triage") {
     await cmdTriage(flags);
+    return;
+  }
+  if (cmd === "promote-lanes") {
+    await cmdPromoteLanes(flags);
     return;
   }
   if (cmd === "orchestrate-repo") {
