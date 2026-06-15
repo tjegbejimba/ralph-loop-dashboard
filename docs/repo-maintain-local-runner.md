@@ -23,6 +23,32 @@ Copilot scheduled workflow  ──>  throwaway worktree     ──>  no .ralph/ 
 launchd / cron              ──>  repo MAIN checkout      ──>  has .ralph/ ✓
 ```
 
+## What stays in the Copilot scheduled workflow
+
+Only repo-maintain needs this local-runner shape. Slug-addressed GitHub-only
+verbs can run from the app scheduler because they do not read `.ralph/` or launch
+workers. The hourly `Triage Needs-Triage Issues` workflow should run the
+needs-triage front half in one tick:
+
+```bash
+node extension/cli.mjs triage --live --canonical-labels \
+  --repo tjegbejimba/alisterr \
+  --repo tjegbejimba/kindleflow \
+  --repo tjegbejimba/Glasswork \
+  --json
+
+node extension/cli.mjs promote-lanes --live \
+  --repo tjegbejimba/alisterr \
+  --repo tjegbejimba/kindleflow \
+  --repo tjegbejimba/Glasswork \
+  --json
+```
+
+`triage --live` only creates or updates the bot-owned advisory triage comment.
+`promote-lanes --live` then applies the deterministic guarded lane labels, such
+as `ralph:needs-triage` -> `ralph:fast-lane` for AUTO-eligible issues. It never
+promotes to `ralph:ready`; that remains the human one-tap gate.
+
 ## What it does
 
 Operating on `--repo-root` (default: the current directory), it:

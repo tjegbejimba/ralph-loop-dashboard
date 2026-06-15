@@ -24,7 +24,9 @@ The CLI owns:
 - canonical label taxonomy and preflight checks;
 - baseline scoring and recommendation JSON;
 - idempotent fingerprinting for advisory bot comments;
-- any permitted comment create/update path, bounded to bot-owned triage comments.
+- any permitted comment create/update path, bounded to bot-owned triage comments;
+- deterministic lane routing from `ralph:needs-triage` to guarded lane labels
+  such as `ralph:fast-lane`, while stopping before `ralph:ready`.
 
 The LLM triage skill is advisory only. It may inspect a **frozen CLI snapshot** to
 add maintainer-facing nuance, citations, owner-signal interpretation,
@@ -80,8 +82,8 @@ labels, queue state, or launch decisions.
   structured triage output instead of raw `gh` dumps.
 - Agent reasoning remains available where it adds value, but it is fenced behind
   frozen snapshots and no-mutation rules.
-- Live commenting, if enabled, should be performed by the deterministic writer,
-  not directly by a scheduled LLM agent.
+- Live commenting and lane routing, if enabled, should be performed by the
+  deterministic writers (`triage --live` and `promote-lanes --live`), not
+  directly by a scheduled LLM agent.
 - A suspicious deterministic result should trigger agent review, not automatic
-  label mutation or enqueue.
-
+  `ralph:ready` promotion, enqueue, or launch.

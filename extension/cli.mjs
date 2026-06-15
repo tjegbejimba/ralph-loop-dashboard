@@ -128,7 +128,7 @@ function printUsage() {
   node cli.mjs watch [SEC|--interval SEC] [--no-color]
   node cli.mjs follow [N|--worker N]
   node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--repo OWNER/NAME] [--query QUERY] [--json]
-  node cli.mjs promote-lanes [--dry-run|--live] [--repo OWNER/NAME] [--query QUERY] [--json]
+  node cli.mjs promote-lanes [--dry-run|--live] [--repo OWNER/NAME ...] [--query QUERY] [--json]
   node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
   node cli.mjs orchestrate-repo --close-completed-prds [--repo-root PATH] [--dry-run] [--json]
   node cli.mjs help
@@ -383,7 +383,7 @@ async function cmdTriage(flags) {
 async function cmdPromoteLanes(flags) {
   if (flags.help) {
     process.stdout.write(`Usage:
-  node cli.mjs promote-lanes [--dry-run|--live] [--repo OWNER/NAME] [--query QUERY] [--json]
+  node cli.mjs promote-lanes [--dry-run|--live] [--repo OWNER/NAME ...] [--query QUERY] [--json]
 
 Applies lane routing decisions as guarded state transitions.
 Default repo: tjegbejimba/ralph-loop-dashboard
@@ -391,7 +391,8 @@ Default query: label:ralph:needs-triage
 
 --dry-run           Print planned mutations; do not apply. Default.
 --live              Apply the label mutations via gh.
---repo OWNER/NAME   Promote lanes in this repo instead of the default.
+--repo OWNER/NAME   Promote lanes in this repo instead of the default. Repeat
+                    to triage several repos in one run.
 --query QUERY       Override the issue search query.
 --json              Emit the structured run summary.
 
@@ -402,21 +403,50 @@ Parent markers for work:slice, or open questions/TBD evidence.
     return;
   }
 
-  const repo = flags.promoteLanesRepos.length > 0
-    ? parseRepoSpec(flags.promoteLanesRepos[0])
-    : { owner: "tjegbejimba", name: "ralph-loop-dashboard" };
-
   const query = flags.promoteLanesQuery || "label:ralph:needs-triage";
   const live = flags.promoteLanesMode === "live";
+  let repos;
+  try {
+    repos = flags.promoteLanesRepos.length > 0
+      ? flags.promoteLanesRepos.map(parseRepoSpec)
+      : [{ owner: "tjegbejimba", name: "ralph-loop-dashboard" }];
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
 
-  // Fetch triaged issues from GitHub
+  const repoResults = [];
+
+  for (const repo of repos) {
+    const repoResult = promoteLanesForRepo({ repo, query, live });
+    if (!repoResult) return;
+    repoResults.push(repoResult);
+  }
+
+  const output = repoResults.length === 1
+    ? repoResults[0]
+    : {
+        repos: repoResults,
+        summary: aggregatePromotionSummary(repoResults),
+      };
+
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+  } else {
+    process.stdout.write(renderPromoteLanesRun({ repoResults, live, query }));
+  }
+}
+
+function promoteLanesForRepo({ repo, query, live }) {
+  const repoName = `${repo.owner}/${repo.name}`;
   const ghResult = spawnSync(
     "gh",
     [
       "issue",
       "list",
       "--repo",
-      `${repo.owner}/${repo.name}`,
+      repoName,
       "--search",
       query,
       "--state",
@@ -432,13 +462,13 @@ Parent markers for work:slice, or open questions/TBD evidence.
   if (ghResult.error) {
     process.stderr.write(`gh error: ${ghResult.error.message}\n`);
     process.exitCode = 1;
-    return;
+    return null;
   }
 
   if (ghResult.status !== 0) {
     process.stderr.write(`gh failed: ${ghResult.stderr}\n`);
     process.exitCode = ghResult.status;
-    return;
+    return null;
   }
 
   const issues = JSON.parse(ghResult.stdout);
@@ -499,7 +529,7 @@ Parent markers for work:slice, or open questions/TBD evidence.
           "edit",
           String(promotion.issueNumber),
           "--repo",
-          `${repo.owner}/${repo.name}`,
+          repoName,
           ...addArgs,
           ...removeArgs,
         ],
@@ -513,13 +543,41 @@ Parent markers for work:slice, or open questions/TBD evidence.
     }
   }
 
-  // Render output
-  if (flags.json) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  } else {
-    const lines = [`Lane promotion (${live ? "live" : "dry-run"})\n`];
-    lines.push(`Repository: ${repo.owner}/${repo.name}`);
-    lines.push(`Query: ${query}\n`);
+  return {
+    repo: repoName,
+    query,
+    ...result,
+  };
+}
+
+function aggregatePromotionSummary(repoResults) {
+  return repoResults.reduce(
+    (summary, repoResult) => ({
+      total: summary.total + repoResult.summary.total,
+      promoted: summary.promoted + repoResult.summary.promoted,
+      noOp: summary.noOp + repoResult.summary.noOp,
+      skipped: summary.skipped + repoResult.summary.skipped,
+    }),
+    { total: 0, promoted: 0, noOp: 0, skipped: 0 },
+  );
+}
+
+function renderPromoteLanesRun({ repoResults, live, query }) {
+  const lines = [`Lane promotion (${live ? "live" : "dry-run"})\n`];
+  if (repoResults.length > 1) {
+    const summary = aggregatePromotionSummary(repoResults);
+    lines.push(`Repos: ${repoResults.length}`);
+    lines.push(`Query: ${query}`);
+    lines.push(`Summary:`);
+    lines.push(`  Total: ${summary.total}`);
+    lines.push(`  Promoted: ${summary.promoted}`);
+    lines.push(`  No-op (idempotent): ${summary.noOp}`);
+    lines.push(`  Skipped (guards): ${summary.skipped}\n`);
+  }
+
+  for (const result of repoResults) {
+    lines.push(`Repository: ${result.repo}`);
+    lines.push(`Query: ${result.query}\n`);
 
     lines.push(`Summary:`);
     lines.push(`  Total: ${result.summary.total}`);
@@ -539,9 +597,10 @@ Parent markers for work:slice, or open questions/TBD evidence.
         lines.push(`#${promotion.issueNumber} → ${promotion.lane}: ${changes}`);
       }
     }
-
-    process.stdout.write(lines.join("\n") + "\n");
+    lines.push("");
   }
+
+  return lines.join("\n").trimEnd() + "\n";
 }
 
 function printOrchestrateRepoUsage() {
