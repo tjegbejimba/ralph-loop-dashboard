@@ -228,6 +228,37 @@ function nextActionFor(recommendation, workTypeRecommendation) {
   return "Have a human choose between the competing interpretations before changing labels or creating slices.";
 }
 
+function isTrustedAuthor(issue) {
+  const authorLogin = issue?.author?.login || "";
+  const isBot = issue?.author?.is_bot === true;
+  const authorAssociation = issue?.authorAssociation || "";
+  
+  // TJ-authored issues are always trusted
+  if (authorLogin === "tjegbejimba") return true;
+  
+  // OWNER/MEMBER associations are trusted (team members)
+  if (authorAssociation === "OWNER" || authorAssociation === "MEMBER") return true;
+  
+  // Bot-authored issues (e.g., issue forms) are trusted
+  if (isBot) return true;
+  
+  // Future: check for issue-form sourced intake (tracked separately as #111)
+  return false;
+}
+
+function isFastLaneCandidate(issue, recommendation, confidence, automationSafety, workTypeRecommendation) {
+  if (recommendation !== "Pursue") return false;
+  if (confidence !== "high") return false;
+  if (automationSafety !== "safe after prep") return false;
+  if (workTypeRecommendation !== "work:slice" && workTypeRecommendation !== "work:standalone") return false;
+  const text = textFor(issue);
+  if (!hasAny(text, [/acceptance criteria/, /test/, /steps? to reproduce/])) return false;
+  const blockers = parseBlockerNumbers(issue?.body || "");
+  if (blockers.length > 0) return false;
+  if (!isTrustedAuthor(issue)) return false;
+  return true;
+}
+
 export function evaluateIssueForTriage({ issue, repoContext = {}, closeEvidence = false } = {}) {
   if (!issue || typeof issue !== "object") {
     throw new TypeError("issue is required");
@@ -247,6 +278,8 @@ export function evaluateIssueForTriage({ issue, repoContext = {}, closeEvidence 
     confidence = confidenceFor(recommendation, scores, preflight);
   }
 
+  const fastLaneCandidate = isFastLaneCandidate(issue, recommendation, confidence, automationSafety, workTypeRecommendation);
+
   return {
     issueNumber: Number(issue.number) || null,
     recommendation,
@@ -259,6 +292,7 @@ export function evaluateIssueForTriage({ issue, repoContext = {}, closeEvidence 
     nextAction: nextActionFor(recommendation, workTypeRecommendation),
     workTypeRecommendation,
     plannedMutations: [],
+    fastLaneCandidate,
     scores,
   };
 }
@@ -470,12 +504,57 @@ async function defaultFetchIssues({ repo, query }) {
     "--search",
     query,
     "--json",
-    "number,title,body,labels,state,createdAt,updatedAt,assignees,closedByPullRequestsReferences,url",
+    "number,title,body,labels,state,createdAt,updatedAt,assignees,closedByPullRequestsReferences,url,author",
     "--limit",
     "100",
   ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
   assertCommandOk(result, "gh issue list");
-  return JSON.parse(result.stdout || "[]");
+  const issues = JSON.parse(result.stdout || "[]");
+  
+  // Enrich with authorAssociation from GraphQL (gh issue list doesn't support it)
+  // Use a single GraphQL call to batch-fetch authorAssociation for all issues
+  if (issues.length > 0) {
+    try {
+      const issueNumbers = issues.map((issue) => issue.number);
+      const query = `
+        query($owner: String!, $name: String!, $numbers: [Int!]!) {
+          repository(owner: $owner, name: $name) {
+            ${issueNumbers.map((num, idx) => `
+              issue${idx}: issue(number: ${num}) {
+                number
+                authorAssociation
+              }
+            `).join("\n")}
+          }
+        }
+      `;
+      const [owner, name] = repo.split("/");
+      const gqlResult = spawnSync("gh", [
+        "api",
+        "graphql",
+        "-f",
+        `query=${query}`,
+        "-f",
+        `owner=${owner}`,
+        "-f",
+        `name=${name}`,
+      ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
+      
+      if (gqlResult.status === 0) {
+        const data = JSON.parse(gqlResult.stdout || "{}").data?.repository || {};
+        issues.forEach((issue, idx) => {
+          const gqlIssue = data[`issue${idx}`];
+          if (gqlIssue?.authorAssociation) {
+            issue.authorAssociation = gqlIssue.authorAssociation;
+          }
+        });
+      }
+    } catch (err) {
+      // Fall back to fetching individually if batch fails
+    }
+  }
+  
+  return issues;
 }
 
 async function defaultFetchComments({ repo, issueNumber }) {
