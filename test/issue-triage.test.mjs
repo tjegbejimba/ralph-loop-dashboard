@@ -403,4 +403,93 @@ describe("issue triage advisory automation", () => {
     assert.equal(result.repos[0].errors[0].issueNumber, 304);
     assert.equal(result.repos[0].errors[0].type, "fetch_comments_failed");
   });
+
+  it("applies trusted-author guard to fast-lane candidate promotion", () => {
+    const tjAuthoredIssue = {
+      number: 401,
+      title: "Prevent unsafe launches when generated files are dirty",
+      body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
+      labels: ["ralph:needs-triage"],
+      author: { login: "tjegbejimba" },
+      authorAssociation: "OWNER",
+    };
+
+    const externalIssue = {
+      number: 402,
+      title: "Prevent unsafe launches when generated files are dirty",
+      body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
+      labels: ["ralph:needs-triage"],
+      author: { login: "external-contributor" },
+      authorAssociation: "CONTRIBUTOR",
+    };
+
+    const opinion1 = evaluateIssueForTriage({ issue: tjAuthoredIssue });
+    assert.equal(opinion1.recommendation, "Pursue");
+    assert.equal(opinion1.confidence, "high");
+    assert.equal(opinion1.fastLaneCandidate, true);
+
+    const opinion2 = evaluateIssueForTriage({ issue: externalIssue });
+    assert.equal(opinion2.recommendation, "Pursue");
+    assert.equal(opinion2.confidence, "high");
+    assert.equal(opinion2.fastLaneCandidate, false);
+  });
+
+  it("excludes issues with blockers from fast-lane candidacy", () => {
+    const blockedIssue = {
+      number: 403,
+      title: "Prevent unsafe launches when generated files are dirty",
+      body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files\n\n## Blocked by\n- #17",
+      labels: ["ralph:needs-triage"],
+      author: { login: "tjegbejimba" },
+      authorAssociation: "OWNER",
+    };
+
+    const opinion = evaluateIssueForTriage({ issue: blockedIssue });
+    assert.equal(opinion.recommendation, "Pursue");
+    assert.equal(opinion.confidence, "high");
+    assert.equal(opinion.fastLaneCandidate, false);
+  });
+
+  it("requires high confidence and safe after prep for fast-lane", () => {
+    const mediumConfidenceIssue = {
+      number: 404,
+      title: "Maybe improve Ralph safety",
+      body: "Ralph could be better somehow.",
+      labels: ["ralph:needs-triage"],
+      author: { login: "tjegbejimba" },
+      authorAssociation: "OWNER",
+    };
+
+    const opinion = evaluateIssueForTriage({ issue: mediumConfidenceIssue });
+    assert.equal(opinion.fastLaneCandidate, false);
+  });
+
+  it("accepts both work:slice and work:standalone for fast-lane", () => {
+    const standaloneIssue = {
+      number: 405,
+      title: "Prevent unsafe launches when generated files are dirty",
+      body: "Ralph can waste quota or corrupt work if workers start from a dirty repo.\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
+      labels: ["ralph:needs-triage"],
+      author: { login: "tjegbejimba" },
+      authorAssociation: "OWNER",
+    };
+
+    const sliceIssue = {
+      number: 406,
+      title: "Slice 3: Add preflight check for dirty generated files",
+      body: "Implement the preflight check.\n\nParent #100\n\nAcceptance criteria:\n- preflight blocks unsafe launches\n- tests cover dirty generated files",
+      labels: ["ralph:needs-triage"],
+      author: { login: "tjegbejimba" },
+      authorAssociation: "OWNER",
+    };
+
+    const opinion1 = evaluateIssueForTriage({ issue: standaloneIssue });
+    assert.equal(opinion1.workTypeRecommendation, "work:standalone");
+    assert.equal(opinion1.fastLaneCandidate, true);
+
+    const opinion2 = evaluateIssueForTriage({ issue: sliceIssue });
+    assert.equal(opinion2.workTypeRecommendation, "work:slice");
+    assert.equal(opinion2.fastLaneCandidate, true);
+  });
 });
+

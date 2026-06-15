@@ -228,6 +228,28 @@ function nextActionFor(recommendation, workTypeRecommendation) {
   return "Have a human choose between the competing interpretations before changing labels or creating slices.";
 }
 
+function isTrustedAuthor(issue) {
+  const authorLogin = issue?.author?.login || "";
+  const authorAssociation = issue?.authorAssociation || "";
+  if (authorLogin === "tjegbejimba") return true;
+  if (authorAssociation === "OWNER") return true;
+  if (authorLogin.endsWith("[bot]")) return true;
+  return false;
+}
+
+function isFastLaneCandidate(issue, recommendation, confidence, automationSafety, workTypeRecommendation) {
+  if (recommendation !== "Pursue") return false;
+  if (confidence !== "high") return false;
+  if (automationSafety !== "safe after prep") return false;
+  if (workTypeRecommendation !== "work:slice" && workTypeRecommendation !== "work:standalone") return false;
+  const text = textFor(issue);
+  if (!hasAny(text, [/acceptance criteria/, /test/, /steps? to reproduce/])) return false;
+  const blockers = parseBlockerNumbers(issue?.body || "");
+  if (blockers.length > 0) return false;
+  if (!isTrustedAuthor(issue)) return false;
+  return true;
+}
+
 export function evaluateIssueForTriage({ issue, repoContext = {}, closeEvidence = false } = {}) {
   if (!issue || typeof issue !== "object") {
     throw new TypeError("issue is required");
@@ -247,6 +269,8 @@ export function evaluateIssueForTriage({ issue, repoContext = {}, closeEvidence 
     confidence = confidenceFor(recommendation, scores, preflight);
   }
 
+  const fastLaneCandidate = isFastLaneCandidate(issue, recommendation, confidence, automationSafety, workTypeRecommendation);
+
   return {
     issueNumber: Number(issue.number) || null,
     recommendation,
@@ -259,6 +283,7 @@ export function evaluateIssueForTriage({ issue, repoContext = {}, closeEvidence 
     nextAction: nextActionFor(recommendation, workTypeRecommendation),
     workTypeRecommendation,
     plannedMutations: [],
+    fastLaneCandidate,
     scores,
   };
 }
@@ -470,7 +495,7 @@ async function defaultFetchIssues({ repo, query }) {
     "--search",
     query,
     "--json",
-    "number,title,body,labels,state,createdAt,updatedAt,assignees,closedByPullRequestsReferences,url",
+    "number,title,body,labels,state,createdAt,updatedAt,assignees,closedByPullRequestsReferences,url,author,authorAssociation",
     "--limit",
     "100",
   ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
