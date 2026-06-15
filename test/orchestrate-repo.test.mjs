@@ -516,3 +516,32 @@ test("local in-flight claims feed active-run detection and discovery (no duplica
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("orchestrator discovery path only queues ralph:ready issues (unchanged by lane promotion)", async () => {
+  const root = makeRepo();
+  const deps = baseDeps({
+    execIssueList: ghIssueList([
+      readyIssue(100),
+      {
+        number: 101,
+        title: "Fast-lane candidate",
+        body: "Test issue",
+        labels: [{ name: "ralph:fast-lane" }, { name: "work:standalone" }, { name: "priority:P2" }],
+        milestone: null,
+        url: "https://github.com/octo/alisterr/issues/101",
+        closedByPullRequestsReferences: [],
+      },
+    ]),
+  });
+
+  const result = await runOrchestrateRepo({ repoRoot: root, ...deps });
+
+  // Only ralph:ready issues should be queued
+  assert.equal(result.queue.length, 1);
+  assert.equal(result.queue[0].number, 100);
+  
+  // ralph:fast-lane candidate should be skipped
+  assert.ok(result.skipped.some((s) => s.number === 101 && /not canonical ralph:ready/.test(s.reason)));
+
+  rmSync(root, { recursive: true, force: true });
+});
