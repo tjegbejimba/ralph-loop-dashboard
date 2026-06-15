@@ -333,8 +333,12 @@ Or use the dashboard's "Start" button (after restarting Copilot CLI):
 ```
 
 The loop iterates until no open matching issues remain, then exits cleanly.
-Use `--cleanup` after a run to remove worker worktrees that Ralph created. Dirty
-worktrees are left in place for inspection instead of being deleted.
+Workers give each Copilot prompt-mode run a short Ralph-owned session name and a
+recorded session ID so completed sessions can be cleaned without matching by
+prompt text. Use `--cleanup` after a run to remove worker worktrees that Ralph
+created and archive recorded completed Copilot session state. Dirty worktrees,
+running sessions, failed sessions, and unrecorded/user sessions are left in
+place for inspection instead of being deleted.
 
 ### Per-worktree loops
 
@@ -412,6 +416,7 @@ Environment variables still override config:
 | `RALPH_MODEL` | `claude-sonnet-4.5` | Model passed to `copilot -p` |
 | `RALPH_TIMEOUT_SEC` | `7200` | Per-iteration timeout |
 | `RALPH_AUTOPILOT_CONTINUES` | `15` | `copilot --max-autopilot-continues` value. Copilot CLI's default is 5, which often runs out before commit/push/PR if the agent has to debug a build. Bump this if iterations halt after staging changes but before opening a PR. |
+| `RALPH_COPILOT_BIN` | `copilot` | Copilot CLI binary path, mostly for tests or advanced local wrappers |
 | `RALPH_MAIN_REPO` | parent of `.ralph/` | Path to your main checkout |
 | `RALPH_LOOP_REPO` | `<MAIN>-ralph` | Base path for loop worktree(s); worker N gets `-N` suffix when parallelism>1 |
 | `RALPH_LOOP_BRANCH` | `ralph-loop-<hash12>` | Base branch name (hash derived from `MAIN_REPO` realpath); worker N gets `-N` suffix when parallelism>1 |
