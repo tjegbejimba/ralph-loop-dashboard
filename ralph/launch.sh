@@ -165,6 +165,13 @@ LOG_DIR="$MAIN_REPO/.ralph/logs"
 mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
 # shellcheck source=lib/state.sh
 . "$MAIN_REPO/.ralph/lib/state.sh"
+# shellcheck source=lib/copilot-session.sh
+_copilot_session_lib="$MAIN_REPO/.ralph/lib/copilot-session.sh"
+if [[ -f "$_copilot_session_lib" ]]; then
+  # shellcheck disable=SC1090
+  . "$_copilot_session_lib"
+fi
+unset _copilot_session_lib
 # shellcheck source=lib/labels.sh
 _labels_lib="$MAIN_REPO/.ralph/lib/labels.sh"
 if [[ -f "$_labels_lib" ]]; then
@@ -568,6 +575,9 @@ if [[ "${1:-}" == "--cleanup" ]]; then
     sleep 2
   fi
   stop_all_caffeinate
+  if declare -F copilot_session_archive_completed >/dev/null 2>&1; then
+    copilot_session_archive_completed
+  fi
   cleanup_worktrees
   exit $?
 fi

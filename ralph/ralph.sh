@@ -55,6 +55,7 @@ config_get() {
 
 REPO="${RALPH_REPO:-$(git -C "$(git rev-parse --show-toplevel)" config --get remote.origin.url 2>/dev/null | sed -E 's#(git@github.com:|https://github.com/)##; s/\.git$//')}"
 GH="${RALPH_GH_BIN:-gh}"
+COPILOT="${RALPH_COPILOT_BIN:-copilot}"
 TITLE_REGEX="${RALPH_TITLE_REGEX:-$(config_get '.issue.titleRegex')}"
 TITLE_REGEX="${TITLE_REGEX:-^Slice [0-9]+:}"
 TITLE_NUM_RE="${RALPH_TITLE_NUM_REGEX:-$(config_get '.issue.titleNumRegex')}"
@@ -192,6 +193,11 @@ state_init
 # Per-run status tracking (status.json). Only needed in run-aware mode.
 # shellcheck source=lib/status.sh
 . "$SCRIPT_DIR/lib/status.sh"
+# Copilot session naming/cleanup helpers.
+# shellcheck source=lib/copilot-session.sh
+if [[ -f "$SCRIPT_DIR/lib/copilot-session.sh" ]]; then
+  . "$SCRIPT_DIR/lib/copilot-session.sh"
+fi
 # PR merge fallback helpers.
 # shellcheck source=lib/pr-merge.sh
 . "$SCRIPT_DIR/lib/pr-merge.sh"
@@ -896,9 +902,28 @@ DO NOT re-plan or open a new branch. Instead:
     state_unlock
   fi
 
+  copilot_session_id=""
+  copilot_session_name_value=""
+  copilot_session_args=()
+  if declare -F copilot_session_new_id >/dev/null 2>&1; then
+    copilot_session_id="$(copilot_session_new_id)"
+    copilot_session_name_value="$(copilot_session_name "$num" "$WORKER_ID" "$RUN_ID")"
+    copilot_session_args=(--session-id "$copilot_session_id" --name "$copilot_session_name_value" --no-remote)
+    copilot_session_record_start \
+      "$copilot_session_id" \
+      "$num" \
+      "$WORKER_ID" \
+      "$copilot_session_name_value" \
+      "$(pwd -P)" \
+      "$(basename "$log_file")" \
+      "$iter_start_ts" \
+      "$RUN_ID"
+  fi
+
   set +e
   run_with_timeout "$TIMEOUT_SEC" \
-    copilot -p "$full_prompt" \
+    "$COPILOT" -p "$full_prompt" \
+      "${copilot_session_args[@]}" \
       --allow-all \
       --model "$MODEL" \
       --max-autopilot-continues "$AUTOPILOT_CONTINUES" \
@@ -907,6 +932,9 @@ DO NOT re-plan or open a new branch. Instead:
   set -e
 
   if [[ "$rc" -ne 0 ]]; then
+    if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+      copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "failed" "$RUN_ID" || true
+    fi
     # Mark as failed in status.json (run-aware mode only)
     if [[ -n "$RUN_ID" ]]; then
       state_lock || true
@@ -1074,6 +1102,9 @@ DO NOT re-plan or open a new branch. Instead:
     fi
 
     # Mark as failed in status.json (run-aware mode only)
+    if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+      copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "failed" "$RUN_ID" || true
+    fi
     if [[ -n "$RUN_ID" ]]; then
       state_lock || true
       status_mark_failed "$num" "No merged PR found after copilot completed"
@@ -1104,6 +1135,10 @@ DO NOT re-plan or open a new branch. Instead:
       exit 1
     fi
     echo "✅ Slice 1 postcondition: CI workflow present."
+  fi
+  if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+    copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "merged" "$RUN_ID" || true
+    copilot_session_archive_id "$copilot_session_id" || true
   fi
 
   echo "✅ #$num closed via merged PR."
