@@ -952,15 +952,29 @@ DO NOT re-plan or open a new branch. Instead:
   # closedByPullRequestsReferences items contain {number, url, ...} but not .state,
   # so we look up each referenced PR and require at least one with mergedAt != null.
   #
+  # SHORT-CIRCUIT (issue #119): If the issue is CLOSED with stateReason=COMPLETED,
+  # accept unconditionally — the worker's PR merged and GitHub auto-closed the
+  # issue as expected, even if closedByPullRequestsReferences hasn't propagated yet.
+  #
   # The closedByPullRequestsReferences link is eventually consistent — GitHub can
   # take 1-30s to attach the PR after the merge commit lands. Retry with backoff,
   # and as a final fallback scan recent merged PRs for "Closes #N" / "Fixes #N".
   state=""
+  state_reason=""
   merged_count=0
   for attempt in 1 2 3 4 5 6; do
     closure=$(gh issue view "$num" --repo "$REPO" \
-      --json state,closedByPullRequestsReferences)
+      --json state,stateReason,closedByPullRequestsReferences)
     state=$(echo "$closure" | jq -r .state)
+    state_reason=$(echo "$closure" | jq -r '.stateReason // ""')
+    
+    # Short-circuit: CLOSED + COMPLETED → success
+    if [[ "$state" == "CLOSED" && "$state_reason" == "COMPLETED" ]]; then
+      echo "✅ Issue #$num CLOSED as COMPLETED — accepting (merge-detection short-circuit)." >&2
+      merged_count=1
+      break
+    fi
+    
     pr_numbers=$(echo "$closure" | jq -r '(.closedByPullRequestsReferences // [])[].number')
     merged_count=0
     for pr in $pr_numbers; do
@@ -973,7 +987,7 @@ DO NOT re-plan or open a new branch. Instead:
       break
     fi
     if [[ "$attempt" -lt 6 ]]; then
-      echo "ℹ️  Issue #$num closure metadata not yet propagated (state=$state, merged_prs=$merged_count); retry $attempt/5 in 5s..." >&2
+      echo "ℹ️  Issue #$num closure metadata not yet propagated (state=$state, stateReason=$state_reason, merged_prs=$merged_count); retry $attempt/5 in 5s..." >&2
       sleep 5
     fi
   done
@@ -1111,13 +1125,13 @@ DO NOT re-plan or open a new branch. Instead:
     fi
     if [[ -n "$RUN_ID" ]]; then
       state_lock || true
-      status_mark_failed "$num" "No merged PR found after copilot completed"
+      status_mark_failed "$num" "No merged PR found after copilot completed (issue state=$state, stateReason=$state_reason, merged_prs=$merged_count)"
       state_unlock || true
     fi
     if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
       ralph_apply_label_transition "$num" fail || true
     fi
-    echo "⚠️  Issue #$num not closed by a merged PR (state=$state, merged_prs=$merged_count). Halting." >&2
+    echo "⚠️  Issue #$num not closed by a merged PR (state=$state, stateReason=$state_reason, merged_prs=$merged_count). Halting." >&2
     exit 1
   fi
 
