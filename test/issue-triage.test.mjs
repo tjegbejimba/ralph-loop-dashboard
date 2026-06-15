@@ -518,5 +518,74 @@ describe("issue triage advisory automation", () => {
     assert.equal(opinion2.workTypeRecommendation, "work:slice");
     assert.equal(opinion2.fastLaneCandidate, true);
   });
+
+  it("triage workflow does not run lane promotion when promoteLanes is not configured", async () => {
+    const mockIssues = [
+      {
+        number: 501,
+        title: "Prevent unsafe launches",
+        body: "Ralph can waste quota.\n\nAcceptance criteria:\n- preflight blocks unsafe launches",
+        labels: [{ name: "ralph:needs-triage" }],
+        author: { login: "tjegbejimba" },
+        authorAssociation: "OWNER",
+      },
+    ];
+
+    const result = await runIssueTriage({
+      mode: "dry-run",
+      config: {
+        repos: [{ owner: "test", name: "repo", taxonomyMode: "canonical" }],
+        botLogin: "test-bot[bot]",
+      },
+      fetchIssues: async () => mockIssues,
+      fetchComments: async () => [],
+      createComment: async () => {},
+    });
+
+    assert.equal(result.repos.length, 1);
+    const repoResult = result.repos[0];
+    assert.equal(repoResult.processed.length, 1);
+    const entry = repoResult.processed[0];
+    
+    // Should not have promotions field when promoteLanes is disabled
+    assert.equal(entry.promotions, undefined);
+  });
+
+  it("triage workflow invokes lane promotion when promoteLanes is enabled (dry-run)", async () => {
+    const mockIssues = [
+      {
+        number: 502,
+        title: "Prevent unsafe launches",
+        body: "Ralph can waste quota.\n\nAcceptance criteria:\n- preflight blocks unsafe launches",
+        labels: [{ name: "ralph:needs-triage" }],
+        author: { login: "tjegbejimba" },
+        authorAssociation: "OWNER",
+      },
+    ];
+
+    const result = await runIssueTriage({
+      mode: "dry-run",
+      config: {
+        repos: [{ owner: "test", name: "repo", taxonomyMode: "canonical", promoteLanes: true }],
+        botLogin: "test-bot[bot]",
+      },
+      fetchIssues: async () => mockIssues,
+      fetchComments: async () => [],
+      createComment: async () => {},
+    });
+
+    assert.equal(result.repos.length, 1);
+    const repoResult = result.repos[0];
+    assert.equal(repoResult.processed.length, 1);
+    const entry = repoResult.processed[0];
+    
+    // Should include promotion result when promoteLanes is enabled
+    assert.ok(entry.promotion, "entry should have promotion field");
+    assert.equal(entry.promotion.issueNumber, 502);
+    assert.equal(entry.promotion.lane, "AUTO");
+    assert.deepEqual(entry.promotion.labelsAdded, ["ralph:fast-lane"]);
+    assert.deepEqual(entry.promotion.labelsRemoved, ["ralph:needs-triage"]);
+    assert.equal(entry.promotion.skipped, false);
+  });
 });
 

@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { classifyIssue, parseBlockerNumbers } from "./label-taxonomy.mjs";
+import { promoteLaneForIssue } from "./lane-promotion.mjs";
+import { routeIssueToLane } from "./lane-routing.mjs";
 
 export const TRIAGE_COMMENT_MARKER = "<!-- ralph-triage-opinion:v1";
 const FINGERPRINT_RE = /<!-- ralph-triage-opinion:v1 fingerprint=([a-f0-9]{64}) -->/;
@@ -674,6 +676,7 @@ export async function runIssueTriage({
         botLogin,
         repoContext: effectiveConfig.repoContext || {},
       });
+
       const entry = {
         issueNumber,
         action: plan.action,
@@ -683,6 +686,21 @@ export async function runIssueTriage({
         recommendation: plan.opinion.recommendation,
         plannedMutations: [],
       };
+
+      // Run lane promotion if enabled in repo config
+      const repoConfigForIssue = effectiveConfig.repos.find(
+        (r) => repoFullName(r) === repo
+      );
+      if (repoConfigForIssue?.promoteLanes === true) {
+        const route = routeIssueToLane({ issue, opinion: plan.opinion });
+        const promotion = promoteLaneForIssue({
+          issue,
+          opinion: plan.opinion,
+          route,
+          live: false, // Always dry-run in triage workflow
+        });
+        entry.promotion = promotion;
+      }
 
       if (dryRun) {
         repoResult.processed.push(entry);
