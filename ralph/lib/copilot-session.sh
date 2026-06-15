@@ -213,7 +213,7 @@ copilot_session_archive_completed() {
     while IFS= read -r ledger; do
       jq -r '
         select(.event == "terminal")
-        | select(.terminalStatus == "merged" or .terminalStatus == "skipped")
+        | select(.terminalStatus == "merged" or .terminalStatus == "skipped" or .terminalStatus == "resumed")
         | .sessionId // empty
       ' "$ledger" 2>/dev/null || true
     done <<<"$ledgers" | sort -u

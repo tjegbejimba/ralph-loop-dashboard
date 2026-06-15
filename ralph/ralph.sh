@@ -1088,6 +1088,10 @@ DO NOT re-plan or open a new branch. Instead:
           status_update_item "$num" "running" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
         fi
         state_unlock || true
+        if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+          copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "resumed" "$RUN_ID" || true
+          copilot_session_archive_id "$copilot_session_id" || true
+        fi
         format_resume_log "$_next_attempt" "$RESUME_MAX" "$_resume_branch" "$num" >&2
         # Stash resume context for the loop-top short-circuit.
         export RESUME_NUM="$num"
