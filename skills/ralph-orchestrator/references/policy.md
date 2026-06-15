@@ -13,7 +13,7 @@ the headless Ralph worker's job (see "Worker contract").
 | Actor | Owns |
 | --- | --- |
 | **Ralph CLI** (`extension/cli.mjs`, `.ralph/launch.sh`) | Query/snapshot, taxonomy + preflight, baseline triage JSON, fingerprinted advisory comment create/update, enqueue, launch (`orchestrateRun`), verify. |
-| **`to-issues` skill** | PRD → slice authoring (a reasoning task — never build a CLI slicer). |
+| **`to-issues` skill** | PRD → slice authoring (a reasoning task — never build a CLI slicer). Sets each slice's initial label by the readiness-based **born-ready rule** (`docs/labels.md`), not by provenance: born `ralph:ready` only when the slice is newly created, auditable, non-HITL, non-blocked, non-duplicate, PR-sized, and test-verifiable; otherwise `ralph:needs-triage` (underspecified) or `ralph:hitl` (needs a human/product/security/destructive decision). |
 | **`ralph-issue-triage-agent` skill** | Optional advisory reasoning over a **frozen** triage snapshot only. No writes/discovery/enqueue/launch. |
 | **orchestrator** (this skill) | Consume structured output, apply gates, build the queue, launch behind gates, poll/monitor, owner briefs, ledger, and close a fully-delivered `work:prd` parent as completed (the one closure it owns — see "PRD parent close"). Spawns a sub-agent ONLY for shaping/owner-brief reasoning — never one agent per slice. |
 | **Ralph headless workers** | Claim + implement + test + dual-review + open/merge PR per `.ralph/RALPH.md`. |
