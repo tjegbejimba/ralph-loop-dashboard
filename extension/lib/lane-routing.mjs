@@ -1,4 +1,4 @@
-import { parseBlockerNumbers } from "./label-taxonomy.mjs";
+import { parseBlockerNumbers, classifyIssue } from "./label-taxonomy.mjs";
 
 /**
  * Route an issue to a lane (AUTO / REFINE / PRD / HOLD) based on triage opinion
@@ -41,9 +41,13 @@ export function routeIssueToLane({ issue, opinion }) {
     };
   }
 
-  // PRD lane: work:prd + Pursue = actual PRD parent that should be tracked
-  // (Refine/Defer/Needs info + work:prd are just underspecified issues, not real PRDs)
-  if (opinion.recommendation === "Pursue" && opinion.workTypeRecommendation === "work:prd") {
+  // PRD lane: actual work:prd labeled issues OR (Pursue + inferred work:prd)
+  // Check canonical label first to prevent labeled PRDs from routing to AUTO
+  const classification = classifyIssue(issue);
+  const hasWorkPrdLabel = classification.workType === "work:prd";
+  const isPrdParent = hasWorkPrdLabel || (opinion.recommendation === "Pursue" && opinion.workTypeRecommendation === "work:prd");
+  
+  if (isPrdParent) {
     return {
       lane: "PRD",
       targetLabel: "ralph:evaluated",

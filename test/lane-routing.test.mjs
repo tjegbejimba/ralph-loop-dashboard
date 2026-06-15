@@ -239,4 +239,30 @@ describe("lane routing", () => {
     const lowClarityRoute = routeIssueToLane({ issue: lowClarityIssue, opinion: lowClarityOpinion });
     assert.notEqual(lowClarityRoute.lane, "AUTO");
   });
+
+  it("prevents labeled work:prd issues from routing to AUTO", () => {
+    // Regression test: labeled PRD parent whose text looks standalone
+    // should still route to PRD lane, not AUTO
+    const labeledPrdIssue = {
+      number: 112,
+      title: "Implement deterministic lane routing",
+      body: [
+        "Add AUTO/REFINE/PRD/HOLD routing to prevent quota waste and improve AFK agent reliability.",
+        "",
+        "Acceptance criteria:",
+        "- AUTO predicate is strict",
+        "- routing is deterministic and testable",
+      ].join("\n"),
+      labels: ["ralph:needs-triage", "work:prd", "priority:P1"],
+      author: { login: "tjegbejimba" },
+      authorAssociation: "OWNER",
+    };
+
+    const opinion = evaluateIssueForTriage({ issue: labeledPrdIssue });
+    const route = routeIssueToLane({ issue: labeledPrdIssue, opinion });
+
+    assert.equal(route.lane, "PRD");
+    assert.equal(route.targetLabel, "ralph:evaluated");
+    assert.match(route.reason, /PRD parent/i);
+  });
 });
