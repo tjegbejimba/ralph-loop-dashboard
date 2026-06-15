@@ -83,6 +83,27 @@ explicit repos when `--repo` is passed — see the `--repo` note above) then inf
 confidence/escalation, but only `ralph:ready` + passing preflight issues enter the
 queue.
 
+## Authoring-time labels vs runtime promotion (ADR 0003 boundary)
+
+There are two distinct moments, and only one of them is in scope here:
+
+- **Authoring time (filing a new issue).** A human or an agent that *creates* an
+  issue/slice chooses its initial labels. Per the **readiness-based born-ready
+  rule** (`docs/labels.md` "Authoring labels at filing time"), an agent-authored
+  issue may be born `ralph:ready` only when newly created, repo-local, auditable
+  (in-body `## Born-ready checklist`), non-HITL, non-blocked, non-duplicate,
+  PR-sized, and test-verifiable. A grilled PRD is a strong fast-path, not an
+  automatic pass.
+- **Runtime (the live loop).** Nothing in this orchestrator/triage path promotes
+  an *existing* issue. The deterministic CLI stays the source of truth; the
+  advisory agent and the orchestrator never flip a live `ralph:needs-triage`
+  issue to `ralph:ready`, never drive the queue, and never launch off
+  probabilistic output.
+
+> ADR 0003 keystone: LLM authoring may choose initial labels for newly created
+> issues; LLM triage must never promote existing live issues or drive
+> queues/launches — the deterministic CLI remains the source of truth.
+
 ## When to escalate to the advisory agent
 
 Spawn the `ralph-issue-triage-agent` (single sub-agent, frozen snapshot) only when

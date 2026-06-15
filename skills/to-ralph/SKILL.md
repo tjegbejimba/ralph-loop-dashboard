@@ -58,7 +58,15 @@ grill-me → to-prd → to-issues → to-ralph → ./.ralph/launch.sh
      gh issue edit N --repo OWNER/REPO --add-label ralph:ready --remove-label ralph:needs-triage
      ```
 
-5. **Confirm autonomous intent before recommending bulk label promotion.** If the PRD was published with `ralph:needs-triage` (the `to-issues` default) and the operator wants Ralph to run it, **ask** before printing bulk relabel commands. The conversation should make autonomous approval explicit; do not assume it.
+5. **Confirm autonomous intent before recommending bulk label promotion.** Under the
+   readiness-based born-ready rule (`docs/labels.md`), well-specified AFK slices are
+   normally born `ralph:ready`, so a PRD's slices usually arrive runnable. But if a
+   slice was filed `ralph:needs-triage` (underspecified) or `ralph:hitl` (a human
+   decision is pending) and the operator wants Ralph to run it, **ask** before
+   printing bulk relabel commands. Promotion of an existing gated issue is an
+   operator-mediated action — per ADR 0003 the agent never self-promotes a live
+   `ralph:needs-triage` issue. The conversation should make autonomous approval
+   explicit; do not assume it.
 
 6. **Print a summary.** Output either:
    - ✅ **Ready to launch** — preflight verdict is ✅. Remind the user to run `.ralph/launch.sh` (without flags) or start from the dashboard when they are ready.
