@@ -1,0 +1,87 @@
+name: Structured Issue Intake
+description: Submit a well-scoped issue with structured triage fields for zero-tap filing and trusted provenance
+title: "[Brief summary]: "
+labels: ["ralph:needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing! This form captures structured triage metadata to help Ralph route your issue efficiently.
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How urgent is this issue?
+      options:
+        - P0 - Critical (stop-the-line)
+        - P1 - High
+        - P2 - Normal
+        - P3 - Low
+    validations:
+      required: true
+
+  - type: dropdown
+    id: automation_safety
+    attributes:
+      label: Automation Safety
+      description: Is this safe for autonomous agent execution after review?
+      options:
+        - Safe after prep
+        - Needs human judgment
+        - Not safe
+      default: 0
+    validations:
+      required: false
+
+  - type: textarea
+    id: acceptance_criteria
+    attributes:
+      label: Acceptance Criteria / Reproduction Steps
+      description: |
+        Clear acceptance criteria for features, or reproduction steps for bugs.
+        Be specific - this helps Ralph understand exactly what done looks like.
+      placeholder: |
+        - [ ] Criterion 1
+        - [ ] Criterion 2
+        
+        OR for bugs:
+        
+        Steps to reproduce:
+        1. Do X
+        2. Observe Y
+        
+        Expected: Z
+        Actual: W
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Additional Context
+      description: Any other relevant information, links, or background
+    validations:
+      required: false
+
+  - type: dropdown
+    id: work_type
+    attributes:
+      label: Work Type
+      description: What kind of issue is this?
+      options:
+        - Standalone work
+        - Part of a PRD (specify parent)
+        - New PRD parent
+      default: 0
+    validations:
+      required: false
+
+  - type: input
+    id: parent_prd
+    attributes:
+      label: Parent PRD Number (if applicable)
+      description: If this is a PRD slice, enter the parent issue number (e.g., 106)
+      placeholder: "106"
+    validations:
+      required: false
