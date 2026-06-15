@@ -547,8 +547,8 @@ describe("issue triage advisory automation", () => {
     assert.equal(repoResult.processed.length, 1);
     const entry = repoResult.processed[0];
     
-    // Should not have promotions field when promoteLanes is disabled
-    assert.equal(entry.promotions, undefined);
+    // Should not have promotion field when promoteLanes is disabled
+    assert.equal(entry.promotion, undefined);
   });
 
   it("triage workflow invokes lane promotion when promoteLanes is enabled (dry-run)", async () => {
