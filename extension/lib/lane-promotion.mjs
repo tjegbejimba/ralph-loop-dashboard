@@ -188,3 +188,99 @@ export function runPromoteLanes({ issues, live = false }) {
     summary,
   };
 }
+
+/**
+ * Promote a single ralph:fast-lane issue to ralph:ready with preflight re-checks.
+ * This is the operator-triggered one-tap promotion path.
+ *
+ * @param {object} params
+ * @param {object} params.issue - The GitHub issue object
+ * @param {boolean} params.live - Whether to actually apply mutations (false = dry-run)
+ * @returns {object} - { promoted, issueNumber, labelsAdded, labelsRemoved, skipReason }
+ */
+export function promoteOneTapReadiness({ issue, live = false }) {
+  if (!issue) {
+    throw new TypeError("issue is required");
+  }
+
+  const issueNumber = Number(issue.number);
+  const currentLabels = labelNames(issue.labels);
+  
+  // Guard: Issue must currently be ralph:fast-lane
+  if (!currentLabels.includes("ralph:fast-lane")) {
+    return {
+      promoted: false,
+      issueNumber,
+      labelsAdded: [],
+      labelsRemoved: [],
+      skipReason: "Issue is not in ralph:fast-lane state",
+    };
+  }
+
+  // Guard: Must be runnable work type (work:slice or work:standalone)
+  const classification = classifyIssue(issue);
+  const workType = classification.workType;
+  if (workType !== "work:slice" && workType !== "work:standalone") {
+    return {
+      promoted: false,
+      issueNumber,
+      labelsAdded: [],
+      labelsRemoved: [],
+      skipReason: `Not a runnable work type (found: ${workType || "none"})`,
+    };
+  }
+
+  // Guard: Must have a priority label
+  if (classification.priorityLabels.length === 0) {
+    return {
+      promoted: false,
+      issueNumber,
+      labelsAdded: [],
+      labelsRemoved: [],
+      skipReason: "Missing priority:* label",
+    };
+  }
+
+  // Use existing preflight guards
+  const guardError = checkPromotionGuards(issue, "ralph:ready", "AUTO");
+  if (guardError) {
+    return {
+      promoted: false,
+      issueNumber,
+      labelsAdded: [],
+      labelsRemoved: [],
+      skipReason: guardError,
+    };
+  }
+
+  // Calculate label mutations
+  const labelsAdded = [];
+  const labelsRemoved = [];
+
+  if (!currentLabels.includes("ralph:ready")) {
+    labelsAdded.push("ralph:ready");
+  }
+
+  if (currentLabels.includes("ralph:fast-lane")) {
+    labelsRemoved.push("ralph:fast-lane");
+  }
+
+  // Idempotency: if already in target state, no-op
+  if (labelsAdded.length === 0 && labelsRemoved.length === 0) {
+    return {
+      promoted: false,
+      issueNumber,
+      labelsAdded: [],
+      labelsRemoved: [],
+      skipReason: "Already in ralph:ready state",
+    };
+  }
+
+  return {
+    promoted: true,
+    issueNumber,
+    labelsAdded,
+    labelsRemoved,
+    skipReason: null,
+  };
+}
