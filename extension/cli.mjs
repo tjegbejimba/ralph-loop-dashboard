@@ -443,11 +443,37 @@ Parent markers for work:slice, or open questions/TBD evidence.
 
   const issues = JSON.parse(ghResult.stdout);
 
-  // The gh CLI doesn't return authorAssociation, so we need to enrich issues.
-  // For simplicity, we'll set a default authorAssociation value for now.
-  // In production, we'd fetch this via gh api or assume OWNER for tjegbejimba.
+  // Enrich authorAssociation: gh issue list doesn't return it, so fetch via gh api
+  // for each issue to get accurate OWNER/MEMBER/COLLABORATOR associations.
   for (const issue of issues) {
-    issue.authorAssociation = issue.author?.login === "tjegbejimba" ? "OWNER" : "NONE";
+    const apiResult = spawnSync(
+      "gh",
+      ["api", `repos/${repo.owner}/${repo.name}/issues/${issue.number}`, "--jq", ".author_association"],
+      { encoding: "utf8" }
+    );
+    if (apiResult.status === 0 && apiResult.stdout.trim()) {
+      issue.authorAssociation = apiResult.stdout.trim();
+    } else {
+      // Fallback: assume NONE if we can't determine it
+      issue.authorAssociation = "NONE";
+    }
+  }
+
+  // Enrich PR state: gh issue list doesn't return PR state in closedByPullRequestsReferences.
+  // Fetch state for each linked PR to enable the open-PR guard.
+  for (const issue of issues) {
+    const linkedPrs = issue.closedByPullRequestsReferences || [];
+    for (const pr of linkedPrs) {
+      if (!pr.number) continue;
+      const prResult = spawnSync(
+        "gh",
+        ["pr", "view", String(pr.number), "--repo", `${repo.owner}/${repo.name}`, "--json", "state", "--jq", ".state"],
+        { encoding: "utf8" }
+      );
+      if (prResult.status === 0 && prResult.stdout.trim()) {
+        pr.state = prResult.stdout.trim();
+      }
+    }
   }
 
   // Run lane promotion

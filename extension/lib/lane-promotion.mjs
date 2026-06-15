@@ -26,7 +26,17 @@ function checkPromotionGuards(issue, targetLabel, lane) {
   }
 
   // Guard: Open linked PR
-  const openPrs = (issue?.closedByPullRequestsReferences || []).filter((pr) => pr?.state === "OPEN");
+  // NOTE: gh issue list/view does NOT return PR state in closedByPullRequestsReferences.
+  // The guard relies on the caller enriching PR state before invoking promoteLaneForIssue.
+  // If state is missing, we assume the PR may be open and block as a fail-safe.
+  const linkedPrs = issue?.closedByPullRequestsReferences || [];
+  const openPrs = linkedPrs.filter((pr) => {
+    // If state is explicitly set, trust it
+    if (pr?.state === "CLOSED" || pr?.state === "MERGED") return false;
+    if (pr?.state === "OPEN") return true;
+    // If state is missing, treat as potentially open (fail-safe)
+    return pr?.number != null;
+  });
   if (openPrs.length > 0) {
     return `Open linked PR exists: ${openPrs[0].url || "PR #" + openPrs[0].number}`;
   }
