@@ -65,16 +65,17 @@ We adopt three decisions; they are independent and ship separately.
    construction and the guard can never trip in the dogfooding repo. **Foreign
    target repos keep the existing `cp` vendoring** — they have no `ralph/` source,
    so a real per-repo copy remains the correct delivery mechanism. This is tracked
-   as a separate follow-up (the "symlink restructure").
+   as a separate follow-up: the "symlink restructure" (#138).
 
 3. **Drift is enforced by a CI content-diff gate, not a runtime hard-stop.** A
    `install.sh --check` mode performs a content diff of `ralph/` against `.ralph/`
    and exits non-zero on divergence, run as a CI job (the `go generate && git diff
    --exit-code` pattern). Once CI covers genuine drift at PR time, the runtime guard
    becomes **warn-only** rather than a launch-blocking hard-stop. This is tracked as
-   a separate follow-up (the "CI drift gate").
+   a separate follow-up: the "CI drift gate" (#139).
 
-Decision 1 closes #131 on its own and should land first. Decisions 2 and 3 are the
+Decision 1 closes #131 on its own and should land first; decisions 2 and 3 are
+tracked as #138 (symlink restructure) and #139 (CI drift gate), both blocked by #131. Decisions 2 and 3 are the
 durable architecture: together they make the duplicate structurally unable to drift
 and move enforcement to where a human can act, so an unattended worker is never
 hard-stopped by the guard again.
