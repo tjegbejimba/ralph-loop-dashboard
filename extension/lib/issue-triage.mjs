@@ -450,6 +450,27 @@ export function buildTriageQuery(repoConfig = {}) {
     : "label:needs-triage";
 }
 
+// Builds the batched authorAssociation enrichment query. Issue numbers are
+// inlined as integer literals, so the query only declares the variables it
+// references ($owner, $name). Declaring an unused variable (e.g. $numbers)
+// makes GitHub reject the whole query with a `variableNotUsed` validation
+// error, which would surface as an enrichment failure on every healthy run.
+export function buildAuthorAssociationQuery(issueNumbers = []) {
+  const aliases = issueNumbers
+    .map((num, idx) => `
+              issue${idx}: issue(number: ${num}) {
+                number
+                authorAssociation
+              }`)
+    .join("\n");
+  return `
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {${aliases}
+          }
+        }
+      `;
+}
+
 function repoFullName(repoConfig) {
   const repo = repoConfig.repo || (repoConfig.owner && repoConfig.name ? `${repoConfig.owner}/${repoConfig.name}` : null);
   if (!repo || typeof repo !== "string" || !repo.includes("/")) {
@@ -519,18 +540,7 @@ async function defaultFetchIssues({ repo, query }) {
   if (issues.length > 0) {
     try {
       const issueNumbers = issues.map((issue) => issue.number);
-      const query = `
-        query($owner: String!, $name: String!, $numbers: [Int!]!) {
-          repository(owner: $owner, name: $name) {
-            ${issueNumbers.map((num, idx) => `
-              issue${idx}: issue(number: ${num}) {
-                number
-                authorAssociation
-              }
-            `).join("\n")}
-          }
-        }
-      `;
+      const query = buildAuthorAssociationQuery(issueNumbers);
       const [owner, name] = repo.split("/");
       const gqlResult = spawnSync("gh", [
         "api",
