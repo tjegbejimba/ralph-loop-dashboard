@@ -65,12 +65,18 @@ function writeTriageGh(root, { login = "tjegbejimba" } = {}) {
   writeFileSync(gh, `#!/usr/bin/env node
 const fs = require("fs");
 const args = process.argv.slice(2);
-if (args[0] === "api" && args[1] === "user") {
+if (args[0] === "auth" && args[1] === "status") {
+  process.stdout.write("Logged in");
+} else if (args[0] === "api" && args[1] === "user") {
   process.stdout.write(${JSON.stringify(login)} + "\\n");
+} else if (args[0] === "api" && args[1] === "graphql") {
+  process.stdout.write(JSON.stringify({ data: { viewer: { login: ${JSON.stringify(login)} }, rateLimit: { remaining: 5000 } } }));
 } else if (args[0] === "issue" && args[1] === "list") {
   const repoIdx = args.indexOf("--repo");
   const repo = repoIdx >= 0 ? args[repoIdx + 1] : "?";
-  if (process.env.GH_REPO_LOG) fs.appendFileSync(process.env.GH_REPO_LOG, repo + "\\n");
+  const limitIdx = args.indexOf("--limit");
+  const isProbe = limitIdx >= 0 && args[limitIdx + 1] === "1";
+  if (!isProbe && process.env.GH_REPO_LOG) fs.appendFileSync(process.env.GH_REPO_LOG, repo + "\\n");
   process.stdout.write("[]");
 } else {
   process.stderr.write("unexpected gh args: " + JSON.stringify(args));
@@ -251,8 +257,12 @@ test("cli.mjs triage — treats authenticated gh user as the comment owner", () 
   const existingBody = "## Triage opinion\n\n<!-- ralph-triage-opinion:v1 fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa -->";
   writeFileSync(gh, `#!/usr/bin/env node
 const args = process.argv.slice(2);
-if (args[0] === "api" && args[1] === "user") {
+if (args[0] === "auth" && args[1] === "status") {
+  process.stdout.write("Logged in");
+} else if (args[0] === "api" && args[1] === "user") {
   process.stdout.write("tjegbejimba\\n");
+} else if (args[0] === "api" && args[1] === "graphql") {
+  process.stdout.write(JSON.stringify({ data: { viewer: { login: "tjegbejimba" }, rateLimit: { remaining: 5000 }, repository: {} } }));
 } else if (args[0] === "issue" && args[1] === "list") {
   process.stdout.write(JSON.stringify([{
     number: 77,
@@ -304,7 +314,9 @@ test("cli.mjs triage --live — updates existing comment by GraphQL node ID", ()
   writeFileSync(gh, `#!/usr/bin/env node
 const fs = require("fs");
 const args = process.argv.slice(2);
-if (args[0] === "api" && args[1] === "user") {
+if (args[0] === "auth" && args[1] === "status") {
+  process.stdout.write("Logged in");
+} else if (args[0] === "api" && args[1] === "user") {
   process.stdout.write("tjegbejimba\\n");
 } else if (args[0] === "issue" && args[1] === "list") {
   process.stdout.write(JSON.stringify([{
@@ -326,6 +338,9 @@ if (args[0] === "api" && args[1] === "user") {
     body: ${JSON.stringify(existingBody)},
     createdAt: "2026-06-01T10:05:00Z"
   }] }));
+} else if (args[0] === "api" && args[1] === "graphql" && !args.includes("--input")) {
+  // Preflight viewer probe or authorAssociation enrichment (no stdin payload).
+  process.stdout.write(JSON.stringify({ data: { viewer: { login: "tjegbejimba" }, rateLimit: { remaining: 5000 }, repository: {} } }));
 } else if (args[0] === "api" && args[1] === "graphql") {
   let input = "";
   process.stdin.on("data", chunk => { input += chunk; });

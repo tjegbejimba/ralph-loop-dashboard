@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   DEFAULT_TRIAGE_CONFIG,
+  buildAuthorAssociationQuery,
   buildTriageQuery,
   evaluateIssueForTriage,
   planTriageComment,
@@ -15,6 +16,19 @@ describe("issue triage advisory automation", () => {
     assert.equal(buildTriageQuery({}), "label:needs-triage");
     assert.equal(buildTriageQuery({ taxonomyMode: "canonical" }), "label:ralph:needs-triage");
     assert.equal(buildTriageQuery({ query: "label:custom-triage" }), "label:custom-triage");
+  });
+
+  it("builds an authorAssociation query that declares no unused GraphQL variables", () => {
+    const query = buildAuthorAssociationQuery([12, 34, 56]);
+    const declared = [...query.matchAll(/\$([A-Za-z_][A-Za-z0-9_]*)\s*:/g)].map((m) => m[1]);
+    assert.deepEqual([...new Set(declared)].sort(), ["name", "owner"]);
+    for (const variable of declared) {
+      const references = query.split(`$${variable}`).length - 1;
+      assert.ok(references >= 2, `variable $${variable} must be referenced, not just declared`);
+    }
+    assert.ok(!query.includes("$numbers"), "must not declare the unused $numbers variable");
+    assert.ok(query.includes("issue(number: 12)"));
+    assert.ok(query.includes("issue2: issue(number: 56)"));
   });
 
   it("defaults the configured repo to the canonical needs-triage query", () => {

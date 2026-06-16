@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { validateRunnableForClaim } from "./label-taxonomy.mjs";
+import { checkGithubAuth } from "./github-preflight.mjs";
 
 /**
  * Execute a command and return result
@@ -43,10 +44,11 @@ async function execCommand(command, args = []) {
 }
 
 /**
- * Default GitHub auth checker
+ * Default GitHub auth checker. Delegates to the canonical gh-auth check shared
+ * with github-preflight.mjs so there is a single notion of "gh is healthy".
  */
 async function defaultGhAuthCheck() {
-  return execCommand("gh", ["auth", "status"]);
+  return checkGithubAuth();
 }
 
 /**

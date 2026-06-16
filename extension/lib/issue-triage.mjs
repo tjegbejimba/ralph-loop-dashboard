@@ -450,6 +450,27 @@ export function buildTriageQuery(repoConfig = {}) {
     : "label:needs-triage";
 }
 
+// Builds the batched authorAssociation enrichment query. Issue numbers are
+// inlined as integer literals, so the query only declares the variables it
+// references ($owner, $name). Declaring an unused variable (e.g. $numbers)
+// makes GitHub reject the whole query with a `variableNotUsed` validation
+// error, which would surface as an enrichment failure on every healthy run.
+export function buildAuthorAssociationQuery(issueNumbers = []) {
+  const aliases = issueNumbers
+    .map((num, idx) => `
+              issue${idx}: issue(number: ${num}) {
+                number
+                authorAssociation
+              }`)
+    .join("\n");
+  return `
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {${aliases}
+          }
+        }
+      `;
+}
+
 function repoFullName(repoConfig) {
   const repo = repoConfig.repo || (repoConfig.owner && repoConfig.name ? `${repoConfig.owner}/${repoConfig.name}` : null);
   if (!repo || typeof repo !== "string" || !repo.includes("/")) {
@@ -512,24 +533,14 @@ async function defaultFetchIssues({ repo, query }) {
   ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
   assertCommandOk(result, "gh issue list");
   const issues = JSON.parse(result.stdout || "[]");
-  
+  const warnings = [];
+
   // Enrich with authorAssociation from GraphQL (gh issue list doesn't support it)
   // Use a single GraphQL call to batch-fetch authorAssociation for all issues
   if (issues.length > 0) {
     try {
       const issueNumbers = issues.map((issue) => issue.number);
-      const query = `
-        query($owner: String!, $name: String!, $numbers: [Int!]!) {
-          repository(owner: $owner, name: $name) {
-            ${issueNumbers.map((num, idx) => `
-              issue${idx}: issue(number: ${num}) {
-                number
-                authorAssociation
-              }
-            `).join("\n")}
-          }
-        }
-      `;
+      const query = buildAuthorAssociationQuery(issueNumbers);
       const [owner, name] = repo.split("/");
       const gqlResult = spawnSync("gh", [
         "api",
@@ -541,7 +552,7 @@ async function defaultFetchIssues({ repo, query }) {
         "-f",
         `name=${name}`,
       ], { encoding: "utf8", maxBuffer: 10 * 1024 * 1024 });
-      
+
       if (gqlResult.status === 0) {
         const data = JSON.parse(gqlResult.stdout || "{}").data?.repository || {};
         issues.forEach((issue, idx) => {
@@ -550,13 +561,24 @@ async function defaultFetchIssues({ repo, query }) {
             issue.authorAssociation = gqlIssue.authorAssociation;
           }
         });
+      } else {
+        // GraphQL enrichment failed (the surface that produced the observed
+        // connection refused). Record it so the run surfaces a non-zero outcome
+        // instead of silently triaging with missing authorAssociation.
+        warnings.push({
+          type: "author_association_enrichment_failed",
+          message: (gqlResult.stderr || "gh api graphql authorAssociation failed").trim(),
+        });
       }
     } catch (err) {
-      // Fall back to fetching individually if batch fails
+      warnings.push({
+        type: "author_association_enrichment_failed",
+        message: String(err.message || err),
+      });
     }
   }
-  
-  return issues;
+
+  return { issues, warnings };
 }
 
 async function defaultFetchComments({ repo, issueNumber }) {
@@ -640,11 +662,23 @@ export async function runIssueTriage({
     runResult.repos.push(repoResult);
 
     let issues;
+    let fetchWarnings = [];
     try {
-      issues = await fetchIssues({ repo, query, repoConfig });
+      const fetched = await fetchIssues({ repo, query, repoConfig });
+      if (Array.isArray(fetched)) {
+        issues = fetched;
+      } else if (fetched && Array.isArray(fetched.issues)) {
+        issues = fetched.issues;
+        fetchWarnings = Array.isArray(fetched.warnings) ? fetched.warnings : [];
+      } else {
+        issues = [];
+      }
     } catch (err) {
       repoResult.errors.push({ type: "fetch_issues_failed", message: String(err.message || err) });
       continue;
+    }
+    for (const warning of fetchWarnings) {
+      repoResult.errors.push(warning);
     }
 
     const sortedIssues = [...(Array.isArray(issues) ? issues : [])].sort(compareOldestFirst);
