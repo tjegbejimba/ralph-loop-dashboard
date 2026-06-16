@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -9,7 +9,7 @@ import { runPromoteLanes } from "../extension/lib/lane-promotion.mjs";
 
 const CLI = join(import.meta.dirname, "..", "extension", "cli.mjs");
 
-function writePromoteLanesGh(root, { issuesByRepo = {} } = {}) {
+function writePromoteLanesGh(root, { issuesByRepo = {}, authStatusExit = 0, authorAssocExit = 0 } = {}) {
   const bin = join(root, "bin");
   mkdirSync(bin, { recursive: true });
   const log = join(root, "gh-repos.log");
@@ -19,12 +19,22 @@ function writePromoteLanesGh(root, { issuesByRepo = {} } = {}) {
 const fs = require("fs");
 const args = process.argv.slice(2);
 const issuesByRepo = ${JSON.stringify(issuesByRepo)};
-if (args[0] === "issue" && args[1] === "list") {
+if (args[0] === "auth" && args[1] === "status") {
+  if (${authStatusExit} !== 0) { process.stderr.write("not authenticated"); process.exit(${authStatusExit}); }
+  process.stdout.write("Logged in to github.com");
+} else if (args[0] === "api" && args[1] === "user") {
+  process.stdout.write("octocat\\n");
+} else if (args[0] === "api" && args[1] === "graphql") {
+  process.stdout.write(JSON.stringify({ data: { viewer: { login: "octocat" }, rateLimit: { remaining: 5000 } } }));
+} else if (args[0] === "issue" && args[1] === "list") {
   const repoIdx = args.indexOf("--repo");
   const repo = repoIdx >= 0 ? args[repoIdx + 1] : "?";
-  fs.appendFileSync(${JSON.stringify(log)}, repo + "\\n");
+  const limitIdx = args.indexOf("--limit");
+  const isProbe = limitIdx >= 0 && args[limitIdx + 1] === "1";
+  if (!isProbe) fs.appendFileSync(${JSON.stringify(log)}, repo + "\\n");
   process.stdout.write(JSON.stringify(issuesByRepo[repo] || []));
 } else if (args[0] === "api" && /^repos\\/.+\\/.+\\/issues\\/\\d+$/.test(args[1])) {
+  if (${authorAssocExit} !== 0) { process.stderr.write("dial tcp: connection refused"); process.exit(${authorAssocExit}); }
   process.stdout.write("OWNER\\n");
 } else if (args[0] === "issue" && args[1] === "edit") {
   fs.appendFileSync(${JSON.stringify(editLog)}, args.join(" ") + "\\n");
@@ -119,6 +129,95 @@ describe("promote-lanes CLI integration", () => {
       assert.match(edits[1], /issue edit 202 --repo tjegbejimba\/kindleflow/);
       assert.match(edits[1], /--add-label ralph:fast-lane/);
       assert.match(edits[1], /--remove-label ralph:needs-triage/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts non-zero with no edits when gh auth fails preflight", () => {
+    const root = mkdtempSync(join(tmpdir(), "ralph-promote-lanes-authfail-"));
+    const { bin, editLog } = writePromoteLanesGh(root, {
+      issuesByRepo: { "octocat/hello-world": [] },
+      authStatusExit: 1,
+    });
+    try {
+      const result = spawnSync("node", [
+        CLI,
+        "promote-lanes",
+        "--live",
+        "--repo",
+        "octocat/hello-world",
+      ], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 1, `stdout: ${result.stdout}`);
+      assert.match(result.stderr, /GitHub preflight failed/);
+      assert.equal(existsSync(editLog), false, "no label edits should happen");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("emits a structured preflight failure with --json", () => {
+    const root = mkdtempSync(join(tmpdir(), "ralph-promote-lanes-json-fail-"));
+    const { bin } = writePromoteLanesGh(root, {
+      issuesByRepo: { "octocat/hello-world": [] },
+      authStatusExit: 1,
+    });
+    try {
+      const result = spawnSync("node", [
+        CLI,
+        "promote-lanes",
+        "--live",
+        "--json",
+        "--repo",
+        "octocat/hello-world",
+      ], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 1);
+      const payload = JSON.parse(result.stdout);
+      assert.equal(payload.ok, false);
+      assert.equal(payload.phase, "github-preflight");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("exits non-zero in --live when enrichment calls fail", () => {
+    const issue = {
+      number: 101,
+      title: "Prevent unsafe launches",
+      body: "Ralph can waste quota.\n\nAcceptance criteria:\n- preflight blocks unsafe launches",
+      labels: [{ name: "ralph:needs-triage" }],
+      author: { login: "tjegbejimba" },
+      assignees: [],
+      closedByPullRequestsReferences: [],
+    };
+    const root = mkdtempSync(join(tmpdir(), "ralph-promote-lanes-enrich-fail-"));
+    const { bin } = writePromoteLanesGh(root, {
+      issuesByRepo: { "octocat/hello-world": [issue] },
+      authorAssocExit: 1,
+    });
+    try {
+      const result = spawnSync("node", [
+        CLI,
+        "promote-lanes",
+        "--live",
+        "--repo",
+        "octocat/hello-world",
+      ], {
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+        encoding: "utf8",
+        timeout: 10_000,
+      });
+      assert.equal(result.status, 1, `stdout: ${result.stdout}`);
+      assert.match(result.stderr, /enrichment error/);
+      assert.match(result.stderr, /author_association_failed/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

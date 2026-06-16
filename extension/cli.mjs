@@ -30,6 +30,7 @@ import { loadUserConfig } from "./lib/user-config.mjs";
 import { runOrchestrateRepo, renderPlan, renderSummary, resolveRepoSlug } from "./lib/orchestrate-repo.mjs";
 import { resolveOrchestrateRepoRoot } from "./lib/loop-launch-controller.mjs";
 import { runCloseCompletedPrds, renderCloseCompletedPrds } from "./lib/close-completed-prds.mjs";
+import { runGithubPreflight } from "./lib/github-preflight.mjs";
 
 function findRepoRoot(start) {
   if (process.env.RALPH_REPO_ROOT) return process.env.RALPH_REPO_ROOT;
@@ -353,6 +354,54 @@ function renderTriageRun(result) {
   return lines.join("\n");
 }
 
+// Emit a fail-loud GitHub preflight failure and mark a non-zero exit. Shared by
+// triage and promote-lanes so a broken sandbox aborts before any per-issue work
+// instead of silently no-op'ing (issue #149).
+function emitPreflightFailure(flags, preflight, phase) {
+  if (flags.json) {
+    process.stdout.write(
+      `${JSON.stringify({ ok: false, phase, error: preflight.error, checks: preflight.checks }, null, 2)}\n`,
+    );
+  }
+  process.stderr.write(`${preflight.error}\n`);
+  process.exitCode = 1;
+}
+
+// Classify a triage run so the scheduler can tell apart a genuine success, a
+// run with nothing eligible, and a run that failed wholly or partially.
+function classifyTriageRun(result) {
+  const errors = [];
+  let processed = 0;
+  let skipped = 0;
+  let posted = 0;
+  let systemic = false;
+  for (const repoResult of result.repos) {
+    processed += repoResult.processed.length;
+    skipped += repoResult.skipped.length;
+    posted += repoResult.processed.filter((item) => item.posted).length;
+    for (const error of repoResult.errors) {
+      errors.push({ repo: repoResult.repo, ...error });
+      if (error.type === "fetch_issues_failed") systemic = true;
+    }
+  }
+  let outcome;
+  if (systemic) outcome = "systemic_failure";
+  else if (errors.length > 0) outcome = "partial_failure";
+  else if (processed === 0 && skipped === 0) outcome = "success_no_eligible_work";
+  else outcome = "success";
+  return {
+    outcome,
+    errors,
+    errorCount: errors.length,
+    repoCount: result.repos.length,
+    counts: { processed, skipped, posted },
+  };
+}
+
+function isFailedTriageOutcome(outcome) {
+  return outcome === "systemic_failure" || outcome === "partial_failure";
+}
+
 async function cmdTriage(flags) {
   if (flags.help) {
     printTriageUsage();
@@ -366,17 +415,47 @@ async function cmdTriage(flags) {
     process.exitCode = 2;
     return;
   }
+
+  // Fail-loud GitHub preflight (issue #149): abort before any per-issue work if
+  // auth/reachability is broken in the (possibly sandboxed) environment.
+  const preflight = runGithubPreflight({ repos });
+  if (!preflight.ok) {
+    emitPreflightFailure(flags, preflight, "github-preflight");
+    return;
+  }
+
   const result = await runIssueTriage({
     mode: flags.triageMode,
     config: {
       repos,
-      botLogin: flags.triageBotLogin || currentGithubLogin(),
+      botLogin: flags.triageBotLogin || preflight.login || currentGithubLogin(),
     },
   });
+
+  const summary = classifyTriageRun(result);
+
   if (flags.json) {
-    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.stdout.write(
+      `${JSON.stringify({ ...result, outcome: summary.outcome, counts: summary.counts }, null, 2)}\n`,
+    );
   } else {
     process.stdout.write(`${renderTriageRun(result)}\n`);
+    const c = summary.counts;
+    process.stdout.write(
+      `\nOutcome: ${summary.outcome} ` +
+        `(processed=${c.processed}, skipped=${c.skipped}, posted=${c.posted}, errors=${summary.errorCount})\n`,
+    );
+  }
+
+  if (isFailedTriageOutcome(summary.outcome)) {
+    process.stderr.write(
+      `triage ${summary.outcome}: ${summary.errorCount} error(s) across ${summary.repoCount} repo(s).\n`,
+    );
+    for (const error of summary.errors) {
+      const where = error.issueNumber ? `${error.repo} #${error.issueNumber}` : error.repo;
+      process.stderr.write(`  - ${where} ${error.type}: ${error.message}\n`);
+    }
+    process.exitCode = 1;
   }
 }
 
@@ -416,6 +495,14 @@ Parent markers for work:slice, or open questions/TBD evidence.
     return;
   }
 
+  // Fail-loud GitHub preflight (issue #149): abort before any per-issue work if
+  // auth/reachability is broken in the (possibly sandboxed) environment.
+  const preflight = runGithubPreflight({ repos });
+  if (!preflight.ok) {
+    emitPreflightFailure(flags, preflight, "github-preflight");
+    return;
+  }
+
   const repoResults = [];
 
   for (const repo of repos) {
@@ -435,6 +522,24 @@ Parent markers for work:slice, or open questions/TBD evidence.
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
   } else {
     process.stdout.write(renderPromoteLanesRun({ repoResults, live, query }));
+  }
+
+  // Surface enrichment failures that may have silently degraded routing/safety
+  // decisions (author association → NONE, missing PR state). In live mode this
+  // is a hard non-zero so the scheduler never reports a misleading success.
+  const enrichmentErrors = repoResults.flatMap((r) =>
+    (r.enrichmentErrors || []).map((e) => ({ repo: r.repo, ...e })),
+  );
+  if (enrichmentErrors.length > 0) {
+    const severity = live ? "error" : "warning";
+    process.stderr.write(
+      `promote-lanes enrichment ${severity}: ${enrichmentErrors.length} GitHub enrichment ` +
+        `call(s) failed; routing/safety decisions may be based on incomplete data.\n`,
+    );
+    for (const error of enrichmentErrors) {
+      process.stderr.write(`  - ${error.repo} #${error.issueNumber} ${error.type}: ${error.message}\n`);
+    }
+    if (live) process.exitCode = 1;
   }
 }
 
@@ -472,6 +577,7 @@ function promoteLanesForRepo({ repo, query, live }) {
   }
 
   const issues = JSON.parse(ghResult.stdout);
+  const enrichmentErrors = [];
 
   // Enrich authorAssociation: gh issue list doesn't return it, so fetch via gh api
   // for each issue to get accurate OWNER/MEMBER/COLLABORATOR associations.
@@ -484,8 +590,14 @@ function promoteLanesForRepo({ repo, query, live }) {
     if (apiResult.status === 0 && apiResult.stdout.trim()) {
       issue.authorAssociation = apiResult.stdout.trim();
     } else {
-      // Fallback: assume NONE if we can't determine it
+      // Fallback: assume NONE if we can't determine it. Record the failure so a
+      // degraded routing decision is surfaced rather than silently trusted.
       issue.authorAssociation = "NONE";
+      enrichmentErrors.push({
+        issueNumber: issue.number,
+        type: "author_association_failed",
+        message: (apiResult.stderr || apiResult.error?.message || "gh api issue failed").trim(),
+      });
     }
   }
 
@@ -502,6 +614,15 @@ function promoteLanesForRepo({ repo, query, live }) {
       );
       if (prResult.status === 0 && prResult.stdout.trim()) {
         pr.state = prResult.stdout.trim();
+      } else {
+        // A missing PR state silently disables the open-PR guard. Record it so
+        // the run can surface (and, in live mode, fail on) the gap.
+        enrichmentErrors.push({
+          issueNumber: issue.number,
+          type: "pr_state_failed",
+          prNumber: pr.number,
+          message: (prResult.stderr || prResult.error?.message || "gh pr view failed").trim(),
+        });
       }
     }
   }
@@ -509,7 +630,10 @@ function promoteLanesForRepo({ repo, query, live }) {
   // Run lane promotion
   const result = runPromoteLanes({ issues, live });
 
-  // Apply mutations if live
+  // Apply mutations if live, tracking what actually landed vs what failed so the
+  // summary can't claim "promoted" when the gh edit never applied.
+  const appliedMutations = [];
+  const failedMutations = [];
   if (live) {
     for (const promotion of result.promotions) {
       if (promotion.skipped) continue;
@@ -538,7 +662,13 @@ function promoteLanesForRepo({ repo, query, live }) {
 
       if (labelResult.status !== 0) {
         process.stderr.write(`Failed to update #${promotion.issueNumber}: ${labelResult.stderr}\n`);
+        failedMutations.push({
+          issueNumber: promotion.issueNumber,
+          message: (labelResult.stderr || labelResult.error?.message || "gh issue edit failed").trim(),
+        });
         process.exitCode = 1;
+      } else {
+        appliedMutations.push(promotion.issueNumber);
       }
     }
   }
@@ -547,6 +677,9 @@ function promoteLanesForRepo({ repo, query, live }) {
     repo: repoName,
     query,
     ...result,
+    enrichmentErrors,
+    appliedMutations,
+    failedMutations,
   };
 }
 
@@ -583,7 +716,12 @@ function renderPromoteLanesRun({ repoResults, live, query }) {
     lines.push(`  Total: ${result.summary.total}`);
     lines.push(`  Promoted: ${result.summary.promoted}`);
     lines.push(`  No-op (idempotent): ${result.summary.noOp}`);
-    lines.push(`  Skipped (guards): ${result.summary.skipped}\n`);
+    lines.push(`  Skipped (guards): ${result.summary.skipped}`);
+    if (live) {
+      lines.push(`  Applied (live edits): ${result.appliedMutations?.length ?? 0}`);
+      lines.push(`  Failed to apply: ${result.failedMutations?.length ?? 0}`);
+    }
+    lines.push("");
 
     for (const promotion of result.promotions) {
       if (promotion.skipped) {
