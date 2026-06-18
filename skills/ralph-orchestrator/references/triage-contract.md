@@ -75,7 +75,7 @@ one short cited span.
 discover runnable work. For `repo-maintain` (a per-repo session), *ready-work
 discovery* uses the session repo's configured canonical search, read from
 `.ralph/config.json` `issue.issueSearch`
-(default: `is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)`),
+(default: `is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)`),
 run read-only (`gh issue list --search "<issueSearch>" --json number,title,labels,url`,
 which defaults to the session's repo). The orchestrator **never rewrites**
 `issue.issueSearch`. Triage classification (the session's own repo by default, or

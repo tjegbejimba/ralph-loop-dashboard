@@ -30,6 +30,12 @@ for (const profile of ["generic", "bun", "python"]) {
       search.includes("label:work:slice") && search.includes("label:work:standalone"),
       `${profile} issueSearch ("${search}") must include canonical work labels`
     );
+    // Defense-in-depth (#125): a failed issue that still carries a stale
+    // ralph:ready label must never be silently re-discovered/re-queued.
+    assert.ok(
+      search.includes("-label:ralph:failed"),
+      `${profile} issueSearch ("${search}") must exclude failed issues (-label:ralph:failed)`
+    );
   });
 }
 

@@ -155,8 +155,15 @@ warnings. New automation should use canonical labels only.
 Profile defaults search for canonical runnable work:
 
 ```text
-label:ralph:ready (label:work:slice OR label:work:standalone) is:open no:assignee
+label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone) is:open no:assignee
 ```
+
+The explicit `-label:ralph:failed` is fail-closed defense-in-depth: an issue that
+ends up with both `ralph:ready` and `ralph:failed` (a state conflict) is excluded
+from discovery until repaired, so it can never be silently re-queued. The label
+state machine (`ralph_apply_label_transition`) makes that conflict structurally
+impossible by clearing every other `ralph:` state label on each transition, but
+the search guard keeps discovery safe even if a stale label slips through.
 
 Preflight and status are read-only. Normal enqueue and worker transitions are
 the only paths that mutate labels.

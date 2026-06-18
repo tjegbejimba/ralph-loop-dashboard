@@ -121,7 +121,7 @@ exit 2
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
 
   bin_dir="$TEST_ROOT/bin-tracer"
@@ -154,7 +154,7 @@ EOF
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
   # RALPH.md with a concrete PRD reference (no placeholder).
   cat > "$repo/.ralph/RALPH.md" <<'EOF'
@@ -187,7 +187,7 @@ EOF
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [17], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
+{"issue": {"numbers": [17], "issueSearch": "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
   cat > "$repo/.ralph/RALPH.md" <<'EOF'
 <!-- RALPH_PRD_REF: #4 -->
@@ -478,7 +478,7 @@ EOF
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
   cat > "$repo/.ralph/RALPH.md" <<'EOF'
 <!-- RALPH_PRD_REF: #4 -->
@@ -554,7 +554,7 @@ exit 2
 {
   repo=$(new_repo)
   cat > "$repo/.ralph/config.json" <<'EOF'
-{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"}, "profile": "default"}
+{"issue": {"numbers": [], "issueSearch": "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)"}, "profile": "default"}
 EOF
   cat > "$repo/.ralph/RALPH.md" <<'EOF'
 <!-- RALPH_PRD_REF: #4 -->

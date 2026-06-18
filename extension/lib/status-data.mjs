@@ -29,7 +29,7 @@ export const DEFAULT_CONFIG = {
   issue: {
     titleRegex: "^Slice [0-9]+:",
     titleNumRegex: "^Slice ([0-9]+):",
-    issueSearch: "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)",
+    issueSearch: "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)",
   },
   validation: {
     commands: [{ name: "Project checks", command: "Run the relevant checks documented by this repo." }],
