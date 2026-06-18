@@ -124,4 +124,36 @@ if ! grep -qxF ".ralph" "$fresh_target/.git/info/exclude"; then
   exit 1
 fi
 
+# Verify the installer is idempotent against a MANUAL Ralph Loop section that
+# predates the installer marker. A hand-written `## Ralph Loop` section (without
+# the `<!-- ralph-loop-instructions -->` marker) must NOT trigger a duplicate
+# appended block — doing so dirties the working tree and makes Ralph workers
+# abort on preflight.
+manual_target="$TEST_ROOT/target-manual"
+git init -q "$manual_target"
+( cd "$manual_target" \
+  && git checkout -qb main \
+  && git config user.email "test@example.com" \
+  && git config user.name "Test" \
+  && echo seed > README.md \
+  && git add README.md \
+  && git commit -qm seed )
+
+manual_instructions="$manual_target/.github/copilot-instructions.md"
+mkdir -p "$manual_target/.github"
+printf '# Copilot instructions\n\n## Ralph Loop\n\nThis repo uses Ralph Loop. Hand-written guidance that should be preserved.\n' > "$manual_instructions"
+
+"$REPO_ROOT/install.sh" "$manual_target" --scripts-only --profile generic >/dev/null
+
+ralph_loop_heading_count=$(grep -c '^## Ralph Loop' "$manual_instructions")
+if [[ "$ralph_loop_heading_count" != "1" ]]; then
+  echo "FAIL: installer should not append a duplicate '## Ralph Loop' section when a manual one already exists, got heading count $ralph_loop_heading_count"
+  exit 1
+fi
+
+if ! grep -qF "Hand-written guidance that should be preserved." "$manual_instructions"; then
+  echo "FAIL: installer should preserve the existing manual Ralph Loop section"
+  exit 1
+fi
+
 echo "PASS: install.sh refreshes scripts without clobbering prompt/config"
