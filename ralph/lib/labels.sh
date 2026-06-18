@@ -17,7 +17,7 @@ RALPH_WORK_LABELS=("work:prd" "work:slice" "work:standalone")
 RALPH_LEGACY_SAFETY_LABELS=("hitl" "needs-triage")
 
 ralph_default_issue_search() {
-  printf '%s\n' 'is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)'
+  printf '%s\n' 'is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)'
 }
 
 ralph_labels_csv() {
@@ -204,18 +204,21 @@ ralph_prd_blocker_tags() {
 
 ralph_apply_label_transition() {
   local issue="$1" transition="$2"
-  local add_csv="" remove_csv=""
+  local add_label=""
+  # Set-semantics: each transition sets exactly one canonical ralph: state label.
+  # Every other canonical state label is removed below so a skipped step (e.g.
+  # enqueue) can never leave a stale state label behind (incident #125).
   case "$transition" in
     enqueue)
-      add_csv="ralph:queued"; remove_csv="ralph:ready,ralph:blocked" ;;
+      add_label="ralph:queued" ;;
     claim)
-      add_csv="ralph:running"; remove_csv="ralph:queued" ;;
+      add_label="ralph:running" ;;
     done)
-      add_csv="ralph:done"; remove_csv="ralph:running" ;;
+      add_label="ralph:done" ;;
     fail)
-      add_csv="ralph:failed"; remove_csv="ralph:running,ralph:queued" ;;
+      add_label="ralph:failed" ;;
     retry)
-      add_csv="ralph:queued"; remove_csv="ralph:running,ralph:failed" ;;
+      add_label="ralph:queued" ;;
     *)
       echo "⚠️  unknown Ralph label transition: $transition" >&2
       return 1 ;;
@@ -224,17 +227,12 @@ ralph_apply_label_transition() {
   [[ -n "${RALPH_DISABLE_LABEL_TRANSITIONS:-}" ]] && return 0
   [[ -n "${GH:-}" && -n "${REPO:-}" ]] || return 0
 
-  local args=("issue" "edit" "$issue" "--repo" "$REPO")
+  local args=("issue" "edit" "$issue" "--repo" "$REPO" "--add-label" "$add_label")
   local label
-  IFS=, read -ra _adds <<<"$add_csv"
-  for label in "${_adds[@]}"; do
-    [[ -n "$label" ]] && args+=("--add-label" "$label")
+  for label in "${RALPH_STATE_LABELS[@]}"; do
+    [[ "$label" == "$add_label" ]] && continue
+    args+=("--remove-label" "$label")
   done
-  IFS=, read -ra _removes <<<"$remove_csv"
-  for label in "${_removes[@]}"; do
-    [[ -n "$label" ]] && args+=("--remove-label" "$label")
-  done
-  unset _adds _removes
 
   if ! "$GH" "${args[@]}" >/dev/null 2>&1; then
     echo "⚠️  Could not apply Ralph label transition '$transition' to #$issue" >&2

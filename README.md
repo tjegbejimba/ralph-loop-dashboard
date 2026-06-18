@@ -384,7 +384,7 @@ Config is intentionally small:
   "issue": {
     "titleRegex": "^Slice [0-9]+:",
     "titleNumRegex": "^Slice (?<x>[0-9]+):",
-    "issueSearch": "is:open no:assignee label:ralph:ready (label:work:slice OR label:work:standalone)"
+    "issueSearch": "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)"
   },
   "validation": {
     "commands": [
