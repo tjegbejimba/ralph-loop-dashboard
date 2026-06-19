@@ -23,7 +23,7 @@ import { spawnSync } from "node:child_process";
 import { orchestrateRun as orchestrateRalphRun, resolveOrchestrateRepoRoot } from "./loop-launch-controller.mjs";
 import { resolveActiveRun } from "./status-data.mjs";
 import { queryIssues } from "./issue-query.mjs";
-import { classifyIssue, RALPH_STATES, CANONICAL_LABELS } from "./label-taxonomy.mjs";
+import { classifyIssue, priorityRankFromShort, RALPH_STATES, CANONICAL_LABELS } from "./label-taxonomy.mjs";
 
 export const LEDGER_SCHEMA_VERSION = "ralph-orchestrator/v1";
 
@@ -144,12 +144,20 @@ export function findMissingCanonicalLabels(repoLabelNames = []) {
 }
 
 /**
- * Bound a discovered, eligible issue set to the per-run cap, lowest issue
- * number first (repo-maintain.md step 5). Does not mutate the input.
+ * Bound a discovered, eligible issue set to the per-run cap, highest priority
+ * first (P0 < P1 < P2 < P3), then lowest issue number within a priority band
+ * (repo-maintain.md step 5). Eligible items carry a short `priority` string
+ * (e.g. "P1") rather than a `labels` array, so ranking goes through
+ * priorityRankFromShort — the single PRIORITY_RANK source of truth — and a
+ * missing/unknown priority falls back to the P2 band. Does not mutate the input.
  */
 export function buildBoundedQueue(issues = [], { maxIssues = REPO_MAINTAIN_DEFAULTS.maxIssues } = {}) {
   return [...issues]
-    .sort((a, b) => Number(a.number) - Number(b.number))
+    .sort(
+      (a, b) =>
+        priorityRankFromShort(a.priority) - priorityRankFromShort(b.priority) ||
+        Number(a.number) - Number(b.number),
+    )
     .slice(0, Math.max(0, maxIssues));
 }
 
@@ -457,7 +465,8 @@ export async function runOrchestrateRepo(options = {}) {
   result.discovered = eligible;
   result.skipped = skipped;
 
-  // Step 7: bounded queue (≤ maxIssues, lowest number first).
+  // Step 7: bounded queue (≤ maxIssues, highest priority first, then lowest
+  // number within a priority band).
   const queue = buildBoundedQueue(eligible, { maxIssues });
   result.queue = queue;
 

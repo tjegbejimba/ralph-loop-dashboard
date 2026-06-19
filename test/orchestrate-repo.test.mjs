@@ -72,10 +72,55 @@ function baseDeps(overrides = {}) {
   };
 }
 
-test("buildBoundedQueue — sorts by issue number ascending and caps at maxIssues", () => {
-  const issues = [{ number: 30 }, { number: 5 }, { number: 12 }, { number: 99 }];
-  const queue = buildBoundedQueue(issues, { maxIssues: 3 });
-  assert.deepEqual(queue.map((i) => i.number), [5, 12, 30]);
+test("buildBoundedQueue — orders by priority rank, then issue number, and caps at maxIssues", () => {
+  // Core regression: a high-numbered P1 must beat a low-numbered P2 (no priority inversion).
+  assert.deepEqual(
+    buildBoundedQueue(
+      [{ number: 5, priority: "P2" }, { number: 99, priority: "P1" }],
+      { maxIssues: 1 },
+    ).map((i) => i.number),
+    [99],
+  );
+
+  // Within the same priority band, lowest number first.
+  assert.deepEqual(
+    buildBoundedQueue([{ number: 30, priority: "P1" }, { number: 5, priority: "P1" }]).map((i) => i.number),
+    [5, 30],
+  );
+
+  // Full ordering across all priority bands (P0 < P1 < P2 < P3), number as tiebreaker.
+  assert.deepEqual(
+    buildBoundedQueue([
+      { number: 7, priority: "P3" },
+      { number: 8, priority: "P1" },
+      { number: 3, priority: "P2" },
+      { number: 1, priority: "P0" },
+      { number: 2, priority: "P1" },
+    ], { maxIssues: 5 }).map((i) => i.number),
+    [1, 2, 8, 3, 7],
+  );
+
+  // Cap is applied after the new ordering.
+  assert.deepEqual(
+    buildBoundedQueue([
+      { number: 7, priority: "P3" },
+      { number: 8, priority: "P1" },
+      { number: 1, priority: "P0" },
+    ], { maxIssues: 2 }).map((i) => i.number),
+    [1, 8],
+  );
+
+  // Missing priority defaults to the P2 band, so an unprioritised set stays number-ascending.
+  assert.deepEqual(
+    buildBoundedQueue([{ number: 30 }, { number: 5 }, { number: 12 }, { number: 99 }], { maxIssues: 3 }).map((i) => i.number),
+    [5, 12, 30],
+  );
+});
+
+test("buildBoundedQueue — does not mutate the input array", () => {
+  const issues = [{ number: 5, priority: "P2" }, { number: 99, priority: "P1" }];
+  buildBoundedQueue(issues, { maxIssues: 2 });
+  assert.deepEqual(issues.map((i) => i.number), [5, 99]);
 });
 
 test("findMissingCanonicalLabels — reports missing ralph:* state labels", () => {
@@ -227,7 +272,7 @@ test("label precondition missing → skip + one-time owner brief, no launch", as
   }
 });
 
-test("discovery returns N → bounded to maxIssues (lowest numbers first)", async () => {
+test("discovery returns N → bounded to maxIssues (priority then number)", async () => {
   const root = makeRepo();
   try {
     const result = await runOrchestrateRepo({

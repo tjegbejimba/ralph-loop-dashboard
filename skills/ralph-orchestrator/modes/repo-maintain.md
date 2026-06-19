@@ -110,10 +110,10 @@ tick fired for. The orchestrator does not reach into other repos.
    prerequisites" and `../references/triage-contract.md`); escalate to the advisory
    agent only by exception.
 
-5. **Build a bounded queue.** Take up to 3 qualifying issues (lowest-number first
-   within the ready set), dropping any with an open linked PR or a local Ralph
-   duplicate. If nothing qualifies, record "no ready work" in the ledger and stop
-   for this tick.
+5. **Build a bounded queue.** Take up to 3 qualifying issues (highest priority
+   first, then lowest-number within a priority band), dropping any with an open
+   linked PR or a local Ralph duplicate. If nothing qualifies, record "no ready
+   work" in the ledger and stop for this tick.
 
 6. **Launch behind the gate.** With policy's authorization gates satisfied, launch
    through the `ralph_dashboard_orchestrate` tool (wraps `orchestrateRun()`) with the

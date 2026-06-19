@@ -50,6 +50,22 @@ const PRIORITY_RANK = new Map([
   ["priority:P3", 3],
 ]);
 
+/**
+ * Map a short priority string (e.g. "P1", or the fully-qualified "priority:P1")
+ * to its numeric rank using the single PRIORITY_RANK source of truth. Lower
+ * ranks sort first. Null/undefined/unknown values fall back to the P2 band,
+ * matching classifyIssue's default for unprioritised issues.
+ */
+export function priorityRankFromShort(priority) {
+  const name =
+    typeof priority === "string" && priority.length > 0
+      ? priority.startsWith("priority:")
+        ? priority
+        : `priority:${priority}`
+      : null;
+  return PRIORITY_RANK.get(name) ?? PRIORITY_RANK.get("priority:P2");
+}
+
 const PRIORITY_FROM_SEVERITY = new Map([
   ["severity:critical", "priority:P1"],
   ["severity:high", "priority:P1"],
