@@ -190,7 +190,7 @@ install_agent_instructions() {
 
   mkdir -p "$github_dir"
 
-  if [[ -f "$instructions_file" ]] && { grep -qF "$marker" "$instructions_file" || grep -qE '^##[[:space:]]+Ralph Loop[[:space:]]*$' "$instructions_file"; }; then
+  if [[ -f "$instructions_file" ]] && { grep -qF "$marker" "$instructions_file" || grep -qE '^[[:space:]]{0,3}##[[:space:]]+Ralph Loop[[:space:]]*#*[[:space:]]*$' "$instructions_file"; }; then
     echo "ℹ️  Ralph agent instructions already present: $instructions_file"
     return 0
   fi

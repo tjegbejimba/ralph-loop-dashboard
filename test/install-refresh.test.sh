@@ -156,4 +156,31 @@ if ! grep -qF "Hand-written guidance that should be preserved." "$manual_instruc
   exit 1
 fi
 
+# Also cover non-column-0 ATX heading variants (leading indent up to 3 spaces,
+# optional closing hashes) — the guard must still recognize these as an existing
+# Ralph Loop section and not append a duplicate.
+for variant in '  ## Ralph Loop' '## Ralph Loop ##'; do
+  variant_idx=$((${variant_idx:-0} + 1))
+  variant_target="$TEST_ROOT/target-variant-$variant_idx"
+  git init -q "$variant_target"
+  ( cd "$variant_target" \
+    && git checkout -qb main \
+    && git config user.email "test@example.com" \
+    && git config user.name "Test" \
+    && echo seed > README.md \
+    && git add README.md \
+    && git commit -qm seed )
+  variant_instructions="$variant_target/.github/copilot-instructions.md"
+  mkdir -p "$variant_target/.github"
+  printf '# Copilot instructions\n\n%s\n\nManual variant guidance.\n' "$variant" > "$variant_instructions"
+
+  "$REPO_ROOT/install.sh" "$variant_target" --scripts-only --profile generic >/dev/null
+
+  variant_count=$(grep -cE '^[[:space:]]{0,3}##[[:space:]]+Ralph Loop' "$variant_instructions")
+  if [[ "$variant_count" != "1" ]]; then
+    echo "FAIL: installer should not append a duplicate Ralph Loop section for heading variant '$variant', got count $variant_count"
+    exit 1
+  fi
+done
+
 echo "PASS: install.sh refreshes scripts without clobbering prompt/config"

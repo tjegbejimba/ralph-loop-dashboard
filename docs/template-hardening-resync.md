@@ -8,7 +8,7 @@ This document describes the template fixes applied in issue #112 and how to re-s
 
 1. **Worktree-safe git commands** (`RALPH.md.template` line 22)
    - **Before**: `git checkout main && git pull --ff-only origin main`
-   - **After**: `git fetch origin && git pull --ff-only origin/main`
+   - **After**: `git fetch origin && git pull --ff-only origin main`
    - **Impact**: Workers in dedicated worktrees no longer fail with "main is already checked out"
 
 2. **Correct gh field** (`RALPH.md.template` lines 72, 83, 113)
