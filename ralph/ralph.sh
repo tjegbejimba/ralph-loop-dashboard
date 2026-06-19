@@ -456,12 +456,11 @@ while true; do
       fi
       if [[ -n "$cand_blockers" ]]; then
         state_lock || { echo "⚠️  Couldn't acquire state lock; retrying." >&2; sleep "$POLL_SEC"; continue; }
-        status_mark_failed "$cand_num" "Issue is not canonical Ralph-runnable: $cand_blockers"
+        status_mark_rejected "$cand_num" "Issue is not canonical Ralph-runnable: $cand_blockers"
         state_unlock
-        if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
-          ralph_apply_label_transition "$cand_num" fail || true
-        fi
-        echo "🚫 Worker $WORKER_ID: #$cand_num not canonical Ralph-runnable ($cand_blockers); marked as failed."
+        # Pre-launch rejection: do NOT apply ralph:failed label transition.
+        # The issue stays ralph:ready and will self-defer until blockers clear.
+        echo "🚫 Worker $WORKER_ID: #$cand_num not canonical Ralph-runnable ($cand_blockers); marked as rejected (no label change)."
         continue
       fi
 
@@ -795,12 +794,11 @@ while true; do
     fresh_blocker_tags=$(ralph_claimable_blocker_tags "$fresh_record")
   fi
   if [[ -n "$fresh_blocker_tags" ]]; then
-    [[ -n "$RUN_ID" ]] && status_mark_failed "$num" "Issue became non-runnable before claim: $fresh_blocker_tags"
+    [[ -n "$RUN_ID" ]] && status_mark_rejected "$num" "Issue became non-runnable before claim: $fresh_blocker_tags"
     state_unlock
-    if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
-      ralph_apply_label_transition "$num" fail || true
-    fi
-    echo "↪️  Worker $WORKER_ID: #$num became non-runnable during selection ($fresh_blocker_tags); retrying."
+    # Pre-launch rejection: do NOT apply ralph:failed label transition.
+    # The issue stays ralph:ready and will self-defer until blockers clear.
+    echo "↪️  Worker $WORKER_ID: #$num became non-runnable during selection ($fresh_blocker_tags); marked as rejected (no label change)."
     continue
   fi
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
