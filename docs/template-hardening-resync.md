@@ -38,22 +38,29 @@ To apply these fixes to repos that have already installed Ralph:
 Run from the Ralph source repo (`ralph-loop-dashboard`):
 
 ```bash
-# Re-sync scripts only (keeps repo-specific .ralph/RALPH.md and config.json)
+# Re-sync scripts only — keeps repo-specific .ralph/RALPH.md and config.json.
+# NOTE: --scripts-only deliberately does NOT touch an existing .ralph/RALPH.md,
+# so the template-hardening fixes do NOT reach an already-installed RALPH.md
+# this way. Use the "Regenerate RALPH.md" steps below to update it.
 ./install.sh /path/to/target/repo --scripts-only
 
-# Verify
-cd /path/to/target/repo
-grep -q "git fetch origin" .ralph/RALPH.md && echo "✓ Worktree-safe commands installed"
-grep -q "closedByPullRequestsReferences" .ralph/RALPH.md && echo "✓ Correct gh field installed"
+# Verify the SOURCE template carries the fixes (an installed RALPH.md only
+# picks them up after a regenerate — see below):
+grep -q "git fetch origin" ralph/RALPH.md.template && echo "✓ Worktree-safe commands in template"
+grep -q "closedByPullRequestsReferences" ralph/RALPH.md.template && echo "✓ Correct gh field in template"
 ```
 
-### Full re-install (overwrites RALPH.md)
+### Regenerate RALPH.md (to pull template fixes into an installed repo)
 
-If you want to regenerate `.ralph/RALPH.md` from the template:
+`install.sh` leaves an existing `.ralph/RALPH.md` untouched and only renders it
+from the template when the file is absent. To refresh an installed RALPH.md,
+delete it first, then re-run install:
 
 ```bash
-./install.sh /path/to/target/repo --scripts-only
-# Then manually update RALPH.md if the repo has custom PRD reference
+cd /path/to/target/repo
+rm .ralph/RALPH.md
+/path/to/ralph-loop-dashboard/install.sh /path/to/target/repo --scripts-only
+# Then re-apply any repo-specific PRD reference / customization
 ```
 
 ## Affected Repos
@@ -64,7 +71,8 @@ If you want to regenerate `.ralph/RALPH.md` from the template:
 
 ## Verification
 
-After re-syncing, verify each repo:
+After re-syncing, verify each repo (the RALPH.md greps assume you regenerated
+it per "Regenerate RALPH.md" above — `--scripts-only` alone won't update it):
 
 ```bash
 cd /path/to/repo

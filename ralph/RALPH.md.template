@@ -19,7 +19,7 @@ You are running headless inside an automation loop with **no human at the keyboa
 ## Preflight
 
 1. Run `git status --porcelain`. If non-empty, abort: the loop expects a clean tree.
-2. Run `git fetch origin && git pull --ff-only origin/main` to sync with the remote.
+2. Run `git fetch origin && git pull --ff-only origin main` to sync with the remote.
 3. Read `.ralph/config.json` for this repo's profile, issue-matching metadata, validation commands, and dashboard stage hints.
 4. Read `UBIQUITOUS_LANGUAGE.md` if present and the parent {{PRD_REFERENCE}} for vocabulary. Use those exact terms.
 5. Check whether an open PR already references this issue:
