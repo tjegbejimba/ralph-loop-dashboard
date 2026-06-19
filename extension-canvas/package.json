@@ -1,0 +1,8 @@
+{
+  "name": "ralph-dashboard-canvas",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ralph Loop dashboard canvas extension (repo-native)",
+  "main": "extension.mjs"
+}
