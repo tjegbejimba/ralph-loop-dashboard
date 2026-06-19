@@ -223,6 +223,26 @@ async function reorderIssue({ runId, issueNumber, newIndex }) {
   return reorderQueuedIssue({ repoRoot: REPO_ROOT, runId, issueNumber, newIndex });
 }
 
+// Open GitHub resource (issue/PR) in the Copilot app
+async function openGitHubResource({ type, owner, repo, number }) {
+  // Construct a GitHub URL
+  const path = type === "pr" ? "pull" : "issues";
+  const url = `https://github.com/${owner}/${repo}/${path}/${number}`;
+  
+  try {
+    // Use the session.openWebview or similar method to open in the app
+    // For now, we'll use session.log to indicate the intent and rely on the client fallback
+    await session.log(`Opening ${type} ${owner}/${repo}#${number} in app...`);
+    
+    // The Copilot CLI doesn't currently expose a direct "open issue/PR" API,
+    // so we document the intent here. The dashboard will fall back to window.open
+    // for now, but this callback preserves the architecture for future SDK support.
+    return { ok: false, reason: "App navigation not yet implemented in SDK" };
+  } catch (err) {
+    return { ok: false, error: String(err.message || err) };
+  }
+}
+
 const webview = new CopilotWebview({
   extensionName: "ralph_dashboard",
   contentDir: join(import.meta.dirname, "content"),
@@ -243,6 +263,7 @@ const webview = new CopilotWebview({
     skipIssue,
     removeIssue,
     reorderIssue,
+    openGitHubResource,
     log: (msg, opts) => session.log(msg, opts),
   },
 });

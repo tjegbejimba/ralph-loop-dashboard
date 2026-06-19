@@ -1500,3 +1500,50 @@ function renderMarkdownLite(md) {
   s = s.replace(/\n{2,}/g, "</p><p>");
   return `<p>${s}</p>`;
 }
+
+// --- App-level navigation for GitHub links ---
+
+function parseGitHubUrl(url) {
+  // Match GitHub issue or PR URLs
+  // Format: https://github.com/:owner/:repo/issues/:number or /pull/:number
+  const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+)\/(issues|pull)\/(\d+)/);
+  if (!match) return null;
+  
+  const [, owner, repo, type, number] = match;
+  return {
+    owner,
+    repo,
+    type: type === "pull" ? "pr" : "issue",
+    number: parseInt(number, 10),
+  };
+}
+
+// Intercept clicks on GitHub links and route through app navigation
+document.addEventListener("click", async (e) => {
+  // Only handle left clicks on anchors (or clicks inside anchors)
+  let target = e.target.closest("a[href]");
+  if (!target || e.button !== 0 || e.defaultPrevented) return;
+  
+  const href = target.getAttribute("href");
+  if (!href) return;
+  
+  const resource = parseGitHubUrl(href);
+  if (!resource) return; // Not a GitHub issue/PR link
+  
+  // Prevent default browser navigation
+  e.preventDefault();
+  
+  try {
+    // Attempt app-level navigation via bridge
+    if (typeof copilot !== "undefined" && typeof copilot.openGitHubResource === "function") {
+      await copilot.openGitHubResource(resource);
+    } else {
+      // Fallback: open in external browser
+      window.open(href, "_blank", "noopener,noreferrer");
+    }
+  } catch (err) {
+    // On error, fall back to external browser
+    console.warn("App navigation failed, falling back to external link:", err);
+    window.open(href, "_blank", "noopener,noreferrer");
+  }
+});
