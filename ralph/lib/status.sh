@@ -100,6 +100,31 @@ status_mark_failed() {
   ' "$file" >"$tmp" && mv "$tmp" "$file"
 }
 
+# Mark an item as rejected (pre-launch: not runnable before any work started)
+# Unlike status_mark_failed (worker ran and failed), rejected items were never
+# claimed — they are deferred/skipped with no label mutation.
+# Caller MUST hold state_lock
+# Args: issue_number reason [run_id]
+status_mark_rejected() {
+  local issue="$1" reason="${2:-}" run_id="${3:-$RUN_ID}"
+  local file tmp
+  file=$(status_file "$run_id")
+  tmp=$(status_mktemp "$run_id")
+  
+  [[ ! -f "$file" ]] && printf '%s\n' '{"items":{}}' >"$file"
+  
+  jq --arg issue "$issue" --arg reason "$reason" '
+    .items[$issue] = {
+      status: "rejected",
+      reason: $reason,
+      workerId: null,
+      pid: null,
+      logFile: null,
+      startedAt: null
+    }
+  ' "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
 # Mark an item as skipped (already closed before worker could claim)
 # Caller MUST hold state_lock
 # Args: issue_number [run_id]
@@ -157,7 +182,7 @@ status_reap_stale() {
   jq "$jq_filter" "$file" >"$tmp" && mv "$tmp" "$file"
 }
 
-# Check if an issue is in a terminal state (merged/failed/skipped)
+# Check if an issue is in a terminal state (merged/failed/skipped/rejected)
 # Args: issue_number [run_id]
 # Returns 0 (true) if terminal, 1 (false) otherwise
 status_is_terminal() {
@@ -165,7 +190,7 @@ status_is_terminal() {
   local status
   status=$(status_load_item "$issue" "status" "$run_id")
   case "$status" in
-    merged|failed|skipped) return 0 ;;
+    merged|failed|skipped|rejected) return 0 ;;
     *) return 1 ;;
   esac
 }

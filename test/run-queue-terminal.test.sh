@@ -140,19 +140,19 @@ fi
 echo "PASS: all-terminal run queue exits cleanly"
 
 echo ""
-echo "Test 3: unsafe run queue item is failed instead of claimed"
-unsafe_output=$(run_worker unsafe) || fail "unsafe queue worker should exit cleanly after failing unsafe item"
+echo "Test 3: unsafe run queue item is rejected instead of failed"
+unsafe_output=$(run_worker unsafe) || fail "unsafe queue worker should exit cleanly after rejecting unsafe item"
 if ! grep -q "not canonical Ralph-runnable" <<<"$unsafe_output"; then
   echo "$unsafe_output"
-  fail "unsafe queue worker should report canonical runnable failure"
+  fail "unsafe queue worker should report canonical runnable rejection"
 fi
 unsafe_status=$(jq -r '.items["200"].status' "$TEST_ROOT/main/.ralph/runs/unsafe/status.json")
-unsafe_error=$(jq -r '.items["200"].error' "$TEST_ROOT/main/.ralph/runs/unsafe/status.json")
-if [[ "$unsafe_status" != "failed" || "$unsafe_error" != "Issue is not canonical Ralph-runnable: missing_state,missing_work_type" ]]; then
+unsafe_reason=$(jq -r '.items["200"].reason' "$TEST_ROOT/main/.ralph/runs/unsafe/status.json")
+if [[ "$unsafe_status" != "rejected" || "$unsafe_reason" != "Issue is not canonical Ralph-runnable: missing_state,missing_work_type" ]]; then
   cat "$TEST_ROOT/main/.ralph/runs/unsafe/status.json"
-  fail "unsafe issue should be terminal failed with canonical guard error"
+  fail "unsafe issue should be terminal rejected with canonical guard reason (got status=$unsafe_status, reason=$unsafe_reason)"
 fi
-echo "PASS: unsafe run queue item is failed instead of claimed"
+echo "PASS: unsafe run queue item is rejected instead of failed"
 
 echo ""
 echo "All run queue terminal tests passed!"
