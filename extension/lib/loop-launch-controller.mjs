@@ -9,7 +9,7 @@ import { launchRun as launchLoopImpl } from "./shell-launcher.mjs";
 import { isAlive } from "./platform-shim.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
-const TERMINAL_STATUSES = new Set(["merged", "failed", "skipped"]);
+const TERMINAL_STATUSES = new Set(["merged", "failed", "skipped", "rejected"]);
 const DEFAULT_VERIFY_TIMEOUT_MINUTES = 60;
 const DEFAULT_VERIFY_POLL_MS = 5000;
 
