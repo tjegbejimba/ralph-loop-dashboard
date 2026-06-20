@@ -165,6 +165,13 @@ LOG_DIR="$MAIN_REPO/.ralph/logs"
 mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
 # shellcheck source=lib/state.sh
 . "$MAIN_REPO/.ralph/lib/state.sh"
+# shellcheck source=lib/status.sh
+_status_lib="$MAIN_REPO/.ralph/lib/status.sh"
+if [[ -f "$_status_lib" ]]; then
+  # shellcheck disable=SC1090
+  . "$_status_lib"
+fi
+unset _status_lib
 # shellcheck source=lib/copilot-session.sh
 _copilot_session_lib="$MAIN_REPO/.ralph/lib/copilot-session.sh"
 if [[ -f "$_copilot_session_lib" ]]; then
@@ -356,6 +363,24 @@ fi
 
 if [[ "${1:-}" == "--status" ]]; then
   state_file="$MAIN_REPO/.ralph/state.json"
+  
+  # Reconcile stale workers across all active runs
+  if declare -F status_reconcile_stale_workers >/dev/null 2>&1; then
+    if [[ -d "$MAIN_REPO/.ralph/runs" ]]; then
+      for run_dir in "$MAIN_REPO/.ralph/runs/"*; do
+        [[ ! -d "$run_dir" ]] && continue
+        run_id=$(basename "$run_dir")
+        status_file_path="$run_dir/status.json"
+        [[ ! -f "$status_file_path" ]] && continue
+        
+        # Reconcile this run's stale workers
+        state_lock
+        RUN_ID="$run_id" status_reconcile_stale_workers "$run_id" 2>/dev/null || true
+        state_unlock
+      done
+    fi
+  fi
+  
   echo "Parallelism: $PARALLELISM"
   echo
   echo "Workers for $MAIN_REPO (from ps):"
