@@ -71,8 +71,13 @@ sleep 1
 touch ralph/ralph.sh
 
 # Verify source is newer by mtime
-src_mtime=$(stat -f %m ralph/ralph.sh 2>/dev/null || stat -c %Y ralph/ralph.sh 2>/dev/null)
-ins_mtime=$(stat -f %m .ralph/ralph.sh 2>/dev/null || stat -c %Y .ralph/ralph.sh 2>/dev/null)
+if [[ "$(uname)" == "Darwin" ]]; then
+  src_mtime=$(stat -f %m ralph/ralph.sh 2>/dev/null)
+  ins_mtime=$(stat -f %m .ralph/ralph.sh 2>/dev/null)
+else
+  src_mtime=$(stat -c %Y ralph/ralph.sh 2>/dev/null)
+  ins_mtime=$(stat -c %Y .ralph/ralph.sh 2>/dev/null)
+fi
 if [[ "$src_mtime" -le "$ins_mtime" ]]; then
   echo "❌ Test setup failed: source mtime not newer" >&2
   exit 1
@@ -116,8 +121,13 @@ if cmp -s ralph/ralph.sh .ralph/ralph.sh; then
 fi
 
 # Verify source is newer by mtime
-src_mtime=$(stat -f %m ralph/ralph.sh 2>/dev/null || stat -c %Y ralph/ralph.sh 2>/dev/null)
-ins_mtime=$(stat -f %m .ralph/ralph.sh 2>/dev/null || stat -c %Y .ralph/ralph.sh 2>/dev/null)
+if [[ "$(uname)" == "Darwin" ]]; then
+  src_mtime=$(stat -f %m ralph/ralph.sh 2>/dev/null)
+  ins_mtime=$(stat -f %m .ralph/ralph.sh 2>/dev/null)
+else
+  src_mtime=$(stat -c %Y ralph/ralph.sh 2>/dev/null)
+  ins_mtime=$(stat -c %Y .ralph/ralph.sh 2>/dev/null)
+fi
 if [[ "$src_mtime" -le "$ins_mtime" ]]; then
   echo "❌ Test setup failed: source mtime not newer" >&2
   exit 1
