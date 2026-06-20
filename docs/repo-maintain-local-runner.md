@@ -64,8 +64,8 @@ Operating on `--repo-root` (default: the current directory), it:
 6. Discovers ready work **read-only** via `gh issue list --search "<issueSearch>"`,
    dropping issues with an open linked PR, an in-flight Ralph claim, or an
    unresolved blocker.
-7. Builds a bounded queue: at most `--max-issues` (default **3**), lowest issue
-   number first.
+7. Builds a bounded queue: at most `--max-issues` (default **3**), highest
+   priority first, then lowest issue number within a priority band.
 8. **Launches only through the gated `orchestrateRun()` path** — the exact same
    launch the dashboard and the orchestrator skill use. It never calls
    `launch.sh --start`/`--foreground` and never invents its own launch.
