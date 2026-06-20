@@ -803,17 +803,18 @@ NODEEOF
 fi
 
 # Stale-script detection: when both ralph/ralph.sh (source) and
-# .ralph/ralph.sh (installed copy) exist, refuse to launch if the source is
-# newer than the installed copy. This catches the regression where fixes land
-# in the source but workers keep running the stale installed version.
+# .ralph/ralph.sh (installed copy) exist, refuse to launch if the source
+# content differs from the installed copy. This catches the regression where
+# fixes land in the source but workers keep running the stale installed version.
 # Only applies to the launch/foreground paths; status/stop/cleanup/enqueue
 # are exempt so operators can always inspect and kill stuck workers.
 _src_ralph="$MAIN_REPO/ralph/ralph.sh"
 _ins_ralph="$MAIN_REPO/.ralph/ralph.sh"
 if [[ -f "$_src_ralph" && -f "$_ins_ralph" ]]; then
-  _src_mtime=$(stat -f %m "$_src_ralph" 2>/dev/null || stat -c %Y "$_src_ralph" 2>/dev/null || echo "")
-  _ins_mtime=$(stat -f %m "$_ins_ralph" 2>/dev/null || stat -c %Y "$_ins_ralph" 2>/dev/null || echo "")
-  if [[ -n "$_src_mtime" && -n "$_ins_mtime" && "$_src_mtime" -gt "$_ins_mtime" ]]; then
+  # Compare by content, not mtime. Git rewrites working-tree mtimes on
+  # checkout/merge even when content is unchanged, which trips mtime-based
+  # guards in self-hosting repos. Use cmp -s for byte-wise comparison.
+  if ! cmp -s "$_src_ralph" "$_ins_ralph"; then
     if [[ "$FORCE" -eq 1 ]]; then
       echo "⚠️  Installed scripts are stale but --force override active." >&2
     else
@@ -823,6 +824,7 @@ if [[ -f "$_src_ralph" && -f "$_ins_ralph" ]]; then
     fi
   fi
 fi
+unset _src_ralph _ins_ralph
 unset _src_ralph _ins_ralph _src_mtime _ins_mtime
 
 # --foreground only meaningful with single worker — fan-out doesn't have
