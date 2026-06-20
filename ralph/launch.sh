@@ -375,7 +375,7 @@ if [[ "${1:-}" == "--status" ]]; then
         
         # Reconcile this run's stale workers
         state_lock
-        RUN_ID="$run_id" status_reconcile_stale_workers "$run_id" 2>/dev/null || true
+        RUN_ID="$run_id" status_reconcile_stale_workers "$run_id" || true
         state_unlock
       done
     fi
