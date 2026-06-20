@@ -215,6 +215,11 @@ status_reconcile_stale_workers() {
     jq_filter="$jq_filter | .items[\"$issue\"].status = \"failed\" | .items[\"$issue\"].error = \"Worker process died\""
   done
   jq "$jq_filter" "$file" >"$tmp" && mv "$tmp" "$file"
+  
+  # Log reconciled issues for operator visibility
+  if [[ ${#dead_issues[@]} -gt 0 ]]; then
+    echo "⚠️  Reconciled ${#dead_issues[@]} stale worker(s): $(printf '#%s ' "${dead_issues[@]}")" >&2
+  fi
 }
 
 # Check if an issue is in a terminal state (merged/failed/skipped/rejected)
