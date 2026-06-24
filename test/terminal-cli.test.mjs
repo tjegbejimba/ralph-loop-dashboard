@@ -511,7 +511,7 @@ test("cli.mjs orchestrate-repo --dry-run --json — emits a structured read-only
   }
 });
 
-test("cli.mjs orchestrate-repo — bounds discovery to --max-issues, lowest numbers first", () => {
+test("cli.mjs orchestrate-repo — bounds discovery to --max-issues, priority then number", () => {
   const issues = [40, 12, 31, 5].map((number) => ({
     number,
     title: `Issue ${number}`,

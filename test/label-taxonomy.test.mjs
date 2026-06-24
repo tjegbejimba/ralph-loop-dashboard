@@ -9,10 +9,35 @@ import {
   planBackfill,
   planRepair,
   planRuntimeTransition,
+  priorityRankFromShort,
   validateRunnableForClaim,
   validatePrdForEnqueue,
   validateRunnableForEnqueue,
 } from "../extension/lib/label-taxonomy.mjs";
+
+describe("priorityRankFromShort", () => {
+  it("maps short priority strings to their numeric rank", () => {
+    assert.equal(priorityRankFromShort("P0"), 0);
+    assert.equal(priorityRankFromShort("P1"), 1);
+    assert.equal(priorityRankFromShort("P2"), 2);
+    assert.equal(priorityRankFromShort("P3"), 3);
+  });
+
+  it("accepts values that still carry the priority: prefix", () => {
+    assert.equal(priorityRankFromShort("priority:P0"), 0);
+    assert.equal(priorityRankFromShort("priority:P1"), 1);
+    assert.equal(priorityRankFromShort("priority:P3"), 3);
+  });
+
+  it("defaults null/undefined/unknown to the P2 band", () => {
+    const p2 = priorityRankFromShort("P2");
+    assert.equal(priorityRankFromShort(null), p2);
+    assert.equal(priorityRankFromShort(undefined), p2);
+    assert.equal(priorityRankFromShort("nonsense"), p2);
+    assert.equal(priorityRankFromShort(""), p2);
+  });
+});
+
 
 describe("Ralph label taxonomy", () => {
   it("defines the canonical label schema with exact names, colors, and descriptions", () => {
