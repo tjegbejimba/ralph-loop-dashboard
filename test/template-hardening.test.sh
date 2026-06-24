@@ -56,6 +56,19 @@ assert_syntax_valid() {
     "RALPH.md.template contains 'git fetch origin' (worktree-safe)"
 }
 
+# Test: RALPH.md.template must use valid `git pull` ref syntax. The two-arg
+# form takes a remote and a ref separated by a space ("origin main"); the
+# slash form ("origin/main") is parsed as a repository argument and fails
+# with "'origin/main' does not appear to be a git repository", breaking the
+# preflight sync for any freshly rendered RALPH.md.
+{
+  template="$REPO_ROOT/ralph/RALPH.md.template"
+  assert_no_match "$template" "pull --ff-only origin/main" \
+    "RALPH.md.template does not use invalid 'git pull ... origin/main' slash syntax"
+  assert_match "$template" "pull --ff-only origin main" \
+    "RALPH.md.template uses valid 'git pull ... origin main' space syntax"
+}
+
 # ─── Issue 2: Invalid gh field closedByPullRequests ──────────────────────────
 
 # Test: RALPH.md.template should not use invalid field closedByPullRequests
