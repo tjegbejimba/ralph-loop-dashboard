@@ -716,6 +716,78 @@ test("deterministic failures that mention network or dns in logs still hard-stop
   }
 });
 
+test("deterministic failures that print transient tokens in test output still hard-stop", async () => {
+  const root = makeRepo();
+  let orchestrateCalled = false;
+  try {
+    seedFailedRun(root, "20260624-140159-11111111", 125, "Copilot exited with code 1", {
+      logBody: "Project checks failed: expected fixture text ENOTFOUND api.enterprise.githubcopilot.com\n",
+    });
+    seedFailedRun(root, "20260625-140159-22222222", 125, "Copilot exited with code 1", {
+      logBody: "AssertionError: classifier should not treat ECONNRESET as a label\n",
+    });
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(125)]),
+        orchestrateRunFn: async () => {
+          orchestrateCalled = true;
+          return { ok: true, runId: "run-should-not-start" };
+        },
+      }),
+    });
+
+    assert.equal(orchestrateCalled, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, "hard-stop");
+    assert.deepEqual(
+      result.failureHistory.blocking[0].failures.map((failure) => failure.class),
+      ["deterministic-implementation", "deterministic-implementation"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worker process deaths are runtime failures and do not poison ready issues", async () => {
+  const root = makeRepo();
+  let receivedArgs = null;
+  try {
+    seedFailedRun(root, "20260626-140159-11111111", 125, "Worker process died");
+    seedFailedRun(root, "20260627-140159-22222222", 125, "Worker process died unexpectedly");
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(125)]),
+        orchestrateRunFn: async (args) => {
+          receivedArgs = args;
+          return {
+            ok: true,
+            runId: "run-retry-worker-death",
+            runDir: join(root, ".ralph", "runs", "run-retry-worker-death"),
+            queue: [{ number: 125 }],
+          };
+        },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "launched");
+    assert.deepEqual(receivedArgs.issueNumbers, [125]);
+    assert.deepEqual(result.failureHistory.blocking, []);
+    assert.deepEqual(
+      result.failureHistory.nonBlocking[0].failures.map((failure) => failure.class),
+      ["runtime-worker-death", "runtime-worker-death"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("local in-flight claims feed active-run detection and discovery (no duplicate queueing)", async () => {
   const root = makeRepo();
   let activeRunArgs = null;

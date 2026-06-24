@@ -229,25 +229,39 @@ function hardStop({ repoRoot, ledger, outcome = "hard-stop", ownerBrief, extra =
   };
 }
 
-function classifyWorkerFailure(item = {}, evidence = "") {
-  const text = `${String(item.error || "")}\n${String(evidence || "")}`;
-  if (
-    /\b(ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH)\b/i.test(text)
-    || /getaddrinfo\s+(?:[A-Z_]+\s+)?api\.enterprise\.githubcopilot\.com/i.test(text)
+function hasTransientNetworkSignal(text) {
+  return /\b(ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH)\b/i.test(text)
+    || /temporary failure in name resolution|could not resolve host/i.test(text);
+}
+
+function hasCopilotDeliveryFailureContext(text) {
+  return /getaddrinfo\s+(?:[A-Z_]+\s+)?api\.enterprise\.githubcopilot\.com/i.test(text)
     || /(?:request|fetch|connect(?:ion)?).*api\.enterprise\.githubcopilot\.com/i.test(text)
-    || /temporary failure in name resolution|could not resolve host/i.test(text)
-  ) {
+    || /CAPIError|Failed native model HTTP request|Failed to get response from the AI model|error sending request for url|Request failed due to a transient API error/i.test(text);
+}
+
+function classifyWorkerFailure(item = {}, evidence = "") {
+  const error = String(item.error || "");
+  const text = `${error}\n${String(evidence || "")}`;
+  if (hasTransientNetworkSignal(text) && hasCopilotDeliveryFailureContext(text)) {
     return {
       class: "transient-runtime",
       blocksRepeatedFailure: false,
       reason: "worker failed on transient runtime, network, or Copilot API delivery",
     };
   }
-  if (/No merged PR found after copilot completed/i.test(text)) {
+  if (/No merged PR found after copilot completed/i.test(error)) {
     return {
       class: "agent-no-delivery",
       blocksRepeatedFailure: false,
       reason: "worker completed without producing a mergeable delivery signal",
+    };
+  }
+  if (/worker process (?:died|exited|was killed|terminated)|process died/i.test(error)) {
+    return {
+      class: "runtime-worker-death",
+      blocksRepeatedFailure: false,
+      reason: "worker process died before producing deterministic implementation evidence",
     };
   }
   return {
