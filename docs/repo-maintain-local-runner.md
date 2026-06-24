@@ -66,10 +66,14 @@ Operating on `--repo-root` (default: the current directory), it:
    unresolved blocker.
 7. Builds a bounded queue: at most `--max-issues` (default **3**), highest
    priority first, then lowest issue number within a priority band.
-8. **Launches only through the gated `orchestrateRun()` path** — the exact same
+8. Checks prior run history for the bounded queue. Repeated deterministic
+   issue/code-shape worker failures still **hard-stop** as `worker-stall`, but
+   transient runtime/network/Copilot API failures and agent no-delivery exits
+   are recorded in the ledger without poisoning the ready issue.
+9. **Launches only through the gated `orchestrateRun()` path** — the exact same
    launch the dashboard and the orchestrator skill use. It never calls
    `launch.sh --start`/`--foreground` and never invents its own launch.
-9. Writes a compact ledger to `.ralph/orchestrator/ledger.json`.
+10. Writes a compact ledger to `.ralph/orchestrator/ledger.json`.
 
 Discovery and `--dry-run` are strictly **read-only**: no `gh` writes, no enqueue,
 no launch.
@@ -134,7 +138,7 @@ Options: `--repo-root <path>` (default cwd), `--dry-run`, `--json`,
 
 Exit codes: `0` = launched / deferred / skipped-labels / no-ready-work /
 dry-run; `1` = hard stop (missing `.ralph/`, gate off, preflight failed, access
-error); `2` = bad CLI arguments.
+error, repeated deterministic worker failure); `2` = bad CLI arguments.
 
 ## Enabling the scheduled job (when you're ready)
 

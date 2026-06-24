@@ -16,8 +16,18 @@
 // injectable so the logic can be unit-tested without the network or real
 // workers.
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readSync,
+  writeFileSync,
+  mkdirSync,
+  readdirSync,
+  statSync,
+} from "node:fs";
+import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { orchestrateRun as orchestrateRalphRun, resolveOrchestrateRepoRoot } from "./loop-launch-controller.mjs";
@@ -47,6 +57,8 @@ export const REPO_MAINTAIN_DEFAULTS = Object.freeze({
 // touch it. Missing any of these is a one-time owner-brief skip, never an
 // autonomous label migration.
 export const REQUIRED_CANONICAL_LABELS = Object.freeze([...RALPH_STATES]);
+export const REPEATED_FAILURE_HARD_STOP_THRESHOLD = 2;
+const MAX_FAILURE_LOG_EVIDENCE_CHARS = 64 * 1024;
 
 const SLUG_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
@@ -217,6 +229,126 @@ function hardStop({ repoRoot, ledger, outcome = "hard-stop", ownerBrief, extra =
   };
 }
 
+function classifyWorkerFailure(item = {}, evidence = "") {
+  const text = `${String(item.error || "")}\n${String(evidence || "")}`;
+  if (
+    /\b(ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH)\b/i.test(text)
+    || /getaddrinfo\s+(?:[A-Z_]+\s+)?api\.enterprise\.githubcopilot\.com/i.test(text)
+    || /(?:request|fetch|connect(?:ion)?).*api\.enterprise\.githubcopilot\.com/i.test(text)
+    || /temporary failure in name resolution|could not resolve host/i.test(text)
+  ) {
+    return {
+      class: "transient-runtime",
+      blocksRepeatedFailure: false,
+      reason: "worker failed on transient runtime, network, or Copilot API delivery",
+    };
+  }
+  if (/No merged PR found after copilot completed/i.test(text)) {
+    return {
+      class: "agent-no-delivery",
+      blocksRepeatedFailure: false,
+      reason: "worker completed without producing a mergeable delivery signal",
+    };
+  }
+  return {
+    class: "deterministic-implementation",
+    blocksRepeatedFailure: true,
+    reason: "worker reached implementation but failed to deliver the issue",
+  };
+}
+
+function readJsonFile(path) {
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readFailureLogEvidence({ repoRoot, logFile }) {
+  if (typeof logFile !== "string" || logFile.length === 0) return "";
+  if (basename(logFile) !== logFile || /[\\/]/.test(logFile)) return "";
+  let fd = null;
+  try {
+    const path = join(repoRoot, ".ralph", "logs", logFile);
+    const size = statSync(path).size;
+    const length = Math.min(size, MAX_FAILURE_LOG_EVIDENCE_CHARS);
+    const start = Math.max(0, size - length);
+    const buffer = Buffer.alloc(length);
+    fd = openSync(path, "r");
+    const bytesRead = readSync(fd, buffer, 0, length, start);
+    return buffer.toString("utf8", 0, bytesRead);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== null) {
+      try {
+        closeSync(fd);
+      } catch {}
+    }
+  }
+}
+
+function readQueueFailureHistory({ repoRoot, queue }) {
+  const issueMap = new Map(queue.map((issue) => [Number(issue.number), issue]));
+  const byIssue = new Map();
+  const runsDir = join(repoRoot, ".ralph", "runs");
+  let runEntries = [];
+  try {
+    runEntries = readdirSync(runsDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    runEntries = [];
+  }
+
+  for (const runId of runEntries) {
+    const status = readJsonFile(join(runsDir, runId, "status.json"));
+    const items = status?.items && typeof status.items === "object" ? status.items : {};
+    for (const [issueKey, item] of Object.entries(items)) {
+      const issueNumber = Number(issueKey);
+      const queuedIssue = issueMap.get(issueNumber);
+      if (!queuedIssue || item?.status !== "failed") continue;
+
+      const logEvidence = readFailureLogEvidence({ repoRoot, logFile: item.logFile });
+      const classification = classifyWorkerFailure(item, logEvidence);
+      const failure = {
+        runId,
+        error: typeof item.error === "string" ? item.error : "",
+        logFile: item.logFile || null,
+        class: classification.class,
+        blocksRepeatedFailure: classification.blocksRepeatedFailure,
+        reason: classification.reason,
+      };
+      const existing = byIssue.get(issueNumber) || {
+        issueNumber,
+        url: queuedIssue.url || null,
+        failures: [],
+        blockingFailureCount: 0,
+        nonBlockingFailureCount: 0,
+      };
+      existing.failures.push(failure);
+      if (failure.blocksRepeatedFailure) existing.blockingFailureCount += 1;
+      else existing.nonBlockingFailureCount += 1;
+      byIssue.set(issueNumber, existing);
+    }
+  }
+
+  const issues = [...byIssue.values()];
+  return {
+    threshold: REPEATED_FAILURE_HARD_STOP_THRESHOLD,
+    issues,
+    blocking: issues.filter(
+      (issue) => issue.blockingFailureCount >= REPEATED_FAILURE_HARD_STOP_THRESHOLD,
+    ),
+    nonBlocking: issues.filter(
+      (issue) => issue.failures.length > 0
+        && issue.blockingFailureCount < REPEATED_FAILURE_HARD_STOP_THRESHOLD,
+    ),
+  };
+}
+
 /**
  * Run the headless repo-maintain sweep for a single repo's main checkout.
  *
@@ -334,6 +466,12 @@ export async function runOrchestrateRepo(options = {}) {
     queue: [],
     gate: null,
     launch: null,
+    failureHistory: {
+      threshold: REPEATED_FAILURE_HARD_STOP_THRESHOLD,
+      issues: [],
+      blocking: [],
+      nonBlocking: [],
+    },
     ledger,
     ledgerWritten: false,
     ownerBrief: null,
@@ -502,6 +640,8 @@ export async function runOrchestrateRepo(options = {}) {
     url: issue.url || null,
     priority: issue.priority || null,
   }));
+  result.failureHistory = readQueueFailureHistory({ repoRoot, queue });
+  ledger.failureHistory = result.failureHistory;
 
   // No ready work → record and stop cleanly.
   if (queue.length === 0) {
@@ -513,6 +653,29 @@ export async function runOrchestrateRepo(options = {}) {
       result.ledgerWritten = true;
     }
     return result;
+  }
+
+  if (!dryRun && result.failureHistory.blocking.length > 0) {
+    const blockers = result.failureHistory.blocking.map((issue) => ({
+      kind: "worker-stall",
+      ref: issue.url || `${slug}#${issue.issueNumber}`,
+      detail:
+        `Issue #${issue.issueNumber} has ${issue.blockingFailureCount} repeated deterministic worker failures; ` +
+        `latest class=${issue.failures.at(-1)?.class || "deterministic-implementation"}`,
+    }));
+    ledger.phase = "paused";
+    ledger.blockers = blockers;
+    ledger.lastOwnerDecision = null;
+    ledger.updatedAt = now().toISOString();
+    writeLedger(repoRoot, ledger);
+    return {
+      ...result,
+      ok: false,
+      outcome: "hard-stop",
+      exitCode: 1,
+      ownerBrief: repeatedFailureHardStopBrief({ slug, blocking: result.failureHistory.blocking }),
+      ledgerWritten: true,
+    };
   }
 
   // Step 10: dry-run stops before any launch / ledger write — plan only.
@@ -634,6 +797,18 @@ function launchHardStopBrief({ slug, kind, detail, issueNumbers }) {
     );
   }
   return `repo-maintain could not launch ${slug} (${queued}): ${detail}`;
+}
+
+function repeatedFailureHardStopBrief({ slug, blocking }) {
+  const issues = blocking
+    .map((issue) => `#${issue.issueNumber} (${issue.blockingFailureCount} blocking failures)`)
+    .join(", ");
+  return (
+    `repo-maintain paused ${slug} before launch because ${issues} have repeated ` +
+    `deterministic worker failures. This is treated as issue-level hard-stop ` +
+    `evidence; inspect the recorded run status/logs or move the issue out of ` +
+    `ralph:ready before retrying.`
+  );
 }
 
 /**

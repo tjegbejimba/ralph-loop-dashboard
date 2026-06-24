@@ -209,6 +209,26 @@ object per repo (the file holds the most recent state for the active target).
   "blockers": [
     { "kind": "allowAgentLaunch | preflight | product | worker-stall | destructive | access", "ref": "https://github.com/owner/repo/issues/N", "detail": "short span" }
   ],
+  "failureHistory": {
+    "threshold": 2,
+    "issues": [
+      {
+        "issueNumber": 0,
+        "url": "https://github.com/owner/repo/issues/N",
+        "blockingFailureCount": 0,
+        "nonBlockingFailureCount": 0,
+        "failures": [
+          {
+            "runId": "YYYYMMDD-HHMMSS-xxxx",
+            "class": "deterministic-implementation | transient-runtime | agent-no-delivery",
+            "blocksRepeatedFailure": true,
+            "reason": "short span",
+            "error": "short span"
+          }
+        ]
+      }
+    ]
+  },
   "lastOwnerDecision": { "at": "ISO-8601", "question": "", "choice": "", "by": "" },
   "ownerBriefsSent": { "<repo-or-target>:<topic>": true },
   "concurrency": { "activeRunDetected": false, "deferred": false },
@@ -219,8 +239,12 @@ object per repo (the file holds the most recent state for the active target).
 `prd` is null/0 for `repo-maintain`. `run` stays null until a gated launch
 succeeds. `ownerBriefsSent` keys are one-time-brief de-dupe markers (e.g.
 `alisterr:labels`) so `repo-maintain` does not re-send the same precondition brief
-each tick. On clean drain, set `phase: "done"` and write a closeout (summary + final
-queue outcomes); do **not** auto-start another mode.
+each tick. `failureHistory` is advisory except when a queued issue has at least two
+`deterministic-implementation` failures; that remains a `worker-stall` hard stop.
+`transient-runtime` and `agent-no-delivery` failures are recorded for visibility but
+do not count toward the repeated-failure hard stop. On clean drain, set
+`phase: "done"` and write a closeout (summary + final queue outcomes); do **not**
+auto-start another mode.
 
 ## Non-negotiables
 
