@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { classifyIssue, parseBlockerNumbers } from "./label-taxonomy.mjs";
 import { promoteLaneForIssue } from "./lane-promotion.mjs";
 import { routeIssueToLane } from "./lane-routing.mjs";
+import { parseFormFields } from "./form-parser.mjs";
 
 export const TRIAGE_COMMENT_MARKER = "<!-- ralph-triage-opinion:v1";
 const FINGERPRINT_RE = /<!-- ralph-triage-opinion:v1 fingerprint=([a-f0-9]{64}) -->/;
@@ -244,7 +245,12 @@ function isTrustedAuthor(issue) {
   // Bot-authored issues (e.g., issue forms) are trusted
   if (isBot) return true;
   
-  // Future: check for issue-form sourced intake (tracked separately as #111)
+  // Form-verified issues: check for ralph:form-verified label (non-forgeable provenance)
+  const labelNames = Array.isArray(issue?.labels)
+    ? issue.labels.map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean)
+    : [];
+  if (labelNames.includes("ralph:form-verified")) return true;
+  
   return false;
 }
 
@@ -267,16 +273,53 @@ export function evaluateIssueForTriage({ issue, repoContext = {}, closeEvidence 
   }
   const scores = scoreIssue(issue, repoContext);
   let recommendation = mapRecommendation(issue, scores, { closeEvidence });
-  const workTypeRecommendation = inferWorkTypeRecommendation(issue, scores);
+  let workTypeRecommendation = inferWorkTypeRecommendation(issue, scores);
   const preflight = preflightFor(issue);
   let priority = mapPriority(scores, recommendation);
   let automationSafety = mapAutomationSafety(scores, issue, recommendation);
+  
+  // Override fields with form values if ralph:form-verified label exists
+  const labelNames = Array.isArray(issue?.labels)
+    ? issue.labels.map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean)
+    : [];
+  if (labelNames.includes("ralph:form-verified")) {
+    const formFields = parseFormFields(issue?.body || "");
+    
+    // Override automation-safety
+    if (formFields.automationSafety) {
+      if (formFields.automationSafety === "safe after prep") {
+        automationSafety = "safe after prep";
+      } else if (formFields.automationSafety === "needs human judgment" || formFields.automationSafety === "not safe") {
+        automationSafety = "hitl-required";
+      }
+    }
+    
+    // Override priority
+    if (formFields.priority) {
+      priority = formFields.priority;
+    }
+    
+    // Override work type
+    if (formFields.workType) {
+      if (formFields.workType === "standalone work") {
+        workTypeRecommendation = "work:standalone";
+      } else if (formFields.workType === "part of a prd") {
+        workTypeRecommendation = "work:slice";
+      } else if (formFields.workType === "new prd parent") {
+        workTypeRecommendation = "work:prd";
+      }
+    }
+  }
+  
   let confidence = confidenceFor(recommendation, scores, preflight);
 
   if ((recommendation === "Close" || recommendation === "Pursue") && confidence === "low") {
     recommendation = recommendation === "Close" ? "Uncertain" : "Refine";
-    priority = mapPriority(scores, recommendation);
-    automationSafety = mapAutomationSafety(scores, issue, recommendation);
+    // Note: We don't re-map priority/automationSafety here if they came from form fields
+    if (!labelNames.includes("ralph:form-verified")) {
+      priority = mapPriority(scores, recommendation);
+      automationSafety = mapAutomationSafety(scores, issue, recommendation);
+    }
     confidence = confidenceFor(recommendation, scores, preflight);
   }
 

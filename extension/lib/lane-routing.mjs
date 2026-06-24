@@ -122,7 +122,7 @@ function buildRefineReason(issue, opinion) {
 
 /**
  * Check if issue author is trusted for AUTO-lane promotion.
- * Trusted authors: TJ, OWNER, MEMBER, or bot-sourced intake.
+ * Trusted authors: TJ, OWNER, MEMBER, bot, or verified form intake (ralph:form-verified).
  *
  * @param {object} issue
  * @returns {boolean}
@@ -141,6 +141,11 @@ function isTrustedAuthor(issue) {
   // Bot-authored issues (e.g., issue forms) are trusted
   if (isBot) return true;
   
-  // Future: check for issue-form sourced intake (tracked separately as #111)
+  // Form-verified issues: check for ralph:form-verified label (non-forgeable provenance)
+  const labelNames = Array.isArray(issue?.labels)
+    ? issue.labels.map((l) => (typeof l === "string" ? l : l?.name)).filter(Boolean)
+    : [];
+  if (labelNames.includes("ralph:form-verified")) return true;
+  
   return false;
 }

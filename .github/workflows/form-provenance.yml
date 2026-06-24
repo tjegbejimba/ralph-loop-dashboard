@@ -1,0 +1,25 @@
+name: Form Provenance Verification
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  verify-form-intake:
+    runs-on: ubuntu-latest
+    if: github.event.issue.issue_template == 'structured-intake.yml'
+    steps:
+      - name: Add form-verified label
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              labels: ['ralph:form-verified']
+            });
