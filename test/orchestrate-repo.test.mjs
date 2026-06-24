@@ -57,6 +57,31 @@ function ledgerPath(root) {
   return join(root, ".ralph", "orchestrator", "ledger.json");
 }
 
+function seedFailedRun(root, runId, issueNumber, error, extra = {}) {
+  const runDir = join(root, ".ralph", "runs", runId);
+  const logFile = extra.logFile ?? `iter-${runId}-issue-${issueNumber}.log`;
+  mkdirSync(runDir, { recursive: true });
+  if (extra.logBody) {
+    mkdirSync(join(root, ".ralph", "logs"), { recursive: true });
+    writeFileSync(join(root, ".ralph", "logs", logFile), extra.logBody);
+  }
+  writeFileSync(
+    join(runDir, "status.json"),
+    JSON.stringify({
+      items: {
+        [String(issueNumber)]: {
+          status: "failed",
+          workerId: extra.workerId ?? 1,
+          pid: extra.pid ?? 99999,
+          logFile,
+          startedAt: extra.startedAt ?? "2026-06-12T11:00:00.000Z",
+          error,
+        },
+      },
+    }, null, 2),
+  );
+}
+
 function baseDeps(overrides = {}) {
   return {
     now: FIXED_NOW,
@@ -516,6 +541,248 @@ test("preflight failure from orchestrateRun → hard stop with preflight blocker
     assert.equal(result.exitCode, 1);
     const ledger = JSON.parse(readFileSync(ledgerPath(root), "utf8"));
     assert.equal(ledger.blockers[0].kind, "preflight");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("repeated deterministic worker failures for a queued issue → worker-stall hard stop", async () => {
+  const root = makeRepo();
+  let orchestrateCalled = false;
+  try {
+    seedFailedRun(root, "20260610-120000-deadbeef", 7, "Project checks failed after implementation");
+    seedFailedRun(root, "20260611-120000-feedface", 7, "Copilot exited with code 1");
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(7)]),
+        orchestrateRunFn: async () => {
+          orchestrateCalled = true;
+          return { ok: true, runId: "run-should-not-start" };
+        },
+      }),
+    });
+
+    assert.equal(orchestrateCalled, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, "hard-stop");
+    assert.equal(result.exitCode, 1);
+    assert.equal(result.failureHistory.blocking[0].issueNumber, 7);
+    assert.equal(result.failureHistory.blocking[0].blockingFailureCount, 2);
+    assert.match(result.ownerBrief, /repeated deterministic worker failures/i);
+    const ledger = JSON.parse(readFileSync(ledgerPath(root), "utf8"));
+    assert.equal(ledger.phase, "paused");
+    assert.equal(ledger.blockers[0].kind, "worker-stall");
+    assert.equal(ledger.blockers[0].ref, "https://github.com/octo/alisterr/issues/7");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("transient Copilot API and no-delivery failures do not poison a ready issue", async () => {
+  const root = makeRepo();
+  let receivedArgs = null;
+  try {
+    seedFailedRun(
+      root,
+      "20260615-145640-696108fc",
+      125,
+      "No merged PR found after copilot completed (issue state=OPEN, stateReason=, merged_prs=0)",
+    );
+    seedFailedRun(
+      root,
+      "20260620-140159-695afe09",
+      125,
+      "Copilot exited with code 1: getaddrinfo ENOTFOUND api.enterprise.githubcopilot.com",
+    );
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(125)]),
+        orchestrateRunFn: async (args) => {
+          receivedArgs = args;
+          return {
+            ok: true,
+            runId: "run-retry-125",
+            runDir: join(root, ".ralph", "runs", "run-retry-125"),
+            queue: [{ number: 125 }],
+          };
+        },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "launched");
+    assert.deepEqual(receivedArgs.issueNumbers, [125]);
+    assert.deepEqual(result.failureHistory.blocking, []);
+    assert.equal(result.failureHistory.nonBlocking[0].issueNumber, 125);
+    assert.deepEqual(
+      result.failureHistory.nonBlocking[0].failures.map((failure) => failure.class),
+      ["agent-no-delivery", "transient-runtime"],
+    );
+    const ledger = JSON.parse(readFileSync(ledgerPath(root), "utf8"));
+    assert.equal(ledger.phase, "monitoring");
+    assert.deepEqual(ledger.blockers, []);
+    assert.deepEqual(
+      ledger.failureHistory.nonBlocking[0].failures.map((failure) => failure.class),
+      ["agent-no-delivery", "transient-runtime"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("generic Copilot exits use worker log evidence for transient runtime classification", async () => {
+  const root = makeRepo();
+  let receivedArgs = null;
+  try {
+    seedFailedRun(root, "20260620-140159-695afe09", 125, "Copilot exited with code 1", {
+      logBody: "Error: getaddrinfo ENOTFOUND api.enterprise.githubcopilot.com\n",
+    });
+    seedFailedRun(
+      root,
+      "20260621-140159-695afe09",
+      125,
+      "Copilot exited with code 1",
+      { logBody: "FetchError: request to api.enterprise.githubcopilot.com failed, reason: EAI_AGAIN\n" },
+    );
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(125)]),
+        orchestrateRunFn: async (args) => {
+          receivedArgs = args;
+          return {
+            ok: true,
+            runId: "run-retry-log-evidence",
+            runDir: join(root, ".ralph", "runs", "run-retry-log-evidence"),
+            queue: [{ number: 125 }],
+          };
+        },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "launched");
+    assert.deepEqual(receivedArgs.issueNumbers, [125]);
+    assert.deepEqual(result.failureHistory.blocking, []);
+    assert.deepEqual(
+      result.failureHistory.nonBlocking[0].failures.map((failure) => failure.class),
+      ["transient-runtime", "transient-runtime"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("deterministic failures that mention network or dns in logs still hard-stop", async () => {
+  const root = makeRepo();
+  let orchestrateCalled = false;
+  try {
+    seedFailedRun(root, "20260622-140159-11111111", 125, "Copilot exited with code 1", {
+      logBody: "Project checks failed: DNS parser unit test expected a network label fixture\n",
+    });
+    seedFailedRun(root, "20260623-140159-22222222", 125, "Copilot exited with code 1", {
+      logBody: "Project checks failed: network retry classifier assertion failed\n",
+    });
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(125)]),
+        orchestrateRunFn: async () => {
+          orchestrateCalled = true;
+          return { ok: true, runId: "run-should-not-start" };
+        },
+      }),
+    });
+
+    assert.equal(orchestrateCalled, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, "hard-stop");
+    assert.deepEqual(
+      result.failureHistory.blocking[0].failures.map((failure) => failure.class),
+      ["deterministic-implementation", "deterministic-implementation"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("deterministic failures that print transient tokens in test output still hard-stop", async () => {
+  const root = makeRepo();
+  let orchestrateCalled = false;
+  try {
+    seedFailedRun(root, "20260624-140159-11111111", 125, "Copilot exited with code 1", {
+      logBody: "Project checks failed: expected fixture text ENOTFOUND api.enterprise.githubcopilot.com\n",
+    });
+    seedFailedRun(root, "20260625-140159-22222222", 125, "Copilot exited with code 1", {
+      logBody: "AssertionError: classifier should not treat ECONNRESET as a label\n",
+    });
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(125)]),
+        orchestrateRunFn: async () => {
+          orchestrateCalled = true;
+          return { ok: true, runId: "run-should-not-start" };
+        },
+      }),
+    });
+
+    assert.equal(orchestrateCalled, false);
+    assert.equal(result.ok, false);
+    assert.equal(result.outcome, "hard-stop");
+    assert.deepEqual(
+      result.failureHistory.blocking[0].failures.map((failure) => failure.class),
+      ["deterministic-implementation", "deterministic-implementation"],
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worker process deaths are runtime failures and do not poison ready issues", async () => {
+  const root = makeRepo();
+  let receivedArgs = null;
+  try {
+    seedFailedRun(root, "20260626-140159-11111111", 125, "Worker process died");
+    seedFailedRun(root, "20260627-140159-22222222", 125, "Worker process died unexpectedly");
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(125)]),
+        orchestrateRunFn: async (args) => {
+          receivedArgs = args;
+          return {
+            ok: true,
+            runId: "run-retry-worker-death",
+            runDir: join(root, ".ralph", "runs", "run-retry-worker-death"),
+            queue: [{ number: 125 }],
+          };
+        },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "launched");
+    assert.deepEqual(receivedArgs.issueNumbers, [125]);
+    assert.deepEqual(result.failureHistory.blocking, []);
+    assert.deepEqual(
+      result.failureHistory.nonBlocking[0].failures.map((failure) => failure.class),
+      ["runtime-worker-death", "runtime-worker-death"],
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

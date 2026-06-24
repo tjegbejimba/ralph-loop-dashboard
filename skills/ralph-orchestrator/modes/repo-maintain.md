@@ -128,8 +128,10 @@ tick fired for. The orchestrator does not reach into other repos.
 7. **Record + monitor.** Write `runId` / `runDir` / worker id and the queued issues
    to the ledger; update `last successful automated start` for the repo on a clean
    launch. Poll `.ralph/runs/<runId>/status.json` on state change or every ~2–5 min.
-   Let workers run; intervene only on hard-stop evidence (worker-stall brief on
-   repeated same-slice failure).
+   Let workers run; intervene only on hard-stop evidence. Repeated deterministic
+   implementation/code-shape failures on the same slice get a `worker-stall` owner
+   brief; transient runtime/network/Copilot API outages and no-delivery worker exits
+   are recorded and surfaced, but do not permanently poison a ready issue.
 
 8. **Next tick.** Each tick is independent and scoped to its own repo session:
    re-check concurrency for this repo. The fan-out automation advances the
