@@ -47,7 +47,7 @@ export function discoverRepos(options = {}) {
         continue;
       }
       
-      if (!slug) continue;
+      if (!slug || typeof slug !== "string") continue;
       
       const repoName = slug.split("/")[1] || ent.name;
       const candidate = {

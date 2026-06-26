@@ -247,6 +247,33 @@ test("discoverRepos — handles config.json without repo field", () => {
   }
 });
 
+test("discoverRepos — handles config.json with non-string repo field", () => {
+  const tempRoot = makeTempDir();
+  
+  try {
+    // Create valid repo
+    makeOrchRepo(tempRoot, "valid-repo", "user/valid-repo");
+    
+    // Create repo with non-string repo field (object)
+    const objRepo = join(tempRoot, "obj-repo");
+    mkdirSync(join(objRepo, ".ralph", "orchestrator"), { recursive: true });
+    writeFileSync(join(objRepo, ".ralph", "config.json"), JSON.stringify({ repo: { owner: "user", name: "obj" } }), "utf8");
+    
+    // Create repo with non-string repo field (number)
+    const numRepo = join(tempRoot, "num-repo");
+    mkdirSync(join(numRepo, ".ralph", "orchestrator"), { recursive: true });
+    writeFileSync(join(numRepo, ".ralph", "config.json"), JSON.stringify({ repo: 12345 }), "utf8");
+    
+    const repos = discoverRepos({ scanRoots: [tempRoot] });
+    
+    // Should only return valid repo, skip non-string repo values
+    assert.equal(repos.length, 1);
+    assert.equal(repos[0].slug, "user/valid-repo");
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+});
+
 test("discoverRepos — defaults to ~/Code when no scanRoots provided", () => {
   // This test just verifies the default behavior works without error
   // The actual ~/Code may or may not have Ralph repos
