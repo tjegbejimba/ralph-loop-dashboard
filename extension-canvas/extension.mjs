@@ -10,6 +10,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { joinSession, createCanvas, CanvasError } from "@github/copilot-sdk/extension";
 import { pageHtml } from "./renderer.mjs";
+import { discoverRepos } from "./lib/repo-discovery.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, "..");
@@ -27,11 +28,24 @@ async function loadStatusReaderFactory() {
   return mod.createStatusReader;
 }
 
-// Default repo to point at when the canvas is opened without an explicit repoRoot
-const DEFAULT_REPO = process.env.RALPH_DASHBOARD_REPO || REPO_ROOT;
+// Resolve the default repo: if RALPH_DASHBOARD_REPO is set, use it; otherwise
+// discover orchestrated repos and use the most-recently-active one; fall back
+// to this repo (REPO_ROOT) if no orchestrated repos found.
+function getDefaultRepo() {
+  if (process.env.RALPH_DASHBOARD_REPO) {
+    return process.env.RALPH_DASHBOARD_REPO;
+  }
+  
+  const discovered = discoverRepos();
+  if (discovered.length > 0) {
+    return discovered[0].mainCheckout;
+  }
+  
+  return REPO_ROOT;
+}
 
 function resolveRepoRoot(input) {
-  return (input && typeof input.repoRoot === "string" && input.repoRoot) || DEFAULT_REPO;
+  return (input && typeof input.repoRoot === "string" && input.repoRoot) || getDefaultRepo();
 }
 
 // Build a status reader fresh each call so live edits to .ralph/config.json
@@ -85,7 +99,7 @@ export const session = await joinSession({
         properties: {
           repoRoot: {
             type: "string",
-            description: "Absolute path to the repo whose .ralph loop to show. Defaults to this repo.",
+            description: "Absolute path to the repo whose .ralph loop to show. Defaults to the most-recently-active orchestrated repo in ~/Code, or this repo if none found.",
           },
         },
         additionalProperties: false,
