@@ -12,6 +12,8 @@
 //   triage [--dry-run|--live]            Comment-only advisory issue triage.
 //   promote-lanes [--dry-run|--live]     Apply lane routing decisions as guarded
 //                                        state transitions.
+//   promote-ready [--dry-run|--live]     Promote ralph:fast-lane issues to
+//                                        ralph:ready (one-tap gate).
 //   help | --help                        Print usage.
 //
 // Repo resolution: $RALPH_REPO_ROOT → walk up from cwd looking for .ralph/.
@@ -25,7 +27,7 @@ import { join, resolve, dirname } from "node:path";
 import { createStatusReader } from "./lib/status-data.mjs";
 import { renderStatus, renderLocalStatus, shouldUseColor } from "./lib/terminal-render.mjs";
 import { DEFAULT_TRIAGE_CONFIG, runIssueTriage } from "./lib/issue-triage.mjs";
-import { runPromoteLanes } from "./lib/lane-promotion.mjs";
+import { runPromoteLanes, runPromoteReady } from "./lib/lane-promotion.mjs";
 import { loadUserConfig } from "./lib/user-config.mjs";
 import { runOrchestrateRepo, renderPlan, renderSummary, resolveRepoSlug } from "./lib/orchestrate-repo.mjs";
 import { resolveOrchestrateRepoRoot } from "./lib/loop-launch-controller.mjs";
@@ -60,6 +62,9 @@ function parseFlags(args) {
     promoteLanesMode: "dry-run",
     promoteLanesQuery: null,
     promoteLanesRepos: [],
+    promoteReadyMode: "dry-run",
+    promoteReadyIssue: null,
+    promoteReadyRepo: null,
     // orchestrate-repo flags
     dryRun: false,
     repoRoot: null,
@@ -78,11 +83,13 @@ function parseFlags(args) {
     else if (a === "--dry-run") {
       flags.triageMode = "dry-run";
       flags.promoteLanesMode = "dry-run";
+      flags.promoteReadyMode = "dry-run";
       flags.dryRun = true;
     }
     else if (a === "--live") {
       flags.triageMode = "live";
       flags.promoteLanesMode = "live";
+      flags.promoteReadyMode = "live";
     }
     else if (a === "--canonical-labels") flags.triageTaxonomyMode = "canonical";
     else if (a === "--query") {
@@ -95,7 +102,9 @@ function parseFlags(args) {
       const val = args[++i];
       flags.triageRepos.push(val);
       flags.promoteLanesRepos.push(val);
+      flags.promoteReadyRepo = val;
     }
+    else if (a === "--issue") flags.promoteReadyIssue = parseInt(args[++i], 10) || null;
     else if (a === "--repo-root") flags.repoRoot = args[++i] || null;
     else if (a === "--run-mode") flags.runMode = args[++i] || null;
     else if (a === "--close-completed-prds") flags.closeCompletedPrds = true;
@@ -130,6 +139,7 @@ function printUsage() {
   node cli.mjs follow [N|--worker N]
   node cli.mjs triage [--dry-run|--live] [--canonical-labels] [--repo OWNER/NAME] [--query QUERY] [--json]
   node cli.mjs promote-lanes [--dry-run|--live] [--repo OWNER/NAME ...] [--query QUERY] [--json]
+  node cli.mjs promote-ready [--dry-run|--live] [--issue N] [--repo OWNER/NAME] [--json]
   node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
   node cli.mjs orchestrate-repo --close-completed-prds [--repo-root PATH] [--dry-run] [--json]
   node cli.mjs help
@@ -147,6 +157,10 @@ promote-lanes applies lane routing decisions as guarded state transitions.
 Defaults to dry-run; --live is required to write labels. Reads triaged issues
 (default: label:ralph:needs-triage), evaluates each, routes to a lane, and
 applies the target label while removing conflicting ralph:* state labels.
+
+promote-ready promotes ralph:fast-lane issues to ralph:ready (one-tap gate).
+Defaults to dry-run; --live is required to apply mutations. With --issue N,
+promotes a single issue. Without --issue, batches all eligible fast-lane issues.
 
 orchestrate-repo runs the ralph-orchestrator repo-maintain sweep from a repo's
 MAIN checkout (where the local-only .ralph/ lives) for a local scheduler. It
@@ -741,6 +755,110 @@ function renderPromoteLanesRun({ repoResults, live, query }) {
   return lines.join("\n").trimEnd() + "\n";
 }
 
+async function cmdPromoteReady(flags) {
+  if (flags.help) {
+    process.stdout.write(`Usage:
+  node cli.mjs promote-ready [--dry-run|--live] [--issue N] [--repo OWNER/NAME] [--json]
+
+Promotes ralph:fast-lane issues to ralph:ready (one-tap gate).
+Default repo: tjegbejimba/ralph-loop-dashboard
+
+--dry-run           Print planned mutations; do not apply. Default.
+--live              Apply the label mutations via gh.
+--issue N           Promote a single issue by number. Omit to batch all fast-lane.
+--repo OWNER/NAME   Use this repo instead of the default.
+--json              Emit the structured run summary.
+
+Promotion is guarded: refuses to promote issues with ralph:hitl, ralph:blocked,
+non-runnable work types, missing priority, taxonomy conflicts, open linked PRs,
+assignees, unresolved blockers, or open questions/TBD evidence.
+`);
+    return;
+  }
+
+  const live = flags.promoteReadyMode === "live";
+  let repo;
+  try {
+    repo = flags.promoteReadyRepo
+      ? parseRepoSpec(flags.promoteReadyRepo)
+      : { owner: "tjegbejimba", name: "ralph-loop-dashboard" };
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const repoSlug = `${repo.owner}/${repo.name}`;
+
+  // Fail-loud GitHub preflight
+  const preflight = runGithubPreflight({ repos: [repo] });
+  if (!preflight.ok) {
+    emitPreflightFailure(flags, preflight, "github-preflight");
+    return;
+  }
+
+  const issueNumbers = flags.promoteReadyIssue != null ? [flags.promoteReadyIssue] : [];
+
+  const result = await runPromoteReady({
+    repo: repoSlug,
+    issueNumbers,
+    live,
+    fetchIssue: async (repoSlug, issueNumber) => {
+      const result = spawnSync(
+        "gh",
+        ["issue", "view", String(issueNumber), "--repo", repoSlug, "--json", "number,title,body,labels,state,assignees,closedByPullRequestsReferences"],
+        { stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" },
+      );
+      if (result.status !== 0) return null;
+      try {
+        return JSON.parse(result.stdout);
+      } catch {
+        return null;
+      }
+    },
+    fetchFastLaneIssues: async (repoSlug) => {
+      const result = spawnSync(
+        "gh",
+        ["issue", "list", "--repo", repoSlug, "--label", "ralph:fast-lane", "--state", "open", "--json", "number,title,body,labels,state,assignees,closedByPullRequestsReferences", "--limit", "100"],
+        { stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" },
+      );
+      if (result.status !== 0) return [];
+      try {
+        return JSON.parse(result.stdout);
+      } catch {
+        return [];
+      }
+    },
+  });
+
+  if (flags.json) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else {
+    const mode = live ? "live" : "dry-run";
+    process.stdout.write(`\nPromote-ready (${mode})\n`);
+    process.stdout.write(`Repository: ${repoSlug}\n`);
+    process.stdout.write(`Mode: ${issueNumbers.length > 0 ? `single issue #${issueNumbers[0]}` : "batch all fast-lane"}\n\n`);
+    
+    process.stdout.write(`Summary:\n`);
+    process.stdout.write(`  Total: ${result.summary.total}\n`);
+    process.stdout.write(`  Promoted: ${result.summary.promoted}\n`);
+    process.stdout.write(`  Skipped: ${result.summary.skipped}\n\n`);
+    
+    for (const promotion of result.promotions) {
+      if (promotion.promoted) {
+        const changes = [`+${promotion.labelsAdded.join(", ")}`, `-${promotion.labelsRemoved.join(", ")}`]
+          .filter((s) => s.length > 1)
+          .join(" ");
+        process.stdout.write(`#${promotion.issueNumber} → PROMOTED: ${changes}\n`);
+      } else {
+        process.stdout.write(`#${promotion.issueNumber} → SKIPPED: ${promotion.skipReason}\n`);
+      }
+    }
+  }
+
+  process.exitCode = 0;
+}
+
 function printOrchestrateRepoUsage() {
   process.stdout.write(`Usage:
   node cli.mjs orchestrate-repo [--repo-root PATH] [--dry-run] [--json] [--max-issues N] [--parallelism N] [--run-mode MODE]
@@ -933,6 +1051,10 @@ async function main() {
   }
   if (cmd === "promote-lanes") {
     await cmdPromoteLanes(flags);
+    return;
+  }
+  if (cmd === "promote-ready") {
+    await cmdPromoteReady(flags);
     return;
   }
   if (cmd === "orchestrate-repo") {

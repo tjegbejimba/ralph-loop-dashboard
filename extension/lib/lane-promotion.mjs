@@ -19,6 +19,18 @@ function labelNames(labels) {
  * @returns {string | null}
  */
 function checkPromotionGuards(issue, targetLabel, lane) {
+  const currentLabels = labelNames(issue.labels);
+
+  // Guard: Explicit HITL check (before taxonomy conflict check)
+  if (currentLabels.includes("ralph:hitl")) {
+    return "Blocked: ralph:hitl present";
+  }
+
+  // Guard: Explicit blocked check (before taxonomy conflict check)
+  if (currentLabels.includes("ralph:blocked")) {
+    return "Blocked: ralph:blocked present";
+  }
+
   // Guard: Taxonomy conflicts
   const classification = classifyIssue(issue);
   if (classification.conflicts && classification.conflicts.length > 0) {
@@ -53,7 +65,6 @@ function checkPromotionGuards(issue, targetLabel, lane) {
   }
 
   // Guard: Missing Parent for work:slice
-  const currentLabels = labelNames(issue.labels);
   if (currentLabels.includes("work:slice")) {
     const parentNumber = parseParentNumber(issue?.body || "");
     if (parentNumber === null) {
@@ -283,4 +294,131 @@ export function promoteOneTapReadiness({ issue, live = false }) {
     labelsRemoved,
     skipReason: null,
   };
+}
+
+/**
+ * Apply label mutations to an issue via gh CLI.
+ * 
+ * @param {object} params
+ * @param {string} params.repo - Repository slug (e.g., "owner/repo")
+ * @param {number} params.issueNumber - Issue number
+ * @param {string[]} params.labelsAdded - Labels to add
+ * @param {string[]} params.labelsRemoved - Labels to remove
+ * @returns {Promise<{success: boolean, error?: string}>}
+ */
+export async function applyLabelMutation({ repo, issueNumber, labelsAdded, labelsRemoved }) {
+  if (!repo) {
+    throw new TypeError("repo is required");
+  }
+  if (!Number.isFinite(issueNumber) || issueNumber < 1) {
+    throw new TypeError("issueNumber must be a positive integer");
+  }
+
+  const { spawnSync } = await import("node:child_process");
+  
+  const args = ["issue", "edit", String(issueNumber), "--repo", repo];
+  
+  for (const label of labelsAdded) {
+    args.push("--add-label", label);
+  }
+  
+  for (const label of labelsRemoved) {
+    args.push("--remove-label", label);
+  }
+
+  const result = spawnSync("gh", args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf-8",
+  });
+
+  if (result.status !== 0) {
+    return {
+      success: false,
+      error: result.stderr || `gh exited with code ${result.status}`,
+    };
+  }
+
+  return { success: true };
+}
+
+/**
+ * Run promote-ready for one or more issues.
+ * 
+ * @param {object} params
+ * @param {string} params.repo - Repository slug (e.g., "owner/repo")
+ * @param {number[]} params.issueNumbers - Issue numbers to promote (empty = batch all fast-lane)
+ * @param {boolean} params.live - Whether to apply mutations
+ * @param {Function} params.fetchIssue - Function to fetch issue data: (repo, issueNumber) => Promise<issue>
+ * @param {Function} params.fetchFastLaneIssues - Function to fetch all fast-lane issues: (repo) => Promise<issue[]>
+ * @returns {Promise<{promotions: Array, summary: object}>}
+ */
+export async function runPromoteReady({
+  repo,
+  issueNumbers = [],
+  live = false,
+  fetchIssue,
+  fetchFastLaneIssues,
+}) {
+  if (!repo) {
+    throw new TypeError("repo is required");
+  }
+  if (!fetchIssue || !fetchFastLaneIssues) {
+    throw new TypeError("fetchIssue and fetchFastLaneIssues are required");
+  }
+
+  const promotions = [];
+
+  // Determine issues to process
+  let issuesToProcess = [];
+  if (issueNumbers.length > 0) {
+    // Single or explicit list mode
+    for (const issueNumber of issueNumbers) {
+      const issue = await fetchIssue(repo, issueNumber);
+      if (issue) {
+        issuesToProcess.push(issue);
+      } else {
+        promotions.push({
+          promoted: false,
+          issueNumber,
+          labelsAdded: [],
+          labelsRemoved: [],
+          skipReason: "Issue not found",
+        });
+      }
+    }
+  } else {
+    // Batch mode - fetch all fast-lane issues
+    issuesToProcess = await fetchFastLaneIssues(repo);
+  }
+
+  // Process each issue
+  for (const issue of issuesToProcess) {
+    const result = promoteOneTapReadiness({ issue, live });
+    
+    // Apply mutation if live and promoted
+    if (live && result.promoted) {
+      const mutation = await applyLabelMutation({
+        repo,
+        issueNumber: result.issueNumber,
+        labelsAdded: result.labelsAdded,
+        labelsRemoved: result.labelsRemoved,
+      });
+      
+      if (!mutation.success) {
+        result.promoted = false;
+        result.skipReason = `Mutation failed: ${mutation.error}`;
+      }
+    }
+    
+    promotions.push(result);
+  }
+
+  // Calculate summary
+  const summary = {
+    total: promotions.length,
+    promoted: promotions.filter((p) => p.promoted).length,
+    skipped: promotions.filter((p) => !p.promoted).length,
+  };
+
+  return { promotions, summary };
 }

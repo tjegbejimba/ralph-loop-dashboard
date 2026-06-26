@@ -197,4 +197,46 @@ describe("one-tap promotion from ralph:fast-lane to ralph:ready", () => {
     assert.deepEqual(result.labelsRemoved, ["ralph:fast-lane"]);
     assert.equal(result.skipReason, null);
   });
+
+  it("refuses promotion when ralph:hitl label is present (explicit guard)", () => {
+    const issue = {
+      number: 52,
+      title: "Fix security bug",
+      body: "Acceptance criteria:\n- Security issue fixed",
+      labels: ["ralph:fast-lane", "ralph:hitl", "work:standalone", "priority:P2"],
+      state: "OPEN",
+      assignees: [],
+      closedByPullRequestsReferences: [],
+    };
+
+    const result = promoteOneTapReadiness({ issue, live: false });
+
+    assert.equal(result.promoted, false);
+    assert.equal(result.issueNumber, 52);
+    assert.deepEqual(result.labelsAdded, []);
+    assert.deepEqual(result.labelsRemoved, []);
+    // Must be explicit "Blocked: ralph:hitl present", not generic taxonomy conflict
+    assert.match(result.skipReason, /^Blocked:.*ralph:hitl present/i);
+  });
+
+  it("refuses promotion when ralph:blocked label is present (explicit guard)", () => {
+    const issue = {
+      number: 53,
+      title: "Fix bug",
+      body: "Acceptance criteria:\n- Fixed",
+      labels: ["ralph:fast-lane", "ralph:blocked", "work:standalone", "priority:P2"],
+      state: "OPEN",
+      assignees: [],
+      closedByPullRequestsReferences: [],
+    };
+
+    const result = promoteOneTapReadiness({ issue, live: false });
+
+    assert.equal(result.promoted, false);
+    assert.equal(result.issueNumber, 53);
+    assert.deepEqual(result.labelsAdded, []);
+    assert.deepEqual(result.labelsRemoved, []);
+    // Must be explicit "Blocked: ralph:blocked present", not generic taxonomy conflict
+    assert.match(result.skipReason, /^Blocked:.*ralph:blocked present/i);
+  });
 });
