@@ -1173,13 +1173,21 @@ $("refresh-btn").addEventListener("click", refresh);
 function getRunOptions() {
   const runMode = document.querySelector('input[name="run-mode"]:checked')?.value || "one-pass";
   const parallelism = parseInt($("parallelism-input")?.value, 10) || 1;
-  const model = $("model-input")?.value?.trim() || "claude-sonnet-4.5";
+  const modelInput = $("model-input")?.value?.trim();
   
   // Basic validation (HTML constraints provide primary validation)
   // Ensure parallelism is within bounds
   const validParallelism = Math.max(1, Math.min(10, parallelism));
   
-  return { runMode, parallelism: validParallelism, model };
+  const options = { runMode, parallelism: validParallelism };
+  
+  // Only include model if user has explicitly set it (non-empty after trim)
+  // This allows repo config > global config > built-in default precedence
+  if (modelInput && modelInput !== "") {
+    options.model = modelInput;
+  }
+  
+  return options;
 }
 
 function renderPreflightChecks(checks) {
@@ -1306,7 +1314,9 @@ async function loadUserConfigDefaults() {
   try {
     const config = await copilot.getUserConfig();
     if (config.defaultModel) {
-      $("model-input").value = config.defaultModel;
+    if (config.defaultModel) {
+      $("model-input").placeholder = `(default: ${config.defaultModel})`;
+    }
     }
     if (config.defaultParallelism) {
       $("parallelism-input").value = config.defaultParallelism;

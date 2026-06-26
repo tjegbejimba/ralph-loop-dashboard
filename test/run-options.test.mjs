@@ -104,3 +104,37 @@ test("validateModel rejects unknown model", () => {
   assert.equal(result.valid, false);
   assert.match(result.error, /unknown model/i);
 });
+
+test("getRunOptions prefers repo config model over global default", () => {
+  const userConfig = { defaultModel: "gpt-5.4" };
+  const repoConfig = { model: "claude-opus-4.7" };
+  
+  const result = getRunOptions({ userConfig, repoConfig });
+  
+  assert.equal(result.model, "claude-opus-4.7");
+});
+
+test("getRunOptions falls back to global default when repo config has no model", () => {
+  const userConfig = { defaultModel: "gpt-5.5" };
+  const repoConfig = {};
+  
+  const result = getRunOptions({ userConfig, repoConfig });
+  
+  assert.equal(result.model, "gpt-5.5");
+});
+
+test("getRunOptions uses built-in default when neither config has model", () => {
+  const userConfig = {};
+  const repoConfig = {};
+  
+  const result = getRunOptions({ userConfig, repoConfig });
+  
+  assert.equal(result.model, "claude-sonnet-4.5");
+});
+
+test("validateModel accepts mai-code-1-flash-internal", () => {
+  const result = validateModel("mai-code-1-flash-internal");
+  
+  assert.equal(result.valid, true);
+  assert.equal(result.error, undefined);
+});

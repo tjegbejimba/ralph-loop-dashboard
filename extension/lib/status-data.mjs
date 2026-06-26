@@ -735,5 +735,6 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
     resolveActiveRun: (opts) => resolveActiveRun(repoRoot, opts),
     buildLocalPayload,
     buildStatusPayload,
+    loadRepoConfig: () => readRalphConfig(CONFIG_FILE),
   };
 }

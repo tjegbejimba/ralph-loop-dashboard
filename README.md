@@ -381,6 +381,7 @@ Config is intentionally small:
 ```json
 {
   "profile": "python",
+  "model": "claude-opus-4.7",
   "issue": {
     "titleRegex": "^Slice [0-9]+:",
     "titleNumRegex": "^Slice (?<x>[0-9]+):",
@@ -402,6 +403,16 @@ Config is intentionally small:
   ]
 }
 ```
+
+Key fields:
+
+- **`model`** (optional) — Copilot model to use for this repo (e.g., `mai-code-1-flash-internal`, `gpt-5.5`, `claude-opus-4.7`). Overrides the global default from `~/.ralph-dashboard/config.json`. Falls back to global `defaultModel` if omitted, then to built-in default (`claude-sonnet-4.5`).
+- **`profile`** — Profile name (`generic`, `bun`, `python`) for template and config hydration.
+- **`issue.titleRegex`, `issue.titleNumRegex`, `issue.issueSearch`** — Control title matching and GitHub issue discovery.
+- **`issue.numbers`** (array of integers) — Direct-numbers mode enqueue list, populated by `--enqueue`.
+- **`issue.order`** (`"queue"` or `"chronological"`) — Whether to consume issues in queue order or by issue number.
+- **`validation.commands`** (array of `{name, command}` objects) — Pre-merge checks (lint, test, build).
+- **`worker.idleExitAfterPolls`** (optional integer) — Number of consecutive empty-queue polls before idling; env var `RALPH_IDLE_EXIT` takes precedence.
 
 The config informs the prompt and dashboard. The worker agent still runs validation commands; the dashboard does not execute them.
 
