@@ -7,6 +7,7 @@ import { runPreflight as runPreflightImpl } from "./preflight.mjs";
 import { getRunOptions, validateModel, validateParallelism, validateRunMode } from "./run-options.mjs";
 import { launchRun as launchLoopImpl } from "./shell-launcher.mjs";
 import { isAlive } from "./platform-shim.mjs";
+import { readRalphConfig } from "./status-data.mjs";
 
 const IS_WINDOWS = process.platform === "win32";
 const TERMINAL_STATUSES = new Set(["merged", "failed", "skipped", "rejected"]);
@@ -57,8 +58,8 @@ export function normalizeQueue({ queue, issueNumbers } = {}) {
   return { ok: true, queue: [] };
 }
 
-export function normalizeRunOptions(input, { userConfig } = {}) {
-  const defaults = getRunOptions({ userConfig });
+export function normalizeRunOptions(input, { userConfig, repoConfig } = {}) {
+  const defaults = getRunOptions({ userConfig, repoConfig });
   const raw = { ...defaults, ...(input || {}) };
   const parallelism =
     typeof raw.parallelism === "string" ? Number(raw.parallelism) : raw.parallelism;
@@ -269,6 +270,7 @@ export async function startRalphLoop({
   issueNumbers,
   runOptions,
   userConfig,
+  repoConfig,
   getLoopProcess,
   runPreflight = runPreflightImpl,
   createRun = createRunImpl,
@@ -287,7 +289,7 @@ export async function startRalphLoop({
   const normalizedQueue = normalizeQueue({ queue, issueNumbers });
   if (!normalizedQueue.ok) return { ok: false, error: normalizedQueue.error };
 
-  const normalizedRunOptions = normalizeRunOptions(runOptions, { userConfig });
+  const normalizedRunOptions = normalizeRunOptions(runOptions, { userConfig, repoConfig });
   if (!normalizedRunOptions.ok) return { ok: false, error: normalizedRunOptions.error };
 
   const procs = await getLoopProcess();
@@ -368,6 +370,18 @@ export async function orchestrateRun(options = {}) {
     return { ok: false, error: repoRootResult.error };
   }
 
+  // Load repo config from the resolved target repo root
+  const configPath = join(repoRootResult.repoRoot, ".ralph", "config.json");
+  let repoConfig = {};
+  if (existsSync(configPath)) {
+    try {
+      const { config } = readRalphConfig(configPath);
+      repoConfig = config || {};
+    } catch {
+      // Ignore config read errors; will fall back to defaults
+    }
+  }
+
   // Process detection (running-guard + startup confirmation) must be scoped to
   // the resolved target repo, not the extension's default repo. Prefer a
   // target-scoped factory; fall back to a directly provided getLoopProcess.
@@ -379,6 +393,7 @@ export async function orchestrateRun(options = {}) {
   const launch = await startRalphLoop({
     ...options,
     repoRoot: repoRootResult.repoRoot,
+    repoConfig,
     getLoopProcess,
     runOptions: {
       runMode: "until-empty",

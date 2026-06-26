@@ -102,12 +102,14 @@ async function getStatus() {
 // run the same preflight, run creation, and platform launch behavior.
 async function startLoop({ queue, issueNumbers, runOptions } = {}) {
   const { config: userConfig } = loadUserConfig();
+  const { config: repoConfig } = statusReader.loadRepoConfig();
   return startRalphLoop({
     repoRoot: REPO_ROOT,
     queue,
     issueNumbers,
     runOptions,
     userConfig,
+    repoConfig,
     getLoopProcess,
   });
 }

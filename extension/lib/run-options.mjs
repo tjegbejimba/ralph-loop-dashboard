@@ -15,6 +15,7 @@ const VALID_MODELS = new Set([
   "gpt-5.4-mini",
   "gpt-5.5",
   "gpt-4.1",
+  "mai-code-1-flash-internal",
 ]);
 
 const DEFAULT_RUN_MODE = "one-pass";
@@ -24,22 +25,27 @@ const MIN_PARALLELISM = 1;
 const MAX_PARALLELISM = 10;
 
 /**
- * Get run options with defaults from user config
+ * Get run options with defaults from user config and repo config
  * 
  * @param {Object} options
- * @param {Object} [options.userConfig] - User config with defaults
+ * @param {Object} [options.userConfig] - User config with global defaults
+ * @param {Object} [options.repoConfig] - Repo-specific config from .ralph/config.json
  * @returns {Object} Run options
  * @returns {string} .runMode - "one-pass" or "until-empty"
  * @returns {number} .parallelism - Number of parallel workers
- * @returns {string} .model - Model name
+ * @returns {string} .model - Model name (repo config > user config > built-in default)
  */
-export function getRunOptions({ userConfig } = {}) {
+export function getRunOptions({ userConfig, repoConfig } = {}) {
   const config = userConfig || {};
+  const repo = repoConfig || {};
+  
+  // Model precedence: repo config > user config > built-in default
+  const model = repo.model ?? config.defaultModel ?? DEFAULT_MODEL;
   
   return {
     runMode: DEFAULT_RUN_MODE, // User config doesn't store run mode
     parallelism: config.defaultParallelism ?? DEFAULT_PARALLELISM,
-    model: config.defaultModel ?? DEFAULT_MODEL,
+    model,
   };
 }
 

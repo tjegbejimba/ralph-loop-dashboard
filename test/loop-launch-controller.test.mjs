@@ -99,13 +99,43 @@ test("startRalphLoop refuses to launch when a loop is already running", async ()
       preflightRan = true;
       return passingPreflight();
     },
-    createRun: () => ({ runId: "run-1", runDir: "/repo/.ralph/runs/run-1" }),
-    launchLoop: async () => ({ success: true, pid: 1234 }),
   });
 
   assert.equal(result.ok, false);
   assert.match(result.error, /already running/i);
   assert.equal(preflightRan, false);
+});
+
+test("startRalphLoop resolves repo config model from repoConfig parameter", async () => {
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ralph-loop-test-"));
+  const calls = [];
+  
+  const result = await startRalphLoop({
+    repoRoot: tmpRoot,
+    queue,
+    runOptions: { runMode: "one-pass", parallelism: 1 }, // No model specified
+    userConfig: { defaultModel: "gpt-5.4" },
+    repoConfig: { model: "mai-code-1-flash-internal" }, // Repo override
+    getLoopProcess: async () => [],
+    runPreflight: async (args) => {
+      calls.push(["preflight", args]);
+      return passingPreflight();
+    },
+    createRun: (args) => {
+      calls.push(["createRun", args]);
+      return { runId: "run-1", runDir: `${tmpRoot}/.ralph/runs/run-1` };
+    },
+    launchLoop: async (args) => {
+      calls.push(["launchLoop", args]);
+      return { success: true, pid: 1234 };
+    },
+  });
+
+  rmSync(tmpRoot, { recursive: true, force: true });
+  
+  assert.equal(result.ok, true);
+  assert.equal(result.runOptions.model, "mai-code-1-flash-internal");
+  assert.equal(calls[2][1].runOptions.model, "mai-code-1-flash-internal");
 });
 
 test("startRalphLoop accepts issueNumbers for agent-initiated launches", async () => {
