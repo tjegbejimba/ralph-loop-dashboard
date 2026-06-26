@@ -16,7 +16,7 @@ conflict and fail closed until repaired.
 | --- | --- |
 | `ralph:needs-triage` | Not yet scoped for Ralph. |
 | `ralph:evaluated` | Reviewed, but not runnable by workers. Used for PRD parent issues. |
-| `ralph:fast-lane` | AUTO-eligible candidate; triage marked it but it still needs one-tap promotion to `ralph:ready`. Not runnable. |
+| `ralph:fast-lane` | AUTO-eligible candidate; triage marked it but it still needs one-tap promotion to `ralph:ready`. Not runnable. **Human gate**: use `promote-ready` CLI or dashboard button to advance. |
 | `ralph:ready` | Runnable by Ralph when paired with a runnable work type and no blockers. |
 | `ralph:blocked` | Explicitly blocked before worker pickup. |
 | `ralph:hitl` | Human-in-the-loop; not safe for autonomous work. |
@@ -24,6 +24,29 @@ conflict and fail closed until repaired.
 | `ralph:running` | Claimed by a worker. |
 | `ralph:done` | Completed by Ralph. |
 | `ralph:failed` | Worker failed and left the issue as a blocker for dependents. |
+
+### One-tap promotion: ralph:fast-lane → ralph:ready
+
+`ralph:fast-lane` issues have passed AUTO lane routing (automated triage) but are **not yet runnable**. The human operator reviews and promotes eligible issues to `ralph:ready` using one of:
+
+- **CLI**: `node extension/cli.mjs promote-ready [--dry-run|--live] [--issue N] [--repo OWNER/NAME]`
+  - Dry-run by default (safe preview); `--live` applies mutations.
+  - `--issue N` promotes a single issue; omit to batch all fast-lane issues.
+- **Dashboard**: "Awaiting promotion (fast-lane)" section with per-row Promote button (coming soon).
+
+**Promotion guards** (all must pass):
+- Issue must currently be `ralph:fast-lane`.
+- Must be a runnable work type (`work:slice` or `work:standalone`).
+- Must have a `priority:*` label.
+- No `ralph:hitl` or `ralph:blocked` present.
+- No taxonomy conflicts (multiple labels in same dimension).
+- No open linked PR.
+- No assignee.
+- No unresolved `Blocked by #N` dependencies.
+- For `work:slice`, must have exact `Parent #N` marker.
+- No `## Open questions` or `TBD` markers in body.
+
+Guard failures are reported with clear, named reasons (e.g., "Blocked: ralph:hitl present").
 
 ### Priority labels
 
