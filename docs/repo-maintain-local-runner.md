@@ -57,8 +57,11 @@ Operating on `--repo-root` (default: the current directory), it:
    **hard-stops** with an owner brief — it never installs or repairs Ralph.
 2. Reads `issue.issueSearch` from `.ralph/config.json` **verbatim**.
 3. Resolves the repo `owner/name` from `config.repo` or the `origin` remote.
-4. **Defers** (exit 0) if a run is already active for the repo (a non-terminal
-   `.ralph/runs/<id>/status.json` or a live claim).
+4. **Defers** (exit 0) if a run is already active for the repo (a live
+   `.ralph/state.json` claim or a non-terminal `.ralph/runs/<id>/status.json`
+   item whose PID is alive, Ralph-related, and scoped to that repo's root or
+   default worker worktree path). Stale `running` / `claimed` / `queued` status
+   JSON without live local process evidence does not block the next tick.
 5. **Skips** with a one-time owner brief if the repo is missing the canonical
    `ralph:*` state labels. It never migrates labels for you.
 6. Discovers ready work **read-only** via `gh issue list --search "<issueSearch>"`,
