@@ -138,23 +138,103 @@ export function detectReviewStats(logBody) {
 
 const NON_TERMINAL_RUN_STATUSES = new Set(["running", "claimed", "queued"]);
 
-export function commandLooksRalphRelated(command) {
-  const cmd = String(command || "");
-  return /\bralph\.sh\b|\blaunch\.sh\b|\bcopilot\b/.test(cmd);
+function normalizeCommandPathText(value) {
+  return String(value || "").replace(/\\/g, "/");
 }
 
-export function isRalphPidAlive(pid, { spawnSyncFn = spawnSync, platform = process.platform, isAliveFn = isAlive } = {}) {
-  const n = Number(pid);
-  if (!Number.isInteger(n) || n <= 0) return false;
-  if (platform === "win32") return isAliveFn(n);
-  try {
-    const result = spawnSyncFn("ps", ["-p", String(n), "-o", "command="], {
+function normalizeRepoRootForMatch(repoRoot) {
+  const root = normalizeCommandPathText(repoRoot).replace(/\/+$/, "");
+  return root.length > 0 ? root : null;
+}
+
+function hasPathBoundaryBefore(command, index) {
+  if (index <= 0) return true;
+  return /[\s"'`=(:]/.test(command[index - 1]);
+}
+
+function hasPathBoundaryAfter(command, index) {
+  if (index >= command.length) return true;
+  return /[\/\s"'`),:;]/.test(command[index]);
+}
+
+function commandContainsScopedPath(command, path) {
+  const target = normalizeRepoRootForMatch(path);
+  if (!target) return false;
+  let index = command.indexOf(target);
+  while (index !== -1) {
+    const end = index + target.length;
+    if (hasPathBoundaryBefore(command, index) && hasPathBoundaryAfter(command, end)) {
+      return true;
+    }
+    index = command.indexOf(target, index + 1);
+  }
+  return false;
+}
+
+function commandContainsWorkerWorktreePath(command, repoRoot) {
+  const root = normalizeRepoRootForMatch(repoRoot);
+  if (!root) return false;
+  const workerBase = `${root}-ralph`;
+  let index = command.indexOf(workerBase);
+  while (index !== -1) {
+    if (!hasPathBoundaryBefore(command, index)) {
+      index = command.indexOf(workerBase, index + 1);
+      continue;
+    }
+    let end = index + workerBase.length;
+    if (command[end] === "-") {
+      let digitEnd = end + 1;
+      while (/[0-9]/.test(command[digitEnd] || "")) digitEnd += 1;
+      if (digitEnd === end + 1) {
+        index = command.indexOf(workerBase, index + 1);
+        continue;
+      }
+      end = digitEnd;
+    }
+    if (hasPathBoundaryAfter(command, end)) return true;
+    index = command.indexOf(workerBase, index + 1);
+  }
+  return false;
+}
+
+export function commandLooksRalphRelated(command, { repoRoot } = {}) {
+  const cmd = String(command || "");
+  if (!/\bralph\.sh\b|\blaunch\.sh\b|\bcopilot\b/.test(cmd)) return false;
+  const normalizedCmd = normalizeCommandPathText(cmd);
+  const root = normalizeRepoRootForMatch(repoRoot);
+  if (!root) return false;
+  return (
+    commandContainsScopedPath(normalizedCmd, `${root}/.ralph/ralph.sh`) ||
+    commandContainsScopedPath(normalizedCmd, `${root}/.ralph/launch.sh`) ||
+    commandContainsScopedPath(normalizedCmd, root) ||
+    commandContainsWorkerWorktreePath(normalizedCmd, root)
+  );
+}
+
+function commandLineFromPid(pid, { spawnSyncFn, platform }) {
+  if (platform === "win32") {
+    const result = spawnSyncFn("wmic", ["process", "where", `ProcessId=${pid}`, "get", "CommandLine", "/value"], {
       encoding: "utf8",
       maxBuffer: 64 * 1024,
       timeout: 1000,
     });
-    if (result.error || result.status !== 0) return false;
-    return commandLooksRalphRelated(result.stdout);
+    if (result.error || result.status !== 0) return "";
+    return String(result.stdout || "").replace(/^CommandLine=/im, "");
+  }
+  const result = spawnSyncFn("ps", ["-p", String(pid), "-o", "command="], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024,
+    timeout: 1000,
+  });
+  if (result.error || result.status !== 0) return "";
+  return result.stdout;
+}
+
+export function isRalphPidAlive(pid, { spawnSyncFn = spawnSync, platform = process.platform, repoRoot } = {}) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  try {
+    return commandLooksRalphRelated(commandLineFromPid(n, { spawnSyncFn, platform }), { repoRoot });
   } catch {
     return false;
   }
@@ -195,9 +275,11 @@ function addLiveClaimIssues(liveIssues, claims, isRalphPidAliveFn, repoRoot) {
 // Resolve the "active run" inside .ralph/runs/. Prefers (in order):
 //   1. A run whose status.json items overlap with the issues currently
 //      live-claimed in state.json. A claim is live only when its PID still
-//      looks Ralph-related, matching ralph/lib/state.sh's stale-claim guard.
+//      looks Ralph-related and scoped to this repo, matching
+//      ralph/lib/state.sh's stale-claim guard without accepting unrelated
+//      reused PIDs.
 //   2. A run whose status.json contains a non-terminal item
-//      (running/claimed/queued) with a live Ralph-related worker PID.
+//      (running/claimed/queued) with a live repo-scoped Ralph worker PID.
 //   3. A stale non-terminal run for cleanup visibility, then newest mtime as
 //      final tiebreak. Stale non-terminal status alone does not make a run
 //      active.

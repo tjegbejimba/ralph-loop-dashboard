@@ -135,8 +135,9 @@ owner brief — the orchestrator does not relabel or force a tree clean.
 **One active run per repo.** Before launching, check for an existing live run
 (`.ralph/launch.sh --status`, a live `.ralph/state.json` claim, or a
 non-terminal `.ralph/runs/<runId>/status.json` item whose PID is still alive and
-whose command line looks Ralph-related). Do not treat old `running`, `claimed`,
-or `queued` status JSON by itself as active-run evidence; repo-maintain must not
+whose command line looks Ralph-related and scoped to the target repo root or its
+default worker worktree path). Do not treat old `running`, `claimed`, or
+`queued` status JSON by itself as active-run evidence; repo-maintain must not
 defer forever on stale local files after a worker process is gone.
 
 If a run is active, **report state and defer** — record the active repo in the

@@ -131,17 +131,69 @@ test("resolveActiveRun — claimed status with live Ralph worker pid is active",
 });
 
 test("isRalphPidAlive — requires a Ralph-related command line, not just an existing PID", () => {
-  assert.equal(commandLooksRalphRelated("/repo/.ralph/ralph.sh --run-id x"), true);
-  assert.equal(commandLooksRalphRelated("/repo/.ralph/launch.sh --foreground"), true);
-  assert.equal(commandLooksRalphRelated("copilot -p prompt.md"), true);
-  assert.equal(commandLooksRalphRelated("/bin/sleep 120"), false);
+  const repoRoot = "/repo/project";
+  assert.equal(commandLooksRalphRelated("/repo/project/.ralph/ralph.sh --run-id x", { repoRoot }), true);
+  assert.equal(commandLooksRalphRelated("/repo/project/.ralph/launch.sh --foreground", { repoRoot }), true);
+  assert.equal(commandLooksRalphRelated("copilot -p /repo/project-ralph/prompt.md", { repoRoot }), true);
+  assert.equal(commandLooksRalphRelated("copilot -p /repo/project-ralph-2/prompt.md", { repoRoot }), true);
+  assert.equal(commandLooksRalphRelated("copilot -p /repo/project-ralph-old/prompt.md", { repoRoot }), false);
+  assert.equal(commandLooksRalphRelated("/repo/other/.ralph/ralph.sh --run-id x", { repoRoot }), false);
+  assert.equal(commandLooksRalphRelated("/bin/sleep 120", { repoRoot }), false);
 
   assert.equal(isRalphPidAlive(1234, {
+    repoRoot,
     spawnSyncFn: () => ({ status: 0, stdout: "/bin/sleep 120\n" }),
   }), false);
   assert.equal(isRalphPidAlive(1234, {
-    spawnSyncFn: () => ({ status: 0, stdout: "/repo/.ralph/ralph.sh --run-id x\n" }),
+    repoRoot,
+    spawnSyncFn: () => ({ status: 0, stdout: "/repo/project/.ralph/ralph.sh --run-id x\n" }),
   }), true);
+});
+
+test("resolveActiveRun — ignores a reused PID from another repo's Ralph process", () => {
+  const root = makeFixture();
+  try {
+    seedRun(root, "stale-running", {
+      items: { "138": { status: "running", workerId: 1, pid: 5555 } },
+    }, "2026-06-27T15:18:01Z");
+
+    const r = resolveActiveRun(root, {
+      isRalphPidAlive: (pid, opts) => isRalphPidAlive(pid, {
+        ...opts,
+        spawnSyncFn: () => ({
+          status: 0,
+          stdout: "/tmp/other-repo/.ralph/ralph.sh --run-id unrelated\n",
+        }),
+      }),
+    });
+    assert.equal(r.runId, "stale-running");
+    assert.equal(r.isActive, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveActiveRun — accepts a live Ralph PID scoped to this repo", () => {
+  const root = makeFixture();
+  try {
+    seedRun(root, "live-running", {
+      items: { "138": { status: "running", workerId: 1, pid: 5555 } },
+    }, "2026-06-27T15:18:01Z");
+
+    const r = resolveActiveRun(root, {
+      isRalphPidAlive: (pid, opts) => isRalphPidAlive(pid, {
+        ...opts,
+        spawnSyncFn: () => ({
+          status: 0,
+          stdout: `${root}/.ralph/ralph.sh --run-id 20260627-145715-6c5f07a8\n`,
+        }),
+      }),
+    });
+    assert.equal(r.runId, "live-running");
+    assert.equal(r.isActive, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("resolveActiveRun — tolerates corrupt status.json", () => {
