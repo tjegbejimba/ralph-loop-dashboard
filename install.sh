@@ -265,20 +265,46 @@ install_scripts() {
     fi
   fi
 
-  mkdir -p "$ralph_dir/lib"
-  cp "$REPO_DIR/ralph/ralph.sh" "$ralph_dir/ralph.sh"
-  cp "$REPO_DIR/ralph/launch.sh" "$ralph_dir/launch.sh"
-  cp "$REPO_DIR/ralph/lib/state.sh" "$ralph_dir/lib/state.sh"
-  cp "$REPO_DIR/ralph/lib/labels.sh" "$ralph_dir/lib/labels.sh"
-  cp "$REPO_DIR/ralph/lib/status.sh" "$ralph_dir/lib/status.sh"
-  cp "$REPO_DIR/ralph/lib/pr-merge.sh" "$ralph_dir/lib/pr-merge.sh"
-  cp "$REPO_DIR/ralph/lib/preflight.sh" "$ralph_dir/lib/preflight.sh"
-  cp "$REPO_DIR/ralph/lib/resume.sh" "$ralph_dir/lib/resume.sh"
-  cp "$REPO_DIR/ralph/lib/copilot-session.sh" "$ralph_dir/lib/copilot-session.sh"
-  cp "$REPO_DIR/ralph/lib/terminal-cli.sh" "$ralph_dir/lib/terminal-cli.sh"
-  rm -rf "$ralph_dir/profiles"
-  cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
-  chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
+  # Detect self-hosting: when installing Ralph source into itself, symlink the
+  # executable surface to the tracked sources instead of copying (ADR 0004
+  # decision 2). Then source ≡ installed by construction and the stale guard
+  # can never trip in the dogfooding repo. Foreign repos keep the `cp` vendoring.
+  local target_resolved
+  target_resolved="$(cd "$target" && pwd -P)"
+  local repo_resolved
+  repo_resolved="$(cd "$REPO_DIR" && pwd -P)"
+  
+  if [[ "$target_resolved" -ef "$repo_resolved" ]]; then
+    # Self-hosting: symlink executables, keep config/prompt/runtime as real files
+    echo "🔗 Self-hosting checkout detected — symlinking executables to source..."
+    mkdir -p "$ralph_dir"
+    
+    # Remove existing files/symlinks to ensure clean symlink creation
+    rm -f "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
+    rm -rf "$ralph_dir/lib" "$ralph_dir/profiles"
+    
+    # Symlink executable surface
+    ln -s "../ralph/ralph.sh" "$ralph_dir/ralph.sh"
+    ln -s "../ralph/launch.sh" "$ralph_dir/launch.sh"
+    ln -s "../ralph/lib" "$ralph_dir/lib"
+    ln -s "../ralph/profiles" "$ralph_dir/profiles"
+  else
+    # Foreign target: copy executables as before
+    mkdir -p "$ralph_dir/lib"
+    cp "$REPO_DIR/ralph/ralph.sh" "$ralph_dir/ralph.sh"
+    cp "$REPO_DIR/ralph/launch.sh" "$ralph_dir/launch.sh"
+    cp "$REPO_DIR/ralph/lib/state.sh" "$ralph_dir/lib/state.sh"
+    cp "$REPO_DIR/ralph/lib/labels.sh" "$ralph_dir/lib/labels.sh"
+    cp "$REPO_DIR/ralph/lib/status.sh" "$ralph_dir/lib/status.sh"
+    cp "$REPO_DIR/ralph/lib/pr-merge.sh" "$ralph_dir/lib/pr-merge.sh"
+    cp "$REPO_DIR/ralph/lib/preflight.sh" "$ralph_dir/lib/preflight.sh"
+    cp "$REPO_DIR/ralph/lib/resume.sh" "$ralph_dir/lib/resume.sh"
+    cp "$REPO_DIR/ralph/lib/copilot-session.sh" "$ralph_dir/lib/copilot-session.sh"
+    cp "$REPO_DIR/ralph/lib/terminal-cli.sh" "$ralph_dir/lib/terminal-cli.sh"
+    rm -rf "$ralph_dir/profiles"
+    cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
+    chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
+  fi
   install_config "$target"
   install_agent_instructions "$target"
 
