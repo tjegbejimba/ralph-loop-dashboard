@@ -20,11 +20,11 @@ const PRIORITY_RANK = new Map([
 ]);
 const STATE_ORDER = [
   "ralph:running",
+  "ralph:blocked",
+  "ralph:hitl",
   "ralph:ready",
   "ralph:fast-lane",
   "ralph:evaluated",
-  "ralph:blocked",
-  "ralph:hitl",
   "ralph:needs-triage",
 ];
 

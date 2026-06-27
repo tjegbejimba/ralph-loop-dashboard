@@ -272,3 +272,41 @@ test("parse blockers from issue body", () => {
   assert.equal(result.deferred[0].blockers.length, 1);
   assert.equal(result.deferred[0].blockers[0], 5);
 });
+
+// Test: blocked/hitl overrides ready (label conflict handling)
+test("blocked and hitl labels override ready state", () => {
+  const issues = [
+    {
+      number: 1,
+      title: "Blocked but also labeled ready",
+      url: "https://github.com/test/repo/issues/1",
+      labels: [{ name: "ralph:ready" }, { name: "ralph:blocked" }, { name: "work:slice" }],
+      createdAt: "2026-06-26T10:00:00Z",
+      assignees: [],
+      body: "",
+    },
+    {
+      number: 2,
+      title: "HITL but also labeled ready",
+      url: "https://github.com/test/repo/issues/2",
+      labels: [{ name: "ralph:ready" }, { name: "ralph:hitl" }, { name: "work:slice" }],
+      createdAt: "2026-06-26T09:00:00Z",
+      assignees: [],
+      body: "",
+    },
+  ];
+  
+  const result = computePipelineState({ issues, claims: {}, openPrs: [] });
+  
+  // Both should be in held, NOT in ready or nextQueue
+  assert.equal(result.held.length, 2);
+  assert.equal(result.ready.length, 0);
+  assert.equal(result.nextQueue.length, 0);
+  
+  const blocked = result.held.find((h) => h.number === 1);
+  const hitl = result.held.find((h) => h.number === 2);
+  assert.ok(blocked);
+  assert.ok(hitl);
+  assert.equal(blocked.kind, "blocked");
+  assert.equal(hitl.kind, "hitl");
+});

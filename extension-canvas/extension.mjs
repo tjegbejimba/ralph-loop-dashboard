@@ -133,11 +133,24 @@ async function pipelineStateJson(repoRoot) {
       return { error: { kind: "other", message: "Could not determine repo slug from git remote" }, repoRoot };
     }
 
-    const [openIssues, closedIssues, openPrs] = await Promise.all([
+    let openPrs = [];
+    const [openIssues, closedIssues] = await Promise.all([
       ghJson(["issue", "list", "--repo", slug, "--state", "open", "--limit", "200", "--json", "number,title,labels,assignees,body,url,createdAt,updatedAt"]),
       ghJson(["issue", "list", "--repo", slug, "--state", "closed", "--limit", "40", "--json", "number,title,labels,url,closedAt"]),
-      ghJson(["pr", "list", "--repo", slug, "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,closingIssuesReferences"]).catch(() => []),
     ]);
+    
+    try {
+      openPrs = await ghJson(["pr", "list", "--repo", slug, "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,closingIssuesReferences"]);
+    } catch (prErr) {
+      // PR fetch failure: fail closed by keeping openPrs empty and flagging in response
+      // This prevents issues with open PRs from incorrectly appearing in next-run
+      return {
+        error: { kind: "pr-fetch-failed", message: "Could not fetch PRs: " + (prErr.message || prErr) },
+        repoSlug: slug,
+        repoRoot,
+        generatedAt: new Date().toISOString(),
+      };
+    }
 
     const claims = (await readJsonSafe(join(repoRoot, ".ralph", "state.json")))?.claims || {};
     const ledger = await readJsonSafe(join(repoRoot, ".ralph", "orchestrator", "ledger.json"));
