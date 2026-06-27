@@ -31,7 +31,7 @@ import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 
 import { orchestrateRun as orchestrateRalphRun, resolveOrchestrateRepoRoot } from "./loop-launch-controller.mjs";
-import { resolveActiveRun } from "./status-data.mjs";
+import { isRalphPidAlive, resolveActiveRun } from "./status-data.mjs";
 import { queryIssues } from "./issue-query.mjs";
 import { classifyIssue, priorityRankFromShort, RALPH_STATES, CANONICAL_LABELS } from "./label-taxonomy.mjs";
 
@@ -134,12 +134,21 @@ function defaultListLabels(slug) {
 // (canonical for live workers). These feed both active-run detection and
 // discovery so a locally-claimed issue is never re-queued before its run's
 // status.json catches up.
-function defaultReadLocalClaims(repoRoot) {
+function defaultReadLocalClaims(repoRoot, { isRalphPidAliveFn = isRalphPidAlive } = {}) {
   try {
     const parsed = JSON.parse(readFileSync(join(repoRoot, ".ralph", "state.json"), "utf8"));
     const claims = parsed?.claims && typeof parsed.claims === "object" ? parsed.claims : {};
-    return Object.keys(claims)
-      .map((key) => Number(key))
+    return Object.entries(claims)
+      .filter(([, claim]) => {
+        const pid = Number(claim?.pid);
+        if (!Number.isInteger(pid) || pid <= 0) return false;
+        try {
+          return isRalphPidAliveFn(pid, { repoRoot, claim });
+        } catch {
+          return false;
+        }
+      })
+      .map(([key]) => Number(key))
       .filter((n) => Number.isFinite(n));
   } catch {
     return [];
@@ -389,6 +398,7 @@ export async function runOrchestrateRepo(options = {}) {
     resolveActiveRunFn = resolveActiveRun,
     resolveRepoRootFn = resolveOrchestrateRepoRoot,
     readLocalClaimsFn = defaultReadLocalClaims,
+    isRalphPidAliveFn = isRalphPidAlive,
     listLabels = defaultListLabels,
     execIssueList, // execCommand for queryIssues (returns gh stdout JSON string)
     queryIssuesFn = queryIssues,
@@ -495,7 +505,7 @@ export async function runOrchestrateRepo(options = {}) {
   // so a locally-claimed Ralph duplicate is deferred/skipped, never re-queued.
   let localClaims = [];
   try {
-    localClaims = readLocalClaimsFn(repoRoot) || [];
+    localClaims = readLocalClaimsFn(repoRoot, { isRalphPidAliveFn }) || [];
   } catch {
     localClaims = [];
   }
@@ -503,7 +513,7 @@ export async function runOrchestrateRepo(options = {}) {
   // Step 4: concurrency — one active run per repo. Defer if a run is live.
   let activeRun = null;
   try {
-    activeRun = resolveActiveRunFn(repoRoot, { liveIssues: localClaims });
+    activeRun = resolveActiveRunFn(repoRoot, { liveIssues: localClaims, isRalphPidAlive: isRalphPidAliveFn });
   } catch {
     activeRun = null;
   }

@@ -15,6 +15,7 @@ import {
   resolveRepoSlug,
 } from "../extension/lib/orchestrate-repo.mjs";
 import { RALPH_STATES, PRIORITIES, WORK_TYPES } from "../extension/lib/label-taxonomy.mjs";
+import { resolveActiveRun } from "../extension/lib/status-data.mjs";
 
 const FIXED_NOW = () => new Date("2026-06-12T12:00:00.000Z");
 
@@ -264,6 +265,63 @@ test("active run → defer (exit 0, no launch), recorded in ledger", async () =>
     assert.equal(ledger.concurrency.deferred, true);
     assert.equal(ledger.mode, "repo-maintain");
     assert.equal(ledger.target.repo, "octo/alisterr");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stale local run evidence without live Ralph process → launch next repo-maintain queue", async () => {
+  const root = makeRepo();
+  let receivedArgs = null;
+  try {
+    mkdirSync(join(root, ".ralph", "runs", "20260627-145715-6c5f07a8"), { recursive: true });
+    writeFileSync(join(root, ".ralph", "state.json"), JSON.stringify({
+      claims: {
+        "138": {
+          workerId: 1,
+          pid: 424242,
+          startedAt: "2026-06-27T15:18:01Z",
+          logFile: "iter-20260627-081801-w1-issue-138.log",
+        },
+      },
+    }));
+    writeFileSync(
+      join(root, ".ralph", "runs", "20260627-145715-6c5f07a8", "status.json"),
+      JSON.stringify({
+        items: {
+          "138": {
+            status: "running",
+            workerId: 1,
+            pid: 424242,
+            logFile: "iter-20260627-081801-w1-issue-138.log",
+            startedAt: "2026-06-27T15:18:01Z",
+          },
+        },
+      }),
+    );
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      trustedRepoRoot: root,
+      ...baseDeps({
+        isRalphPidAliveFn: () => false,
+        resolveActiveRunFn: resolveActiveRun,
+        execIssueList: ghIssueList([readyIssue(7)]),
+        orchestrateRunFn: async (args) => {
+          receivedArgs = args;
+          return {
+            ok: true,
+            runId: "run-after-stale",
+            runDir: join(root, ".ralph", "runs", "run-after-stale"),
+            queue: [{ number: 7 }],
+          };
+        },
+      }),
+    });
+
+    assert.equal(result.outcome, "launched");
+    assert.equal(result.concurrency.activeRunDetected, false);
+    assert.deepEqual(receivedArgs.issueNumbers, [7]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

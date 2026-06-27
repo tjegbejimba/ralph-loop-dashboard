@@ -7,7 +7,12 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { resolveActiveRun, createStatusReader } from "../extension/lib/status-data.mjs";
+import {
+  commandLooksRalphRelated,
+  createStatusReader,
+  isRalphPidAlive,
+  resolveActiveRun,
+} from "../extension/lib/status-data.mjs";
 
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), "ralph-active-run-"));
@@ -37,7 +42,7 @@ test("resolveActiveRun — null when no runs/ dir", () => {
   }
 });
 
-test("resolveActiveRun — picks the run with non-terminal items, even when older", () => {
+test("resolveActiveRun — picks the run with live worker pid evidence, even when older", () => {
   const root = makeFixture();
   try {
     // Newer mtime, but all terminal:
@@ -46,12 +51,35 @@ test("resolveActiveRun — picks the run with non-terminal items, even when olde
     }, "2026-05-26T18:00:00Z");
     // Older mtime, but has a running item:
     seedRun(root, "older-active", {
-      items: { "3": { status: "running", workerId: 1 } },
+      items: { "3": { status: "running", workerId: 1, pid: 4242 } },
     }, "2026-05-26T17:00:00Z");
 
-    const r = resolveActiveRun(root);
+    const r = resolveActiveRun(root, { isRalphPidAlive: (pid) => pid === 4242 });
     assert.equal(r.runId, "older-active");
     assert.equal(r.isActive, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveActiveRun — stale non-terminal status without live local evidence is not active", () => {
+  const root = makeFixture();
+  try {
+    seedRun(root, "stale-running", {
+      items: {
+        "138": {
+          status: "running",
+          workerId: 1,
+          pid: 67519,
+          logFile: "iter-20260627-081801-w1-issue-138.log",
+          startedAt: "2026-06-27T15:18:01Z",
+        },
+      },
+    }, "2026-06-27T15:18:01Z");
+
+    const r = resolveActiveRun(root, { isRalphPidAlive: () => false });
+    assert.equal(r.runId, "stale-running");
+    assert.equal(r.isActive, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -70,7 +98,7 @@ test("resolveActiveRun — mtime tiebreak when no run is active", () => {
   }
 });
 
-test("resolveActiveRun — treats claimed and queued as non-terminal", () => {
+test("resolveActiveRun — queued-only status without live evidence is inactive", () => {
   const root = makeFixture();
   try {
     seedRun(root, "terminal", {
@@ -81,10 +109,39 @@ test("resolveActiveRun — treats claimed and queued as non-terminal", () => {
     }, "2026-05-26T17:00:00Z");
     const r = resolveActiveRun(root);
     assert.equal(r.runId, "queued-only");
+    assert.equal(r.isActive, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resolveActiveRun — claimed status with live Ralph worker pid is active", () => {
+  const root = makeFixture();
+  try {
+    seedRun(root, "claimed-live", {
+      items: { "3": { status: "claimed", workerId: 1, pid: 4321 } },
+    }, "2026-05-26T17:00:00Z");
+
+    const r = resolveActiveRun(root, { isRalphPidAlive: (pid) => pid === 4321 });
+    assert.equal(r.runId, "claimed-live");
     assert.equal(r.isActive, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("isRalphPidAlive — requires a Ralph-related command line, not just an existing PID", () => {
+  assert.equal(commandLooksRalphRelated("/repo/.ralph/ralph.sh --run-id x"), true);
+  assert.equal(commandLooksRalphRelated("/repo/.ralph/launch.sh --foreground"), true);
+  assert.equal(commandLooksRalphRelated("copilot -p prompt.md"), true);
+  assert.equal(commandLooksRalphRelated("/bin/sleep 120"), false);
+
+  assert.equal(isRalphPidAlive(1234, {
+    spawnSyncFn: () => ({ status: 0, stdout: "/bin/sleep 120\n" }),
+  }), false);
+  assert.equal(isRalphPidAlive(1234, {
+    spawnSyncFn: () => ({ status: 0, stdout: "/repo/.ralph/ralph.sh --run-id x\n" }),
+  }), true);
 });
 
 test("resolveActiveRun — tolerates corrupt status.json", () => {
@@ -122,6 +179,31 @@ test("resolveActiveRun — prefers run containing live claims over non-terminal 
   }
 });
 
+test("resolveActiveRun — live state.json claim keeps its matching run active", () => {
+  const root = makeFixture();
+  try {
+    writeFileSync(join(root, ".ralph", "state.json"), JSON.stringify({
+      claims: {
+        "42": {
+          workerId: 1,
+          pid: 4444,
+          startedAt: "2026-05-26T17:00:00Z",
+          logFile: "iter-20260526-170000-w1-issue-42.log",
+        },
+      },
+    }));
+    seedRun(root, "terminal-but-claimed", {
+      items: { "42": { status: "merged" } },
+    }, "2026-05-26T17:00:00Z");
+
+    const r = resolveActiveRun(root, { isRalphPidAlive: (pid) => pid === 4444 });
+    assert.equal(r.runId, "terminal-but-claimed");
+    assert.equal(r.isActive, true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("createStatusReader.buildLocalPayload — assembles workers + activeRun + tail", () => {
   const root = makeFixture();
   try {
@@ -130,7 +212,7 @@ test("createStatusReader.buildLocalPayload — assembles workers + activeRun + t
       claims: {
         "42": {
           workerId: 1,
-          pid: 1, // pid 1 is always alive on POSIX (init)
+          pid: 1234,
           startedAt: new Date().toISOString(),
           logFile: "iter-20260526-180000-w1-issue-42.log",
         },
@@ -148,7 +230,7 @@ test("createStatusReader.buildLocalPayload — assembles workers + activeRun + t
       items: { "42": { status: "running", workerId: 1 } },
     }, new Date().toISOString());
 
-    const reader = createStatusReader({ repoRoot: root });
+    const reader = createStatusReader({ repoRoot: root, isRalphPidAlive: (pid) => pid === 1234 });
     const payload = reader.buildLocalPayload();
 
     assert.equal(payload.workers.length, 1);
@@ -157,6 +239,33 @@ test("createStatusReader.buildLocalPayload — assembles workers + activeRun + t
     assert.equal(payload.activeRun.runId, "run-1");
     assert.equal(payload.activeRun.isActive, true);
     assert.match(payload.loopOutTail, /line c/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("createStatusReader.buildLocalPayload — stale state claim does not keep activeRun active", () => {
+  const root = makeFixture();
+  try {
+    writeFileSync(join(root, ".ralph", "state.json"), JSON.stringify({
+      claims: {
+        "42": {
+          workerId: 1,
+          pid: 999999,
+          startedAt: "2026-05-26T18:00:00Z",
+          logFile: "iter-20260526-180000-w1-issue-42.log",
+        },
+      },
+    }));
+    seedRun(root, "stale-run", {
+      items: { "42": { status: "running", workerId: 1, pid: 999999 } },
+    }, "2026-05-26T18:00:00Z");
+
+    const reader = createStatusReader({ repoRoot: root, isRalphPidAlive: () => false });
+    const payload = reader.buildLocalPayload();
+
+    assert.equal(payload.activeRun.runId, "stale-run");
+    assert.equal(payload.activeRun.isActive, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

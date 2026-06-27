@@ -5,7 +5,7 @@
 // MUST NOT import @github/copilot-sdk/extension or anything that joins a
 // Copilot session at import time — cli.mjs runs outside Copilot sessions.
 
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -136,15 +136,71 @@ export function detectReviewStats(logBody) {
   return { gpt, opus, total: gpt + opus };
 }
 
+const NON_TERMINAL_RUN_STATUSES = new Set(["running", "claimed", "queued"]);
+
+export function commandLooksRalphRelated(command) {
+  const cmd = String(command || "");
+  return /\bralph\.sh\b|\blaunch\.sh\b|\bcopilot\b/.test(cmd);
+}
+
+export function isRalphPidAlive(pid, { spawnSyncFn = spawnSync, platform = process.platform, isAliveFn = isAlive } = {}) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return false;
+  if (platform === "win32") return isAliveFn(n);
+  try {
+    const result = spawnSyncFn("ps", ["-p", String(n), "-o", "command="], {
+      encoding: "utf8",
+      maxBuffer: 64 * 1024,
+      timeout: 1000,
+    });
+    if (result.error || result.status !== 0) return false;
+    return commandLooksRalphRelated(result.stdout);
+  } catch {
+    return false;
+  }
+}
+
+function readStateClaims(repoRoot) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(repoRoot, ".ralph", "state.json"), "utf8"));
+    const claims = parsed?.claims && typeof parsed.claims === "object" ? parsed.claims : {};
+    return Object.entries(claims).map(([issue, claim]) => ({
+      issue: Number(issue),
+      workerId: Number.isFinite(Number(claim?.workerId)) ? Number(claim.workerId) : null,
+      pid: Number.isFinite(Number(claim?.pid)) ? Number(claim.pid) : null,
+      startedAt: typeof claim?.startedAt === "string" ? claim.startedAt : null,
+      logFile: typeof claim?.logFile === "string" ? claim.logFile : null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function addLiveClaimIssues(liveIssues, claims, isRalphPidAliveFn, repoRoot) {
+  if (!Array.isArray(claims)) return;
+  for (const claim of claims) {
+    const issue = Number(typeof claim === "number" ? claim : claim?.issue);
+    const pid = Number(claim?.pid);
+    if (!Number.isFinite(issue) || !Number.isInteger(pid) || pid <= 0) continue;
+    try {
+      if (isRalphPidAliveFn(pid, { repoRoot, issue, claim })) {
+        liveIssues.add(issue);
+      }
+    } catch {
+      // Treat liveness probe errors as no live evidence.
+    }
+  }
+}
+
 // Resolve the "active run" inside .ralph/runs/. Prefers (in order):
 //   1. A run whose status.json items overlap with the issues currently
-//      claimed in state.json — state.json is canonical for live workers,
-//      so if a worker is actively running an issue and that issue appears
-//      in run X's status.json, run X is the active one even if its
-//      status items have all been marked terminal (lifecycle lag).
-//   2. A run whose status.json contains any non-terminal item
-//      (running/claimed/queued).
-//   3. Newest mtime as final tiebreak.
+//      live-claimed in state.json. A claim is live only when its PID still
+//      looks Ralph-related, matching ralph/lib/state.sh's stale-claim guard.
+//   2. A run whose status.json contains a non-terminal item
+//      (running/claimed/queued) with a live Ralph-related worker PID.
+//   3. A stale non-terminal run for cleanup visibility, then newest mtime as
+//      final tiebreak. Stale non-terminal status alone does not make a run
+//      active.
 // Returns { runId, runDir, statusFile, statusData, isActive } or null.
 export function resolveActiveRun(repoRoot, opts = {}) {
   const runsDir = join(repoRoot, ".ralph", "runs");
@@ -153,6 +209,12 @@ export function resolveActiveRun(repoRoot, opts = {}) {
   // Caller may pass currently-claimed issue numbers (typically derived from
   // state.json) so we can prefer the run that owns those live claims.
   const liveIssues = new Set((opts.liveIssues || []).map(Number));
+  const isRalphPidAliveFn =
+    typeof opts.isRalphPidAlive === "function" ? opts.isRalphPidAlive : isRalphPidAlive;
+  addLiveClaimIssues(liveIssues, opts.liveClaims, isRalphPidAliveFn, repoRoot);
+  if (opts.readStateClaims !== false) {
+    addLiveClaimIssues(liveIssues, readStateClaims(repoRoot), isRalphPidAliveFn, repoRoot);
+  }
 
   let entries;
   try {
@@ -173,16 +235,35 @@ export function resolveActiveRun(repoRoot, opts = {}) {
         } catch {}
         const items = statusData?.items || {};
         let hasNonTerminal = false;
+        let hasLiveWorkerPid = false;
         let containsLiveClaim = false;
         for (const [issueKey, v] of Object.entries(items)) {
-          if (v && (v.status === "running" || v.status === "claimed" || v.status === "queued")) {
+          if (v && NON_TERMINAL_RUN_STATUSES.has(v.status)) {
             hasNonTerminal = true;
+            const pid = Number(v.pid);
+            if (Number.isInteger(pid) && pid > 0 && isRalphPidAliveFn(pid, {
+              repoRoot,
+              runId: e.name,
+              issue: Number(issueKey),
+              item: v,
+            })) {
+              hasLiveWorkerPid = true;
+            }
           }
           if (liveIssues.has(Number(issueKey))) {
             containsLiveClaim = true;
           }
         }
-        return { runId: e.name, runDir, statusFile, mtime, hasNonTerminal, containsLiveClaim, statusData };
+        return {
+          runId: e.name,
+          runDir,
+          statusFile,
+          mtime,
+          hasNonTerminal,
+          hasLiveWorkerPid,
+          containsLiveClaim,
+          statusData,
+        };
       });
   } catch {
     return null;
@@ -191,6 +272,7 @@ export function resolveActiveRun(repoRoot, opts = {}) {
 
   entries.sort((a, b) => {
     if (a.containsLiveClaim !== b.containsLiveClaim) return a.containsLiveClaim ? -1 : 1;
+    if (a.hasLiveWorkerPid !== b.hasLiveWorkerPid) return a.hasLiveWorkerPid ? -1 : 1;
     if (a.hasNonTerminal !== b.hasNonTerminal) return a.hasNonTerminal ? -1 : 1;
     return b.mtime - a.mtime;
   });
@@ -200,11 +282,16 @@ export function resolveActiveRun(repoRoot, opts = {}) {
     runDir: chosen.runDir,
     statusFile: chosen.statusFile,
     statusData: chosen.statusData,
-    isActive: chosen.containsLiveClaim || chosen.hasNonTerminal,
+    isActive: chosen.containsLiveClaim || chosen.hasLiveWorkerPid,
   };
 }
 
-export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" } = {}) {
+export function createStatusReader({
+  repoRoot,
+  env = process.env,
+  ghBin = "gh",
+  isRalphPidAlive: isRalphPidAliveFn = isRalphPidAlive,
+} = {}) {
   const LOGS_DIR = join(repoRoot, ".ralph", "logs");
   const STATE_FILE = join(repoRoot, ".ralph", "state.json");
   const CONFIG_FILE = join(repoRoot, ".ralph", "config.json");
@@ -619,8 +706,10 @@ export function createStatusReader({ repoRoot, env = process.env, ghBin = "gh" }
     }));
     // Pass live issue numbers from state.json claims so resolveActiveRun
     // can prefer the run that owns the currently-running work.
-    const liveIssues = iterations.map((it) => it.issue).filter((n) => Number.isFinite(n));
-    const activeRun = resolveActiveRun(repoRoot, { liveIssues });
+    const liveClaims = iterations
+      .map((it) => ({ issue: it.issue, pid: it.pid, workerId: it.workerId, logFile: it.logFile }))
+      .filter((claim) => Number.isFinite(claim.issue));
+    const activeRun = resolveActiveRun(repoRoot, { liveClaims, isRalphPidAlive: isRalphPidAliveFn });
     return {
       timestamp: new Date().toISOString(),
       repoRoot,
