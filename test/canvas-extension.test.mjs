@@ -20,8 +20,11 @@ describe("canvas extension", () => {
     
     const html = pageHtml();
     assert.ok(html.includes("<!doctype html>"), "should return HTML document");
-    assert.ok(html.includes("Ralph Loop"), "should contain Ralph Loop title");
+    assert.ok(html.includes("Ralph Dashboard"), "should contain Ralph Dashboard title");
+    assert.ok(html.includes("Loop"), "should contain Loop tab");
+    assert.ok(html.includes("Pipeline"), "should contain Pipeline tab");
     assert.ok(html.includes("/status"), "should fetch from /status endpoint");
+    assert.ok(html.includes("/pipeline-state"), "should fetch from /pipeline-state endpoint");
   });
 
   test("server serves status JSON for a repo with .ralph/", async () => {
