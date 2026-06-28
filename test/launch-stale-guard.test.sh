@@ -93,8 +93,8 @@ else
   exit 1
 fi
 
-# Test 2: Different content should trip guard
-echo "Test 2: different content → guard blocks"
+# Test 2: Different content should warn but not block (guard is warn-only)
+echo "Test 2: different content → guard warns but does not block"
 repo2=$(make_repo stale2)
 cd "$repo2"
 
@@ -133,12 +133,19 @@ if [[ "$src_mtime" -le "$ins_mtime" ]]; then
   exit 1
 fi
 
-# Launch should fail due to content divergence
-if RALPH_MAIN_REPO="$repo2" RALPH_LOOP_REPO="$repo2-loop" .ralph/launch.sh --once >/dev/null 2>&1; then
-  echo "❌ Test 2 failed: guard did not block on different content" >&2
-  exit 1
+# Launch should succeed but emit warning due to content divergence
+output=$(RALPH_MAIN_REPO="$repo2" RALPH_LOOP_REPO="$repo2-loop" .ralph/launch.sh --once 2>&1)
+exit_code=$?
+if [[ $exit_code -eq 0 ]]; then
+  if echo "$output" | grep -q "scripts may be stale"; then
+    echo "✅ Test 2 passed: different content triggers warning but not block"
+  else
+    echo "❌ Test 2 failed: guard did not warn on different content" >&2
+    exit 1
+  fi
 else
-  echo "✅ Test 2 passed: different content triggers guard"
+  echo "❌ Test 2 failed: guard blocked on different content (should warn only, exit $exit_code)" >&2
+  exit 1
 fi
 
 # Test 3: Force flag should bypass guard even with different content

@@ -22,6 +22,7 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 Usage: ./install.sh <target-repo-dir> [OPTIONS]
+       ./install.sh <target-repo-dir> --check
        ./install.sh --skills-only
        ./install.sh --help
 
@@ -31,6 +32,9 @@ Modes (default: --both):
   --extension-only  Install only the dashboard extension into ~/.copilot/extensions/
   --skills-only     Symlink bundled agent skills into ~/.agents/skills/
                     No target repo is required for this mode.
+  --check           Verify installed .ralph/* scripts match ralph/* source by content.
+                    Exits 0 if content matches, non-zero if diverged (reports files).
+                    Read-only; used by CI drift gate.
 
 Options:
   --profile <name>  Use a specific config profile (bun | python | generic).
@@ -82,7 +86,7 @@ fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --both|--extension-only|--scripts-only)
+    --both|--extension-only|--scripts-only|--check)
       MODE="$1"
       shift
       ;;
@@ -110,6 +114,72 @@ while [[ $# -gt 0 ]]; do
 done
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+
+# --check mode: verify installed scripts match source by content.
+if [[ "$MODE" == "--check" ]]; then
+  if [[ ! -d "$TARGET" ]]; then
+    echo "❌ Target repo not found: $TARGET" >&2
+    exit 1
+  fi
+  
+  ralph_src="$REPO_DIR/ralph"
+  ralph_dst="$TARGET/.ralph"
+  
+  if [[ ! -d "$ralph_dst" ]]; then
+    echo "❌ No .ralph/ directory found in $TARGET" >&2
+    exit 1
+  fi
+  
+  # Files to check: ralph.sh, launch.sh, lib/*, profiles/* (not config.json, RALPH.md)
+  drift_found=0
+  
+  for file in ralph.sh launch.sh; do
+    if [[ ! -f "$ralph_src/$file" ]]; then
+      continue
+    fi
+    if [[ ! -f "$ralph_dst/$file" ]]; then
+      echo "❌ Missing in installed copy: $file" >&2
+      drift_found=1
+      continue
+    fi
+    if ! cmp -s "$ralph_src/$file" "$ralph_dst/$file"; then
+      echo "❌ Content diverged: $file" >&2
+      drift_found=1
+    fi
+  done
+  
+  for dir in lib profiles; do
+    if [[ ! -d "$ralph_src/$dir" ]]; then
+      continue
+    fi
+    if [[ ! -d "$ralph_dst/$dir" ]]; then
+      echo "❌ Missing directory in installed copy: $dir" >&2
+      drift_found=1
+      continue
+    fi
+    while IFS= read -r -d '' src_file; do
+      rel_path="${src_file#$ralph_src/$dir/}"
+      dst_file="$ralph_dst/$dir/$rel_path"
+      if [[ ! -f "$dst_file" ]]; then
+        echo "❌ Missing in installed copy: $dir/$rel_path" >&2
+        drift_found=1
+        continue
+      fi
+      if ! cmp -s "$src_file" "$dst_file"; then
+        echo "❌ Content diverged: $dir/$rel_path" >&2
+        drift_found=1
+      fi
+    done < <(find "$ralph_src/$dir" -type f -print0)
+  done
+  
+  if [[ $drift_found -eq 0 ]]; then
+    echo "✅ All installed scripts match source"
+    exit 0
+  else
+    echo "❌ Drift detected — run ./install.sh $TARGET --scripts-only to refresh" >&2
+    exit 1
+  fi
+fi
 
 # Target repo validation is only required for modes that touch the repo.
 if [[ "$MODE" != "--skills-only" ]]; then
