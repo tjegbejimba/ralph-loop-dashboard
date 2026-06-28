@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { computePipelineState, discoverFailedRunItems } from "../extension-pipeline/lib/pipeline-state.mjs";
+import { computePipelineErrorState, computePipelineState, discoverFailedRunItems } from "../extension-pipeline/lib/pipeline-state.mjs";
 import { renderHtml } from "../extension-pipeline/renderer.mjs";
 
 function issue(number, labels = []) {
@@ -73,6 +73,56 @@ test("discovers failed run items from recent durable Ralph run state", () => {
     assert.equal(failures[0].logFile, "iter-20260628-095241-w1-issue-139.log");
     assert.equal(failures[0].logFilePath, join(repoRoot, ".ralph", "logs", "iter-20260628-095241-w1-issue-139.log"));
     assert.equal(failures[0].title, "Add install.sh --check content-diff drift gate in CI");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("uses status.json mtime as failedAt when a failed item has only startedAt", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "ralph-pipeline-"));
+  try {
+    const runDir = join(repoRoot, ".ralph", "runs", "20260628-165239-1a6a4003");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, "metadata.json"),
+      JSON.stringify({ repoRoot, runMode: "until-empty", model: "claude-sonnet-4.5", parallelism: 1, createdAt: "2026-06-28T16:52:39.453Z" }),
+    );
+    writeFileSync(
+      join(runDir, "queue.json"),
+      JSON.stringify([{ number: 139, title: "Failure timestamp", url: "https://github.com/tj/repo/issues/139" }]),
+    );
+    const statusPath = join(runDir, "status.json");
+    writeFileSync(
+      statusPath,
+      JSON.stringify({
+        items: {
+          139: {
+            status: "failed",
+            startedAt: "2026-06-28T16:52:41Z",
+            error: "Worker failed after issue metadata changed",
+          },
+        },
+      }),
+    );
+    const persistedFailureTime = new Date("2026-06-28T17:02:41Z");
+    assert.equal(utimesSync(statusPath, persistedFailureTime, persistedFailureTime), undefined);
+
+    const [failure] = discoverFailedRunItems(repoRoot);
+    const state = computePipelineState({
+      repo: { slug: "tj/repo", label: "repo", mainCheckout: repoRoot },
+      openIssues: [
+        {
+          ...issue(139, ["ralph:ready", "priority:P2", "work:standalone"]),
+          updatedAt: "2026-06-28T16:57:41Z",
+        },
+      ],
+      failedRunItems: [failure],
+    });
+
+    assert.equal(failure.startedAt, "2026-06-28T16:52:41Z");
+    assert.match(failure.failedAt, /^2026-06-28T17:02:41/);
+    assert.equal(state.failed.length, 1);
+    assert.equal(state.failed[0].number, 139);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
@@ -189,6 +239,26 @@ test("durable failed run overrides stale ralph:running issue label without dupli
   assert.equal(state.failed[0].number, 139);
   assert.equal(state.failed[0].reason, "Worker process died");
   assert.equal(state.running.length, 0);
+});
+
+test("pipeline error state fails closed when PR data cannot be fetched", () => {
+  const state = computePipelineErrorState({
+    repo: { slug: "tj/repo", label: "repo", mainCheckout: "/repo" },
+    error: { kind: "pr-fetch-failed", message: "Could not fetch PRs: rate limit" },
+  });
+
+  assert.equal(state.error.kind, "pr-fetch-failed");
+  assert.deepEqual(state.nextQueue, []);
+  assert.deepEqual(state.ready, []);
+  assert.equal(state.counts.ready, 0);
+});
+
+test("pipeline extension does not convert PR fetch failures to an empty PR list", () => {
+  const extensionSource = readFileSync(new URL("../extension-pipeline/extension.mjs", import.meta.url), "utf8");
+
+  assert.doesNotMatch(extensionSource, /pr[^\n]*list[\s\S]{0,160}\.catch\(\s*\(\)\s*=>\s*\[\]\s*\)/);
+  assert.match(extensionSource, /pr-fetch-failed/);
+  assert.match(extensionSource, /computePipelineErrorState/);
 });
 
 test("pipeline renderer includes a prominent failed needs-attention lane", () => {

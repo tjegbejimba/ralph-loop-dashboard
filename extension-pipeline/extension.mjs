@@ -10,7 +10,7 @@ import { watch, readFileSync, readdirSync, existsSync, statSync } from "node:fs"
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
-import { computePipelineState, discoverFailedRunItems } from "./lib/pipeline-state.mjs";
+import { computePipelineErrorState, computePipelineState, discoverFailedRunItems } from "./lib/pipeline-state.mjs";
 import { renderHtml } from "./renderer.mjs";
 
 const pexec = promisify(execFile);
@@ -167,13 +167,23 @@ async function computeState(repo) {
   let openPrs = [];
 
   try {
-    [openIssues, closedIssues, openPrs] = await Promise.all([
+    [openIssues, closedIssues] = await Promise.all([
       ghJson(["issue", "list", "--repo", repoSlug, "--state", "open", "--limit", "200", "--json", "number,title,labels,assignees,body,url,createdAt,updatedAt"]),
       ghJson(["issue", "list", "--repo", repoSlug, "--state", "closed", "--limit", "40", "--json", "number,title,labels,url,closedAt,createdAt,updatedAt"]),
-      ghJson(["pr", "list", "--repo", repoSlug, "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,closingIssuesReferences"]).catch(() => []),
     ]);
   } catch (err) {
     error = { kind: err instanceof GhError ? err.kind : "other", message: String(err && err.message ? err.message : err) };
+  }
+
+  if (!error) {
+    try {
+      openPrs = await ghJson(["pr", "list", "--repo", repoSlug, "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,closingIssuesReferences"]);
+    } catch (err) {
+      return computePipelineErrorState({
+        repo,
+        error: { kind: "pr-fetch-failed", message: `Could not fetch PRs: ${String(err && err.message ? err.message : err)}` },
+      });
+    }
   }
 
   const claims = (await readJsonSafe(join(mainCheckout, ".ralph", "state.json")))?.claims || {};

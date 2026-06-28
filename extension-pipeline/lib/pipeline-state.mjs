@@ -104,14 +104,17 @@ export function discoverFailedRunItems(repoRoot, { maxRuns = 20, maxItems = 20 }
     if (!status?.items || typeof status.items !== "object") continue;
 
     let mtimeMs = 0;
+    let statusMtimeMs = 0;
     for (const path of [statusPath, queuePath, metadataPath]) {
       try {
-        mtimeMs = Math.max(mtimeMs, statSync(path).mtimeMs);
+        const fileMtimeMs = statSync(path).mtimeMs;
+        if (path === statusPath) statusMtimeMs = fileMtimeMs;
+        mtimeMs = Math.max(mtimeMs, fileMtimeMs);
       } catch {
         // Missing queue/metadata is tolerated; status.json is the durable signal.
       }
     }
-    runs.push({ runId, runDir, status, queue: Array.isArray(queue) ? queue : [], metadata, mtimeMs });
+    runs.push({ runId, runDir, status, queue: Array.isArray(queue) ? queue : [], metadata, mtimeMs, statusMtimeMs });
   }
 
   return runs
@@ -125,6 +128,12 @@ export function discoverFailedRunItems(repoRoot, { maxRuns = 20, maxItems = 20 }
           const number = Number(issueNumber);
           const queueItem = queueByIssue.get(number) || {};
           const logFile = typeof item.logFile === "string" && item.logFile ? basename(item.logFile) : null;
+          const failedAt =
+            item.failedAt ||
+            (run.statusMtimeMs ? new Date(run.statusMtimeMs).toISOString() : null) ||
+            item.startedAt ||
+            run.metadata.createdAt ||
+            new Date(run.mtimeMs).toISOString();
           return {
             number,
             title: queueItem.title || `Issue #${number}`,
@@ -143,7 +152,7 @@ export function discoverFailedRunItems(repoRoot, { maxRuns = 20, maxItems = 20 }
             logFile,
             logFilePath: logFile ? join(repoRoot, ".ralph", "logs", logFile) : null,
             startedAt: item.startedAt || null,
-            failedAt: item.startedAt || run.metadata.createdAt || new Date(run.mtimeMs).toISOString(),
+            failedAt,
           };
         });
     })
@@ -191,6 +200,37 @@ function shouldSuppressRunFailureForCurrentIssue(failure, currentIssue) {
   if (!failedAt) return true;
   const issueChangedAt = Date.parse(currentIssue.updatedAt || currentIssue.closedAt || currentIssue.createdAt || "") || 0;
   return issueChangedAt > failedAt;
+}
+
+export function computePipelineErrorState({ repo, error, now = Date.now() }) {
+  return {
+    repoSlug: repo?.slug || null,
+    label: repo?.label || null,
+    mainCheckout: repo?.mainCheckout || null,
+    generatedAt: new Date(now).toISOString(),
+    error,
+    failed: [],
+    running: [],
+    ready: [],
+    deferred: [],
+    awaiting: [],
+    held: [],
+    needsTriage: [],
+    recent: [],
+    nextQueue: [],
+    queueCap: QUEUE_CAP,
+    lastTick: null,
+    counts: {
+      failed: 0,
+      running: 0,
+      ready: 0,
+      deferred: 0,
+      awaiting: 0,
+      held: 0,
+      needsTriage: 0,
+      recent: 0,
+    },
+  };
 }
 
 export function computePipelineState({
