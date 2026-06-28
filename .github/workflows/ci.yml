@@ -18,7 +18,13 @@ jobs:
           cache: 'npm'
       
       - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+        run: npm install --no-audit --no-fund
+      
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      
+      - name: Install Ralph scripts into checkout
+        run: ./install.sh . --scripts-only
       
       - name: Lint shell scripts
         run: bash -n ralph/ralph.sh ralph/launch.sh
