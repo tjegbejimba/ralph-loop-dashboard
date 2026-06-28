@@ -386,7 +386,15 @@ print_dirty_tree_warning() {
 install_extension() {
   local user_ext_dir="$HOME/.copilot/extensions"
   mkdir -p "$user_ext_dir"
-  local install_target="$user_ext_dir/ralph-dashboard"
+  install_user_extension "extension" "ralph-dashboard"
+  install_user_extension "extension-pipeline" "ralph-pipeline"
+  echo "   Restart Copilot CLI (or reload extensions) to load refreshed extensions."
+}
+
+install_user_extension() {
+  local source_dir="$1"
+  local extension_name="$2"
+  local install_target="$HOME/.copilot/extensions/$extension_name"
 
   if [[ -L "$install_target" || -d "$install_target" ]]; then
     echo "📦 Refreshing extension at $install_target"
@@ -398,12 +406,11 @@ install_extension() {
   fi
 
   mkdir -p "$install_target"
-  cp -R "$REPO_DIR/extension/." "$install_target/"
+  cp -R "$REPO_DIR/$source_dir/." "$install_target/"
   if [[ -f "$install_target/package.json" ]]; then
     (cd "$install_target" && npm install --no-audit --no-fund)
   fi
   echo "✅ Extension installed: $install_target"
-  echo "   Restart Copilot CLI (or reload extensions) to load it."
 }
 
 install_skills() {

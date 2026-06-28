@@ -36,7 +36,7 @@ cd ralph-loop-dashboard
 This:
 - Copies `ralph/*` → `<your-project>/.ralph/`, with `RALPH.md` rendered from the template using your repo slug
 - Creates `<your-project>/.ralph/config.json` from a profile (`generic`, `bun`, or `python`)
-- Copies `extension/` → `~/.copilot/extensions/ralph-dashboard/` and installs its dependencies (user-level, available in all Copilot CLI sessions)
+- Copies `extension/` → `~/.copilot/extensions/ralph-dashboard/` and `extension-pipeline/` → `~/.copilot/extensions/ralph-pipeline/` (user-level, available in all Copilot CLI sessions)
 
 Restart Copilot CLI afterwards (or `/restart`) so the extension is picked up.
 
@@ -107,7 +107,7 @@ Limitations (these are why WSL2 is still recommended for heavy use):
 
    ```bash
    ./install.sh ~/Code/your-project --scripts-only
-   # or install both repo scripts and the dashboard extension
+   # or install repo scripts plus the dashboard and pipeline extensions
    ./install.sh ~/Code/your-project --both
    ```
 
@@ -194,7 +194,7 @@ The skill is intentionally non-mutating and does not discover live queues by its
 `install.sh` symlinks bundled skills from `skills/` into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
 
 ```bash
-./install.sh /path/to/your/project      # installs scripts + extension + skills
+./install.sh /path/to/your/project      # installs scripts + dashboard/pipeline extensions + skills
 ./install.sh --skills-only              # symlink skills only, no target repo needed
 ```
 
