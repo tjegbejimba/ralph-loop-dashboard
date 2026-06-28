@@ -124,8 +124,9 @@ if ! [[ "$RESUME_MAX" =~ ^[0-9]+$ ]]; then
 fi
 unset _cfg_resume_max
 
-# Opt-in: resume even when an open PR exists for the slice branch. Default
-# off — when humans are reviewing a PR, Ralph should not keep pushing.
+# Escape hatch: force resume even when an open PR exists for the slice branch.
+# Default guarded mode allows Ralph-owned PRs with failing/pending checks to
+# continue, but blocks PRs with human review evidence or unsafe ownership.
 _cfg_resume_open_pr=$(config_get '.worker.resumeOnOpenPR')
 RALPH_RESUME_ON_OPEN_PR=$(normalize_bool "${RALPH_RESUME_ON_OPEN_PR:-${_cfg_resume_open_pr:-}}") || exit 1
 unset _cfg_resume_open_pr
@@ -884,9 +885,10 @@ This is resume attempt ${_iter_resume_attempt} of ${RESUME_MAX}.
 DO NOT re-plan or open a new branch. Instead:
   1. \`git fetch origin && git checkout ${_iter_resume_branch}\`
   2. Inspect existing commits to understand what's done.
-  3. Finish the remaining implementation work.
-  4. Run lints/tests, then push.
-  5. Open a PR (if not already open) and merge once green.
+  3. If a PR already exists and CI is failing or pending, read the check logs, fix the branch, push, and re-watch checks.
+  4. Finish the remaining implementation work.
+  5. Run lints/tests, then push.
+  6. Open a PR (if not already open) and merge once green.
 "
     export RALPH_RESUME=1 RALPH_RESUME_ATTEMPT="$_iter_resume_attempt" RALPH_RESUME_BRANCH="$_iter_resume_branch"
   else
@@ -1083,7 +1085,17 @@ DO NOT re-plan or open a new branch. Instead:
       else
         _open_pr=$(open_pr_for_branch "$REPO" "$_resume_branch" || true)
         if [[ -n "$_open_pr" && "$RALPH_RESUME_ON_OPEN_PR" != "1" ]]; then
-          _resume_reason="open PR #$_open_pr exists on '$_resume_branch' — human review required (set RALPH_RESUME_ON_OPEN_PR=1 to override)"
+          _resume_base_branch="$default_branch"
+          [[ -n "$RELEASE_BRANCH" ]] && _resume_base_branch="$RELEASE_BRANCH"
+          _open_pr_block_reason=$(open_pr_default_resume_block_reason "$REPO" "$_resume_base_branch" "$num" "$_resume_branch" "$_open_pr" || true)
+          if [[ -n "$_open_pr_block_reason" ]]; then
+            _resume_reason="open PR #$_open_pr exists on '$_resume_branch' — $_open_pr_block_reason (set RALPH_RESUME_ON_OPEN_PR=1 to override)"
+          elif [[ "$_next_attempt" -gt "$RESUME_MAX" ]]; then
+            _resume_reason="open PR #$_open_pr has failing/pending checks but resume cap exhausted ($_current_attempt/$RESUME_MAX)"
+          else
+            echo "ℹ️  Open PR #$_open_pr on '$_resume_branch' appears Ralph-owned with failing/pending checks; resuming repair attempt $_next_attempt/$RESUME_MAX." >&2
+            _resume_eligible=1
+          fi
         elif [[ "$_next_attempt" -gt "$RESUME_MAX" ]]; then
           _resume_reason="resume cap exhausted ($_current_attempt/$RESUME_MAX)"
         else
@@ -1123,7 +1135,11 @@ DO NOT re-plan or open a new branch. Instead:
     fi
     if [[ -n "$RUN_ID" ]]; then
       state_lock || true
-      status_mark_failed "$num" "No merged PR found after copilot completed (issue state=$state, stateReason=$state_reason, merged_prs=$merged_count)"
+      _failure_detail="No merged PR found after copilot completed (issue state=$state, stateReason=$state_reason, merged_prs=$merged_count)"
+      if [[ -n "${_resume_reason:-}" ]]; then
+        _failure_detail="$_failure_detail; not resumed: $_resume_reason"
+      fi
+      status_mark_failed "$num" "$_failure_detail"
       state_unlock || true
     fi
     if declare -F ralph_apply_label_transition >/dev/null 2>&1; then

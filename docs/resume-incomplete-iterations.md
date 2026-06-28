@@ -19,7 +19,10 @@ checks:
 2. That branch is ahead of the default branch (has new commits).
 3. The branch's HEAD commit was authored after this iteration started
    (rules out stale branches from prior runs).
-4. No open PR exists for the branch (humans should review open PRs).
+4. If an open PR exists for the branch, it is Ralph-owned and still needs
+   repair: same repo/head branch, expected base branch, closes this issue
+   through PR linkage or closing body text, no draft/approved/commented/
+   changes-requested review state, and at least one failing or pending check.
 5. The per-issue resume counter has not exceeded `RALPH_RESUME_MAX`.
 
 If all five hold, the worker:
@@ -68,8 +71,8 @@ Env vars (override config keys):
 
 Set `RALPH_RESUME_MAX=0` to disable resume entirely (old halt
 behaviour). Set `RALPH_RESUME_ON_OPEN_PR=1` to resume even when a PR is
-already open on the slice branch (useful if you want Ralph to keep
-pushing after a stalled review).
+already open on the slice branch without the default safety guards
+(useful only for operator-directed recovery).
 
 ## What this does NOT do
 

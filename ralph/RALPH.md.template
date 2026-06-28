@@ -30,7 +30,7 @@ You are running headless inside an automation loop with **no human at the keyboa
    git fetch origin && git checkout "$RALPH_RESUME_BRANCH"
    git log --oneline -10
    ```
-   Inspect existing commits to understand what's done, finish the remaining work, run validation, push, and merge.
+   Inspect existing commits to understand what's done. If a PR already exists and CI is failing or pending, read the failing check logs, fix the branch, push, and re-watch checks before merging. Finish the remaining work, run validation, push, and merge.
 
 ## Workflow (TDD — strict)
 
