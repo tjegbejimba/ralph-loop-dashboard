@@ -6,15 +6,13 @@
 #      is_sensitive_path, format_resume_log, any_sensitive_in_porcelain).
 #   2. Git/gh probes: resume_branch_for_issue, resume_branch_ahead_of_base,
 #      resume_branch_head_after, open_pr_for_branch.
-#   3. state_set_resume_attempt / state_get_resume_attempt persistence.
-#   4. Preflight dirty-tree rescue: happy path (commit + push + checkout
+#   3. Open-PR resume safety: Ralph-owned PRs with failing/pending checks
+#      resume by default; human review/change-request evidence halts.
+#   4. state_set_resume_attempt / state_get_resume_attempt persistence.
+#   5. Preflight dirty-tree rescue: happy path (commit + push + checkout
 #      worker branch), sensitive-file refusal, worker-branch halt.
-#   5. The critical sync-doesn't-orphan regression — after rescue, the
+#   6. The critical sync-doesn't-orphan regression — after rescue, the
 #      WIP commit survives sync_to_origin_main.
-#   6. In-process resume control flow with stubbed gh + copilot: orphaned
-#      slice branch triggers resume; open PR halts instead of resuming;
-#      cap exhaustion marks status failed; status stays "running" between
-#      resume attempts.
 
 set -euo pipefail
 
@@ -209,9 +207,262 @@ cd "$SCRIPT_DIR/.."
 
 echo ""
 # ===========================================================================
-# Group 3 — state_set/get_resume_attempt
+# Group 3 — Open-PR resume safety
 # ===========================================================================
-echo "=== Group 3: state resume helpers ==="
+echo "=== Group 3: Open-PR resume safety ==="
+
+make_resume_pr_gh_stub() {
+  local bindir="$1"
+  mkdir -p "$bindir"
+  cat > "$bindir/gh" <<'GH'
+#!/usr/bin/env bash
+case "${RALPH_TEST_PR_SCENARIO:-}" in
+  worker-pending)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "closingIssuesReferences": [{"number": 7}],
+  "statusCheckRollup": [{"status": "IN_PROGRESS", "conclusion": null}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  worker-failing)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "",
+  "closingIssuesReferences": [{"number": 7}],
+  "statusCheckRollup": [{"conclusion": "FAILURE"}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  release-body)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "release/1.2",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "",
+  "closingIssuesReferences": [],
+  "statusCheckRollup": [{"status": "IN_PROGRESS", "conclusion": null}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  approved)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "APPROVED",
+  "closingIssuesReferences": [{"number": 7}],
+  "statusCheckRollup": [{"status": "IN_PROGRESS", "conclusion": null}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  changes-requested)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "CHANGES_REQUESTED",
+  "closingIssuesReferences": [{"number": 7}],
+  "statusCheckRollup": [{"conclusion": "FAILURE"}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  commented-review)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "REVIEW_REQUIRED",
+  "latestReviews": [{"state": "COMMENTED"}],
+  "closingIssuesReferences": [{"number": 7}],
+  "statusCheckRollup": [{"conclusion": "FAILURE"}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  wrong-branch)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "feature-human-branch",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "",
+  "closingIssuesReferences": [{"number": 7}],
+  "statusCheckRollup": [{"conclusion": "FAILURE"}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  missing-close)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "",
+  "closingIssuesReferences": [],
+  "statusCheckRollup": [{"conclusion": "FAILURE"}],
+  "body": "Implements the issue"
+}
+JSON
+      exit 0
+    fi
+    ;;
+  clean)
+    if [[ "$1 $2" == "pr view" ]]; then
+      cat <<'JSON'
+{
+  "number": 23,
+  "headRefName": "slice-7-foo",
+  "baseRefName": "main",
+  "headRepository": {"nameWithOwner": "owner/repo"},
+  "isDraft": false,
+  "reviewDecision": "",
+  "closingIssuesReferences": [{"number": 7}],
+  "statusCheckRollup": [{"conclusion": "SUCCESS"}],
+  "body": "Closes #7"
+}
+JSON
+      exit 0
+    fi
+    ;;
+esac
+echo "unexpected gh call: $*" >&2
+exit 2
+GH
+  chmod +x "$bindir/gh"
+}
+
+BIN_RESUME_PR="$TEST_ROOT/bin-resume-pr"
+make_resume_pr_gh_stub "$BIN_RESUME_PR"
+if RALPH_TEST_PR_SCENARIO=worker-pending PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_allows_default_resume "owner/repo" "main" 7 "slice-7-foo" 23 >/dev/null; then
+  pass "open PR with pending CI on Ralph slice branch resumes by default"
+else
+  fail "pending CI on Ralph-owned PR should be resumable"
+fi
+
+if RALPH_TEST_PR_SCENARIO=worker-failing PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_allows_default_resume "owner/repo" "main" 7 "slice-7-foo" 23 >/dev/null; then
+  pass "open PR with failing CI on Ralph slice branch resumes by default"
+else
+  fail "failing CI on Ralph-owned PR should be resumable"
+fi
+
+if RALPH_TEST_PR_SCENARIO=release-body PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_allows_default_resume "owner/repo" "release/1.2" 7 "slice-7-foo" 23 >/dev/null; then
+  pass "release-base PR with body close and pending CI resumes by default"
+else
+  fail "release-base PR with body close and pending CI should be resumable"
+fi
+
+reason=$(RALPH_TEST_PR_SCENARIO=approved PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_default_resume_block_reason "owner/repo" "main" 7 "slice-7-foo" 23 || true)
+if [[ "$reason" == *"human review decision APPROVED"* ]]; then
+  pass "approved open PR blocks default resume"
+else
+  fail "approved PR should block default resume (got '$reason')"
+fi
+
+reason=$(RALPH_TEST_PR_SCENARIO=changes-requested PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_default_resume_block_reason "owner/repo" "main" 7 "slice-7-foo" 23 || true)
+if [[ "$reason" == *"human review decision CHANGES_REQUESTED"* ]]; then
+  pass "changes-requested open PR blocks default resume"
+else
+  fail "changes-requested PR should block default resume (got '$reason')"
+fi
+
+reason=$(RALPH_TEST_PR_SCENARIO=commented-review PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_default_resume_block_reason "owner/repo" "main" 7 "slice-7-foo" 23 || true)
+if [[ "$reason" == *"review state COMMENTED"* ]]; then
+  pass "comment-reviewed open PR blocks default resume"
+else
+  fail "comment-reviewed PR should block default resume (got '$reason')"
+fi
+
+reason=$(RALPH_TEST_PR_SCENARIO=wrong-branch PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_default_resume_block_reason "owner/repo" "main" 7 "slice-7-foo" 23 || true)
+if [[ "$reason" == *"head branch 'feature-human-branch' does not match resume branch"* ]]; then
+  pass "PR on a different branch blocks default resume"
+else
+  fail "wrong-branch PR should block default resume (got '$reason')"
+fi
+
+reason=$(RALPH_TEST_PR_SCENARIO=missing-close PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_default_resume_block_reason "owner/repo" "main" 7 "slice-7-foo" 23 || true)
+if [[ "$reason" == *"does not close issue #7"* ]]; then
+  pass "PR without closing issue reference blocks default resume"
+else
+  fail "PR missing closing reference should block default resume (got '$reason')"
+fi
+
+reason=$(RALPH_TEST_PR_SCENARIO=clean PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_default_resume_block_reason "owner/repo" "main" 7 "slice-7-foo" 23 || true)
+if [[ "$reason" == *"checks are already passing"* ]]; then
+  pass "open PR with passing CI does not resume repair loop"
+else
+  fail "passing PR should not resume CI repair loop (got '$reason')"
+fi
+
+echo ""
+# ===========================================================================
+# Group 4 — state_set/get_resume_attempt
+# ===========================================================================
+echo "=== Group 4: state resume helpers ==="
 
 # Fresh state.json under our test LOG_DIR
 STATE_FILE_TEST="$LOG_DIR/../state.json"
@@ -255,9 +506,9 @@ fi
 
 echo ""
 # ===========================================================================
-# Group 4 — Preflight dirty-tree rescue (driven through ralph.sh)
+# Group 5 — Preflight dirty-tree rescue (driven through ralph.sh)
 # ===========================================================================
-echo "=== Group 4: Preflight dirty-tree rescue ==="
+echo "=== Group 5: Preflight dirty-tree rescue ==="
 
 # Stub gh that always returns "no eligible issue" so the worker exits via
 # the idle-timeout path after the preflight rescue runs once. Logs every

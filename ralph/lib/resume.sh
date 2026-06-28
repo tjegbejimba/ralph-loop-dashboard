@@ -204,8 +204,6 @@ resume_branch_head_after() {
 # open_pr_for_branch REPO BRANCH
 # Echoes the PR number if there's an OPEN PR whose head is BRANCH (and
 # whose author/owner is this repo). Empty output (and rc=1) otherwise.
-# A separate halt path — we deliberately do not auto-resume when a human
-# reviewer might be looking at an open PR.
 open_pr_for_branch() {
   local repo="${1-}" branch="${2-}"
   [[ -z "$repo" || -z "$branch" ]] && return 1
@@ -217,4 +215,92 @@ open_pr_for_branch() {
     return 0
   fi
   return 1
+}
+
+# open_pr_default_resume_block_reason REPO EXPECTED_BASE ISSUE BRANCH PR
+# Prints the reason an open PR is NOT safe to resume by default. Empty output
+# with rc=1 means the PR is Ralph-owned and has failing/pending checks, so the
+# bounded repair loop may continue even though a PR is open.
+open_pr_default_resume_block_reason() {
+  local repo="${1-}" expected_base="${2-}" issue="${3-}" branch="${4-}" pr="${5-}"
+  [[ -z "$repo" || -z "$issue" || -z "$branch" || -z "$pr" ]] && {
+    echo "missing PR resume guard input"
+    return 0
+  }
+
+  local pr_json
+  if ! pr_json=$(gh pr view "$pr" --repo "$repo" \
+    --json number,headRefName,baseRefName,headRepository,isDraft,reviewDecision,latestReviews,closingIssuesReferences,statusCheckRollup,body \
+    2>/dev/null); then
+    echo "could not inspect open PR #$pr"
+    return 0
+  fi
+
+  local head base head_repo is_draft review_decision blocking_reviews closes_issue check_count non_green_count
+  head=$(jq -r '.headRefName // ""' <<<"$pr_json")
+  base=$(jq -r '.baseRefName // ""' <<<"$pr_json")
+  head_repo=$(jq -r '.headRepository.nameWithOwner // ""' <<<"$pr_json")
+  is_draft=$(jq -r '.isDraft // false' <<<"$pr_json")
+  review_decision=$(jq -r '.reviewDecision // ""' <<<"$pr_json")
+  blocking_reviews=$(jq -r '
+    [(.latestReviews // [])[]? | (.state // "") | select(. == "APPROVED" or . == "CHANGES_REQUESTED" or . == "COMMENTED")]
+    | unique
+    | join(",")
+  ' <<<"$pr_json")
+  closes_issue=$(jq -r --arg issue "$issue" '
+    any((.closingIssuesReferences // [])[]?; (.number | tostring) == $issue)
+    or ((.body // "") | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#" + $issue + "\\b"))
+  ' <<<"$pr_json")
+  check_count=$(jq -r '(.statusCheckRollup // []) | length' <<<"$pr_json")
+  non_green_count=$(jq -r '
+    def green: . == "SUCCESS" or . == "PASSED" or . == "PASS" or . == "SKIPPED" or . == "NEUTRAL";
+    [(.statusCheckRollup // [])[]? | ((.conclusion // .state // .status // "") | ascii_upcase) | select(green | not)] | length
+  ' <<<"$pr_json")
+
+  if [[ "$head" != "$branch" ]]; then
+    echo "open PR #$pr head branch '$head' does not match resume branch '$branch'"
+    return 0
+  fi
+  if [[ -n "$expected_base" && "$base" != "$expected_base" ]]; then
+    echo "open PR #$pr base branch '$base' does not match expected base '$expected_base'"
+    return 0
+  fi
+  if [[ "$head_repo" != "$repo" ]]; then
+    echo "open PR #$pr head repository '$head_repo' is not '$repo'"
+    return 0
+  fi
+  if [[ "$is_draft" == "true" ]]; then
+    echo "open PR #$pr is draft"
+    return 0
+  fi
+  case "$review_decision" in
+    APPROVED|CHANGES_REQUESTED)
+      echo "open PR #$pr has human review decision $review_decision"
+      return 0
+      ;;
+  esac
+  if [[ -n "$blocking_reviews" ]]; then
+    echo "open PR #$pr has review state $blocking_reviews"
+    return 0
+  fi
+  if [[ "$closes_issue" != "true" ]]; then
+    echo "open PR #$pr does not close issue #$issue"
+    return 0
+  fi
+  if [[ "$check_count" -eq 0 ]]; then
+    echo "open PR #$pr has no failing or pending checks to repair"
+    return 0
+  fi
+  if [[ "$non_green_count" -eq 0 ]]; then
+    echo "open PR #$pr checks are already passing"
+    return 0
+  fi
+
+  return 1
+}
+
+# open_pr_allows_default_resume REPO EXPECTED_BASE ISSUE BRANCH PR
+# Returns 0 iff open_pr_default_resume_block_reason finds no blocking reason.
+open_pr_allows_default_resume() {
+  ! open_pr_default_resume_block_reason "$@" >/dev/null
 }
