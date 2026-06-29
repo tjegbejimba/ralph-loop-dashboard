@@ -95,5 +95,40 @@ fi
 kill $live_pid 2>/dev/null || true
 echo "PASS: status_reap_stale"
 
+# Test 5: status_is_terminal excludes recoverable
+cat > "$TEST_ROOT/.ralph/runs/test-run-123/status.json" <<'EOF'
+{"items":{
+  "17": {"status": "recoverable", "workerId": 1, "pid": null, "logFile": "test.log", "startedAt": "2026-01-01T00:00:00Z", "error": "parked for recovery"},
+  "18": {"status": "failed", "workerId": 1, "pid": null, "logFile": "test.log", "startedAt": "2026-01-01T00:00:00Z", "error": "no PR found"}
+}}
+EOF
+if status_is_terminal "17"; then
+  echo "FAIL: status_is_terminal should return false for recoverable status"
+  exit 1
+fi
+echo "PASS: status_is_terminal excludes recoverable"
+
+if ! status_is_terminal "18"; then
+  echo "FAIL: status_is_terminal should return true for failed status"
+  exit 1
+fi
+echo "PASS: status_is_terminal includes failed"
+
+# Test 6: status_mark_recoverable writes recoverable state
+cat > "$TEST_ROOT/.ralph/runs/test-run-123/status.json" <<'EOF'
+{"items":{}}
+EOF
+status_mark_recoverable "19" "open PR exists but worker exited"
+content=$(cat "$TEST_ROOT/.ralph/runs/test-run-123/status.json")
+if ! echo "$content" | jq -e '.items["19"].status == "recoverable"' >/dev/null; then
+  echo "FAIL: status_mark_recoverable should write recoverable state"
+  exit 1
+fi
+if ! echo "$content" | jq -e '.items["19"].error == "open PR exists but worker exited"' >/dev/null; then
+  echo "FAIL: status_mark_recoverable should write error detail"
+  exit 1
+fi
+echo "PASS: status_mark_recoverable"
+
 echo ""
 echo "All status.sh tests passed!"

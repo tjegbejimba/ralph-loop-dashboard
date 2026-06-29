@@ -100,6 +100,22 @@ status_mark_failed() {
   ' "$file" >"$tmp" && mv "$tmp" "$file"
 }
 
+# Mark an item as recoverable (worker exited with durable PR/branch evidence)
+# Unlike failed, recoverable items can be retried after lease expiry
+status_mark_recoverable() {
+  local issue="$1" error="${2:-}" run_id="${3:-$RUN_ID}"
+  local file tmp
+  file=$(status_file "$run_id")
+  tmp=$(status_mktemp "$run_id")
+  
+  [[ ! -f "$file" ]] && printf '%s\n' '{"items":{}}' >"$file"
+  
+  jq --arg issue "$issue" --arg error "$error" '
+    .items[$issue].status = "recoverable" |
+    .items[$issue].error = $error
+  ' "$file" >"$tmp" && mv "$tmp" "$file"
+}
+
 # Mark an item as rejected (pre-launch: not runnable before any work started)
 # Unlike status_mark_failed (worker ran and failed), rejected items were never
 # claimed — they are deferred/skipped with no label mutation.
@@ -223,6 +239,7 @@ status_reconcile_stale_workers() {
 }
 
 # Check if an issue is in a terminal state (merged/failed/skipped/rejected)
+# Recoverable is NOT terminal — it can be retried after lease expiry
 # Args: issue_number [run_id]
 # Returns 0 (true) if terminal, 1 (false) otherwise
 status_is_terminal() {
