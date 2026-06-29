@@ -205,6 +205,9 @@ fi
 # Resume-incomplete-iterations helpers (issue #60).
 # shellcheck source=lib/resume.sh
 . "$SCRIPT_DIR/lib/resume.sh"
+# Recovery ledger for parked recoverable work (issue #173).
+# shellcheck source=lib/recovery-ledger.sh
+. "$SCRIPT_DIR/lib/recovery-ledger.sh"
 if [[ -n "$RUN_ID" ]]; then
   status_init
 fi
@@ -802,6 +805,18 @@ while true; do
     echo "↪️  Worker $WORKER_ID: #$num became non-runnable during selection ($fresh_blocker_tags); marked as rejected (no label change)."
     continue
   fi
+  
+  # Check recovery lease before claiming
+  if ledger_is_recoverable "$num"; then
+    if ! ledger_is_recovery_due "$num"; then
+      state_unlock
+      echo "↪️  Worker $WORKER_ID: #$num is recoverable but lease not expired yet; deferring."
+      continue
+    else
+      echo "ℹ️  Worker $WORKER_ID: #$num recovery lease expired, proceeding with claim." >&2
+    fi
+  fi
+  
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
   CURRENT_CLAIM="$num"
   _idle_polls=0  # Reset idle counter: worker successfully claimed an issue
@@ -1126,10 +1141,40 @@ DO NOT re-plan or open a new branch. Instead:
         continue
       else
         echo "ℹ️  Not resuming #$num: $_resume_reason" >&2
+        
+        # Check if we have durable PR/branch evidence to park as recoverable
+        _has_recovery_evidence=0
+        if [[ -n "$_resume_branch" ]] && resume_branch_ahead_of_base "$_resume_branch" "$default_branch"; then
+          _has_recovery_evidence=1
+        fi
+        
+        if [[ "$_has_recovery_evidence" == "1" ]]; then
+          # Park as recoverable with lease (5 minute cooldown)
+          _recovery_cooldown=300  # 5 minutes in seconds
+          _next_recovery=$(date -u -v+${_recovery_cooldown}S +%FT%TZ 2>/dev/null || date -u -d "+${_recovery_cooldown} seconds" +%FT%TZ)
+          _recovery_pr=$(open_pr_for_branch "$REPO" "$_resume_branch" || true)
+          
+          echo "ℹ️  Parking #$num as recoverable (branch=$_resume_branch, pr=$_recovery_pr, cooldown=${_recovery_cooldown}s)" >&2
+          
+          if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+            copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "recoverable" "$RUN_ID" || true
+          fi
+          if [[ -n "$RUN_ID" ]]; then
+            state_lock || true
+            _recovery_detail="Parked with PR/branch evidence: $_resume_reason"
+            status_mark_recoverable "$num" "$_recovery_detail"
+            ledger_record_recoverable "$num" "$_recovery_pr" "$_resume_branch" "$_current_attempt" "$_next_recovery" "$_resume_reason"
+            state_unlock || true
+          fi
+          # Keep ralph:queued label (recoverable items use the same label but have a lease)
+          # No label transition needed — already queued
+          echo "⚠️  Issue #$num parked as recoverable with lease until $_next_recovery. Will retry after cooldown." >&2
+          exit 1
+        fi
       fi
     fi
 
-    # Mark as failed in status.json (run-aware mode only)
+    # No recovery evidence — mark as terminally failed
     if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
       copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "failed" "$RUN_ID" || true
     fi

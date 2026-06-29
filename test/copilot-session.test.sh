@@ -121,6 +121,7 @@ cp "$REPO_ROOT/ralph/lib/labels.sh" .ralph/lib/labels.sh
 cp "$REPO_ROOT/ralph/lib/status.sh" .ralph/lib/status.sh
 cp "$REPO_ROOT/ralph/lib/pr-merge.sh" .ralph/lib/pr-merge.sh
 cp "$REPO_ROOT/ralph/lib/resume.sh" .ralph/lib/resume.sh
+cp "$REPO_ROOT/ralph/lib/recovery-ledger.sh" .ralph/lib/recovery-ledger.sh
 cp "$REPO_ROOT/ralph/lib/copilot-session.sh" .ralph/lib/copilot-session.sh
 chmod +x .ralph/ralph.sh
 
@@ -305,6 +306,7 @@ cp "$REPO_ROOT/ralph/lib/labels.sh" .ralph/lib/labels.sh
 cp "$REPO_ROOT/ralph/lib/status.sh" .ralph/lib/status.sh
 cp "$REPO_ROOT/ralph/lib/pr-merge.sh" .ralph/lib/pr-merge.sh
 cp "$REPO_ROOT/ralph/lib/resume.sh" .ralph/lib/resume.sh
+cp "$REPO_ROOT/ralph/lib/recovery-ledger.sh" .ralph/lib/recovery-ledger.sh
 cp "$REPO_ROOT/ralph/lib/copilot-session.sh" .ralph/lib/copilot-session.sh
 chmod +x .ralph/ralph.sh
 
