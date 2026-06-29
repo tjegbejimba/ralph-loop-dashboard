@@ -821,10 +821,16 @@ while true; do
     continue
   fi
   
-  # Recovery lease already checked during candidate selection; no need to re-check here
-  # If we reach this point with a recoverable issue, the lease has expired
+  # If this is a recoverable issue, try to claim the recovery lease
+  _is_recovery_claim=0
   if ledger_is_recoverable "$num"; then
-    echo "ℹ️  Worker $WORKER_ID: #$num recovery lease expired, proceeding with claim." >&2
+    if ! ledger_try_claim_recovery "$num" "$WORKER_ID" "$$"; then
+      echo "↪️  Worker $WORKER_ID: #$num recovery lease already claimed by another worker; retrying later." >&2
+      state_unlock
+      continue
+    fi
+    _is_recovery_claim=1
+    echo "ℹ️  Worker $WORKER_ID: claimed recovery lease for #$num." >&2
   fi
   
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
@@ -847,6 +853,25 @@ while true; do
   fi
   if [[ -n "$fresh_body" ]]; then
     body="$fresh_body"
+  fi
+  
+  # If this is a recovery claim, load resume data from ledger and activate resume mode
+  if [[ "$_is_recovery_claim" == "1" ]]; then
+    _ledger_entry=$(ledger_load_entry "$num")
+    _resume_pr=$(echo "$_ledger_entry" | jq -r '.pr // empty')
+    _iter_resume_branch=$(echo "$_ledger_entry" | jq -r '.branch // empty')
+    _iter_resume_attempt=$(echo "$_ledger_entry" | jq -r '.attempt // 0')
+    _resume_reason=$(echo "$_ledger_entry" | jq -r '.reason // empty')
+    
+    if [[ -n "$_iter_resume_branch" ]]; then
+      _iter_resume_active=1
+      echo "ℹ️  Recovery: resuming from branch $_iter_resume_branch (attempt $_iter_resume_attempt)" >&2
+      if [[ -n "$_resume_pr" ]]; then
+        echo "ℹ️  Recovery: open PR #$_resume_pr exists for this branch" >&2
+      fi
+    else
+      echo "⚠️  Recovery: ledger entry exists but no branch found, treating as fresh work" >&2
+    fi
   fi
 
   default_branch=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
@@ -1082,6 +1107,15 @@ DO NOT re-plan or open a new branch. Instead:
     fi
   fi
 
+  # If merge succeeded and this was a recovery claim, clean up the ledger
+  if [[ "$merged_count" -ge 1 && "$_is_recovery_claim" == "1" ]]; then
+    state_lock || true
+    ledger_remove_entry "$num"
+    ledger_release_recovery "$num"
+    state_unlock || true
+    echo "✅ Recovery successful for #$num — ledger entry removed." >&2
+  fi
+
   if [[ "$merged_count" -lt 1 ]]; then
     # Resume-incomplete-iterations (issue #60). Before marking the issue as
     # terminally failed, check whether this iteration left commits on a
@@ -1159,28 +1193,54 @@ DO NOT re-plan or open a new branch. Instead:
         fi
         
         if [[ "$_has_recovery_evidence" == "1" ]]; then
-          # Park as recoverable with lease (5 minute cooldown)
-          _recovery_cooldown=300  # 5 minutes in seconds
-          _next_recovery=$(date -u -v+${_recovery_cooldown}S +%FT%TZ 2>/dev/null || date -u -d "+${_recovery_cooldown} seconds" +%FT%TZ)
-          _recovery_pr=$(open_pr_for_branch "$REPO" "$_resume_branch" || true)
-          
-          echo "ℹ️  Parking #$num as recoverable (branch=$_resume_branch, pr=$_recovery_pr, cooldown=${_recovery_cooldown}s)" >&2
-          
-          if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
-            copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "recoverable" "$RUN_ID" || true
+          # If this was already a recovery attempt, increment the counter
+          if [[ "$_is_recovery_claim" == "1" ]]; then
+            echo "ℹ️  Recovery attempt failed for #$num, checking retry budget..." >&2
+            state_lock || true
+            if ! ledger_increment_attempt "$num"; then
+              # Budget exhausted - mark as terminal failure
+              echo "⚠️  Recovery retry budget exhausted for #$num - marking as failed." >&2
+              ledger_release_recovery "$num"
+              if [[ -n "$RUN_ID" ]]; then
+                status_mark_failed "$num" "Recovery retry budget exhausted after $_iter_resume_attempt attempts: $_resume_reason"
+              fi
+              state_unlock || true
+              if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
+                ralph_apply_label_transition "$num" failed || true
+              fi
+              if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+                copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "failed" "$RUN_ID" || true
+              fi
+              echo "❌ Issue #$num marked as terminally failed after exhausting retry budget." >&2
+              exit 1
+            fi
+            state_unlock || true
+            echo "ℹ️  Incremented retry attempt for #$num, will retry after cooldown." >&2
+            ledger_release_recovery "$num"
+          else
+            # First-time parking — record fresh recoverable entry
+            _recovery_cooldown=300  # 5 minutes in seconds
+            _next_recovery=$(date -u -v+${_recovery_cooldown}S +%FT%TZ 2>/dev/null || date -u -d "+${_recovery_cooldown} seconds" +%FT%TZ)
+            _recovery_pr=$(open_pr_for_branch "$REPO" "$_resume_branch" || true)
+            
+            echo "ℹ️  Parking #$num as recoverable (branch=$_resume_branch, pr=$_recovery_pr, cooldown=${_recovery_cooldown}s)" >&2
+            
+            if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+              copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "recoverable" "$RUN_ID" || true
+            fi
+            # Record recovery ledger regardless of run-aware mode
+            state_lock || true
+            _recovery_detail="Parked with PR/branch evidence: $_resume_reason"
+            ledger_record_recoverable "$num" "$_recovery_pr" "$_resume_branch" "$_current_attempt" "$_next_recovery" "$_resume_reason"
+            # Status is only tracked in run-aware mode
+            if [[ -n "$RUN_ID" ]]; then
+              status_mark_recoverable "$num" "$_recovery_detail"
+            fi
+            state_unlock || true
+            # Keep ralph:queued label (recoverable items use the same label but have a lease)
+            # No label transition needed — already queued
+            echo "⚠️  Issue #$num parked as recoverable with lease until $_next_recovery. Will retry after cooldown." >&2
           fi
-          # Record recovery ledger regardless of run-aware mode
-          state_lock || true
-          _recovery_detail="Parked with PR/branch evidence: $_resume_reason"
-          ledger_record_recoverable "$num" "$_recovery_pr" "$_resume_branch" "$_current_attempt" "$_next_recovery" "$_resume_reason"
-          # Status is only tracked in run-aware mode
-          if [[ -n "$RUN_ID" ]]; then
-            status_mark_recoverable "$num" "$_recovery_detail"
-          fi
-          state_unlock || true
-          # Keep ralph:queued label (recoverable items use the same label but have a lease)
-          # No label transition needed — already queued
-          echo "⚠️  Issue #$num parked as recoverable with lease until $_next_recovery. Will retry after cooldown." >&2
           exit 1
         fi
       fi
