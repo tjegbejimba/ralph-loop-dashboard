@@ -47,7 +47,7 @@
     argv: node  <cli.mjs>  orchestrate-repo  --repo-root <main checkout>
     Use ABSOLUTE paths — launchd does not expand ~, $HOME, or PATH lookups.
     Add --max-issues / --parallelism / --run-mode here to override the V1
-    defaults (<=3 issues, 1 worker, until-empty).
+    defaults (<=10 issues, 1 worker, until-empty).
   -->
   <key>ProgramArguments</key>
   <array>

@@ -110,7 +110,7 @@ tick fired for. The orchestrator does not reach into other repos.
    prerequisites" and `../references/triage-contract.md`); escalate to the advisory
    agent only by exception.
 
-5. **Build a bounded queue.** Take up to 3 qualifying issues (highest priority
+5. **Build a bounded queue.** Take up to 10 qualifying issues (highest priority
    first, then lowest-number within a priority band), dropping any with an open
    linked PR or a local Ralph duplicate. If nothing qualifies, record "no ready
    work" in the ledger and stop for this tick.

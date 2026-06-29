@@ -67,7 +67,7 @@ Operating on `--repo-root` (default: the current directory), it:
 6. Discovers ready work **read-only** via `gh issue list --search "<issueSearch>"`,
    dropping issues with an open linked PR, an in-flight Ralph claim, or an
    unresolved blocker.
-7. Builds a bounded queue: at most `--max-issues` (default **3**), highest
+7. Builds a bounded queue: at most `--max-issues` (default **10**), highest
    priority first, then lowest issue number within a priority band.
 8. Checks prior run history for the bounded queue. Repeated deterministic
    issue/code-shape worker failures still **hard-stop** as `worker-stall`, but
@@ -136,7 +136,7 @@ node /path/to/ralph-loop-dashboard/extension/cli.mjs \
 ```
 
 Options: `--repo-root <path>` (default cwd), `--dry-run`, `--json`,
-`--max-issues <n>` (default 3), `--parallelism <n>` (default 1),
+`--max-issues <n>` (default 10), `--parallelism <n>` (default 1),
 `--run-mode <one-pass|until-empty>` (default `until-empty`).
 
 Exit codes: `0` = launched / deferred / skipped-labels / no-ready-work /
