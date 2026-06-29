@@ -10,7 +10,7 @@
 // - needsTriage: ralph:needs-triage
 // - recent: ralph:done / ralph:failed (closed)
 
-const QUEUE_CAP = 3; // bounded queue: at most 3 issues per tick, priority-first
+const QUEUE_CAP = 10; // bounded queue: at most 10 issues per tick, priority-first
 const RUNNABLE_WORK = new Set(["work:slice", "work:standalone"]);
 const PRIORITY_RANK = new Map([
   ["priority:P0", 0],
