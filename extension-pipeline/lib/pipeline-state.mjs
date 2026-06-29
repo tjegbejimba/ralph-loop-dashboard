@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
-const QUEUE_CAP = 3;
+const QUEUE_CAP = 10;
 const RUNNABLE_WORK = new Set(["work:slice", "work:standalone"]);
 const PRIORITY_RANK = new Map([
   ["priority:P0", 0],

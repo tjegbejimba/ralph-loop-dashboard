@@ -51,7 +51,7 @@ automation** (the scheduler that ticks repo sessions), not of a single session:
 
 Within a single repo session's tick:
 
-- **Per new run:** at most **3** issues, **1** worker.
+- **Per new run:** at most **10** issues, **1** worker.
 - **Skip** issues with an open linked PR, or with a local Ralph duplicate already in
   flight.
 - **Read** this repo's `issue.issueSearch` from its `.ralph/config.json`; **never
@@ -110,7 +110,7 @@ tick fired for. The orchestrator does not reach into other repos.
    prerequisites" and `../references/triage-contract.md`); escalate to the advisory
    agent only by exception.
 
-5. **Build a bounded queue.** Take up to 3 qualifying issues (highest priority
+5. **Build a bounded queue.** Take up to 10 qualifying issues (highest priority
    first, then lowest-number within a priority band), dropping any with an open
    linked PR or a local Ralph duplicate. If nothing qualifies, record "no ready
    work" in the ledger and stop for this tick.
@@ -154,7 +154,7 @@ only read-only calls (`gh issue list --search …`, `launch.sh --status`,
    missing, render the skip + one-time owner brief.
 4. **Ready-work discovery** — the `issue.issueSearch` used (this repo) and the
    qualifying issues (compact, one line each).
-5. **Bounded queue** — the ≤3 issues that would be queued, with skips explained.
+5. **Bounded queue** — the ≤10 issues that would be queued, with skips explained.
 6. **Gated launch decision** — each authorization gate + status; LAUNCH or HARD STOP.
    The launch would target this session's `REPO_ROOT` (a tick does not pass a
    non-default `repoRoot` — see "Tooling prerequisites").

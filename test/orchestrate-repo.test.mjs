@@ -13,6 +13,7 @@ import {
   buildBoundedQueue,
   findMissingCanonicalLabels,
   resolveRepoSlug,
+  REPO_MAINTAIN_DEFAULTS,
 } from "../extension/lib/orchestrate-repo.mjs";
 import { RALPH_STATES, PRIORITIES, WORK_TYPES } from "../extension/lib/label-taxonomy.mjs";
 import { resolveActiveRun } from "../extension/lib/status-data.mjs";
@@ -141,6 +142,13 @@ test("buildBoundedQueue — orders by priority rank, then issue number, and caps
     buildBoundedQueue([{ number: 30 }, { number: 5 }, { number: 12 }, { number: 99 }], { maxIssues: 3 }).map((i) => i.number),
     [5, 12, 30],
   );
+});
+
+test("buildBoundedQueue — defaults the cap to maxIssues (10)", () => {
+  assert.equal(REPO_MAINTAIN_DEFAULTS.maxIssues, 10);
+  const issues = Array.from({ length: 12 }, (_, i) => ({ number: i + 1, priority: "P2" }));
+  // No maxIssues passed → defaults to REPO_MAINTAIN_DEFAULTS.maxIssues (10).
+  assert.equal(buildBoundedQueue(issues).length, 10);
 });
 
 test("buildBoundedQueue — does not mutate the input array", () => {

@@ -45,10 +45,10 @@ export const LEDGER_SCHEMA_VERSION = "ralph-orchestrator/v1";
 // it can't be redirected to disable the allowlist on this headless entry point.
 const DEFAULT_TRUSTED_REPO_ROOT = resolve(import.meta.dirname, "..", "..");
 
-// V1 repo-maintain parameters (repo-maintain.md "V1 parameters"): at most 3
+// V1 repo-maintain parameters (repo-maintain.md "V1 parameters"): at most 10
 // issues and 1 worker per new run, run until the bounded queue drains.
 export const REPO_MAINTAIN_DEFAULTS = Object.freeze({
-  maxIssues: 3,
+  maxIssues: 10,
   parallelism: 1,
   runMode: "until-empty",
 });

@@ -881,7 +881,7 @@ never calls launch.sh --start and never mutates GitHub during discovery.
 --dry-run                Read-only: print the plan + would-be ledger; no launch,
                          no ledger write, no mutations.
 --json                   Emit the structured run summary.
---max-issues N           Cap issues per run (default 3).
+--max-issues N           Cap issues per run (default 10).
 --parallelism N          Workers (default 1).
 --run-mode MODE          one-pass | until-empty (default until-empty).
 --close-completed-prds   OPT-IN reconcile: instead of the launch sweep, close

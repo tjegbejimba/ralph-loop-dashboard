@@ -40,8 +40,8 @@ test("bucket running issues with worker metadata", () => {
   assert.equal(result.running[0].worker.workerId, "worker-1");
 });
 
-// Test: compute next-run queue with cap at 3, priority-first
-test("compute next-run queue capped at 3, priority-first", () => {
+// Test: compute next-run queue sorted priority-first, all queued under cap
+test("compute next-run queue priority-first, all queued under cap", () => {
   const issues = [
     {
       number: 5,
@@ -92,16 +92,37 @@ test("compute next-run queue capped at 3, priority-first", () => {
   
   const result = computePipelineState({ issues, claims: {}, openPrs: [] });
   
-  // Should be capped at 3 and sorted by priority then number
-  assert.equal(result.nextQueue.length, 3);
-  assert.deepEqual(result.nextQueue, [1, 3, 4]); // P0:#1, P1:#3, P1:#4 (lowest numbers first)
+  // 5 issues is under the cap of 10, so all queue, sorted by priority then number
+  assert.equal(result.nextQueue.length, 5);
+  assert.deepEqual(result.nextQueue, [1, 3, 4, 5, 6]); // P0:#1, P1:#3, P1:#4, P2:#5, P2:#6
   assert.equal(result.ready.length, 5);
-  // First 3 should be marked as queued
   assert.equal(result.ready[0].queued, true);
   assert.equal(result.ready[1].queued, true);
   assert.equal(result.ready[2].queued, true);
-  assert.equal(result.ready[3].queued, false);
-  assert.equal(result.ready[4].queued, false);
+  assert.equal(result.ready[3].queued, true);
+  assert.equal(result.ready[4].queued, true);
+});
+
+// Test: next-run queue is capped at 10
+test("compute next-run queue capped at 10", () => {
+  const issues = Array.from({ length: 12 }, (_, i) => ({
+    number: i + 1,
+    title: `P2 task ${i + 1}`,
+    url: `https://github.com/test/repo/issues/${i + 1}`,
+    labels: [{ name: "ralph:ready" }, { name: "work:slice" }, { name: "priority:P2" }],
+    createdAt: "2026-06-25T10:00:00Z",
+    assignees: [],
+    body: "",
+  }));
+
+  const result = computePipelineState({ issues, claims: {}, openPrs: [] });
+
+  assert.equal(result.nextQueue.length, 10);
+  assert.deepEqual(result.nextQueue, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(result.ready.length, 12);
+  assert.equal(result.ready[9].queued, true);
+  assert.equal(result.ready[10].queued, false);
+  assert.equal(result.ready[11].queued, false);
 });
 
 // Test: exclude assigned issues from next-run queue
