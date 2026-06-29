@@ -1310,13 +1310,17 @@ document.querySelectorAll('input[name="run-mode"]').forEach((input) => {
 });
 
 // Load user config defaults into form
+const DEFAULT_RUN_MODEL = "claude-sonnet-4.5";
+
 async function loadUserConfigDefaults() {
   try {
     const config = await copilot.getUserConfig();
-    if (config.defaultModel) {
-    if (config.defaultModel) {
-      $("model-input").placeholder = `(default: ${config.defaultModel})`;
-    }
+    const modelInput = $("model-input");
+    if (modelInput) {
+      modelInput.value = config.defaultModel || DEFAULT_RUN_MODEL;
+      modelInput.placeholder = config.defaultModel
+        ? `(default: ${config.defaultModel})`
+        : "(use repo/global default)";
     }
     if (config.defaultParallelism) {
       $("parallelism-input").value = config.defaultParallelism;
