@@ -803,11 +803,10 @@ NODEEOF
 fi
 
 # Stale-script detection: when both ralph/ralph.sh (source) and
-# .ralph/ralph.sh (installed copy) exist, refuse to launch if the source
-# content differs from the installed copy. This catches the regression where
-# fixes land in the source but workers keep running the stale installed version.
-# Only applies to the launch/foreground paths; status/stop/cleanup/enqueue
-# are exempt so operators can always inspect and kill stuck workers.
+# .ralph/ralph.sh (installed copy) exist, warn if the source content differs
+# from the installed copy. Per ADR 0004 decision 3, enforcement is now via CI
+# (install.sh --check), so this runtime guard is warn-only to avoid
+# hard-stopping unattended workers. Use --force to suppress the warning.
 _src_ralph="$MAIN_REPO/ralph/ralph.sh"
 _ins_ralph="$MAIN_REPO/.ralph/ralph.sh"
 if [[ -f "$_src_ralph" && -f "$_ins_ralph" ]]; then
@@ -818,9 +817,8 @@ if [[ -f "$_src_ralph" && -f "$_ins_ralph" ]]; then
     if [[ "$FORCE" -eq 1 ]]; then
       echo "⚠️  Installed scripts are stale but --force override active." >&2
     else
-      echo "❌ Your installed scripts are stale — run ./install.sh <repo> --scripts-only" >&2
-      echo "   (pass --force to launch anyway)" >&2
-      exit 1
+      echo "⚠️  Your installed scripts may be stale — run ./install.sh <repo> --scripts-only" >&2
+      echo "   (this is a warning; workers will continue — CI enforces content match at PR time)" >&2
     fi
   fi
 fi

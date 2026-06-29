@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      
+      - name: Install Ralph scripts into checkout
+        run: ./install.sh . --scripts-only
+      
+      - name: Lint shell scripts
+        run: bash -n ralph/ralph.sh ralph/launch.sh
+      
+      - name: Run tests
+        run: npm test
+      
+      - name: Check for script drift
+        run: ./install.sh . --check
