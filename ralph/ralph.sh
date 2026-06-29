@@ -435,6 +435,12 @@ while true; do
         continue
       fi
       
+      # Skip if recoverable with active lease (not due yet)
+      if ledger_is_recoverable "$cand_num" && ! ledger_is_recovery_due "$cand_num"; then
+        [[ "$RALPH_VERBOSE" == "1" ]] && echo "↪️  Worker $WORKER_ID: #$cand_num is recoverable but lease not expired; deferring." >&2
+        continue
+      fi
+      
       # Re-fetch state/labels/body from GitHub before claiming. Queue files can
       # be stale or agent-supplied, so run-aware workers enforce the same
       # canonical runnable boundary as direct-number queues.
@@ -480,13 +486,18 @@ while true; do
       # No claimable issue this pass. Decide whether to exit or wait:
       # - If every queue item is in a terminal status (merged/failed/skipped),
       #   the run is done — exit cleanly.
+      # - Recoverable items with active leases are counted as not-yet-claimable,
+      #   not terminal (they may become claimable after lease expiry).
       # - Otherwise some items are claimed/in-progress on other workers; sleep.
       total=$(echo "$queue_json" | jq -r 'length')
       terminal_count=0
+      recoverable_leased_count=0
       while IFS= read -r qnum; do
         [[ -z "$qnum" ]] && continue
         if status_is_terminal "$qnum"; then
           terminal_count=$((terminal_count + 1))
+        elif ledger_is_recoverable "$qnum" && ! ledger_is_recovery_due "$qnum"; then
+          recoverable_leased_count=$((recoverable_leased_count + 1))
         fi
       done < <(echo "$queue_json" | jq -r '.[].number')
       if [[ "$total" -eq 0 ]]; then
@@ -497,7 +508,11 @@ while true; do
         echo "✅ Worker $WORKER_ID: run $RUN_ID queue fully resolved ($terminal_count/$total terminal). Done."
         exit 0
       fi
-      echo "⏸  Worker $WORKER_ID: no claimable issues in run $RUN_ID queue (terminal=$terminal_count/$total); sleeping ${POLL_SEC}s."
+      if [[ "$recoverable_leased_count" -gt 0 ]]; then
+        echo "⏸  Worker $WORKER_ID: no claimable issues in run $RUN_ID queue (terminal=$terminal_count/$total, recoverable_leased=$recoverable_leased_count); sleeping ${POLL_SEC}s."
+      else
+        echo "⏸  Worker $WORKER_ID: no claimable issues in run $RUN_ID queue (terminal=$terminal_count/$total); sleeping ${POLL_SEC}s."
+      fi
       _idle_polls=$((_idle_polls + 1))
       if [[ "$IDLE_EXIT_POLLS" -gt 0 && "$_idle_polls" -ge "$IDLE_EXIT_POLLS" ]]; then
         echo "⏸  Worker $WORKER_ID: idle for $_idle_polls polls, exiting."
@@ -806,15 +821,10 @@ while true; do
     continue
   fi
   
-  # Check recovery lease before claiming
+  # Recovery lease already checked during candidate selection; no need to re-check here
+  # If we reach this point with a recoverable issue, the lease has expired
   if ledger_is_recoverable "$num"; then
-    if ! ledger_is_recovery_due "$num"; then
-      state_unlock
-      echo "↪️  Worker $WORKER_ID: #$num is recoverable but lease not expired yet; deferring."
-      continue
-    else
-      echo "ℹ️  Worker $WORKER_ID: #$num recovery lease expired, proceeding with claim." >&2
-    fi
+    echo "ℹ️  Worker $WORKER_ID: #$num recovery lease expired, proceeding with claim." >&2
   fi
   
   state_claim "$num" "$WORKER_ID" "$$" "$(basename "$log_file")"
@@ -1159,13 +1169,15 @@ DO NOT re-plan or open a new branch. Instead:
           if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
             copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "recoverable" "$RUN_ID" || true
           fi
+          # Record recovery ledger regardless of run-aware mode
+          state_lock || true
+          _recovery_detail="Parked with PR/branch evidence: $_resume_reason"
+          ledger_record_recoverable "$num" "$_recovery_pr" "$_resume_branch" "$_current_attempt" "$_next_recovery" "$_resume_reason"
+          # Status is only tracked in run-aware mode
           if [[ -n "$RUN_ID" ]]; then
-            state_lock || true
-            _recovery_detail="Parked with PR/branch evidence: $_resume_reason"
             status_mark_recoverable "$num" "$_recovery_detail"
-            ledger_record_recoverable "$num" "$_recovery_pr" "$_resume_branch" "$_current_attempt" "$_next_recovery" "$_resume_reason"
-            state_unlock || true
           fi
+          state_unlock || true
           # Keep ralph:queued label (recoverable items use the same label but have a lease)
           # No label transition needed — already queued
           echo "⚠️  Issue #$num parked as recoverable with lease until $_next_recovery. Will retry after cooldown." >&2
