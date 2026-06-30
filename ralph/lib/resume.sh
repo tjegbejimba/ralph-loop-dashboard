@@ -217,25 +217,12 @@ open_pr_for_branch() {
   return 1
 }
 
-# open_pr_default_resume_block_reason REPO EXPECTED_BASE ISSUE BRANCH PR
-# Prints the reason an open PR is NOT safe to resume by default. Empty output
-# with rc=1 means the PR is Ralph-owned and has failing/pending checks, so the
-# bounded repair loop may continue even though a PR is open.
-open_pr_default_resume_block_reason() {
-  local repo="${1-}" expected_base="${2-}" issue="${3-}" branch="${4-}" pr="${5-}"
-  [[ -z "$repo" || -z "$issue" || -z "$branch" || -z "$pr" ]] && {
-    echo "missing PR resume guard input"
-    return 0
-  }
-
-  local pr_json
-  if ! pr_json=$(gh pr view "$pr" --repo "$repo" \
-    --json number,headRefName,baseRefName,headRepository,isDraft,reviewDecision,latestReviews,closingIssuesReferences,statusCheckRollup,body \
-    2>/dev/null); then
-    echo "could not inspect open PR #$pr"
-    return 0
-  fi
-
+# pr_ownership_block_reason PR_JSON REPO EXPECTED_BASE ISSUE BRANCH PR_NUM
+# Pure function: given PR JSON, returns the reason a PR is NOT safe to resume.
+# Empty output with rc=1 means the PR is Ralph-owned and resumable.
+pr_ownership_block_reason() {
+  local pr_json="${1-}" repo="${2-}" expected_base="${3-}" issue="${4-}" branch="${5-}" pr="${6-}"
+  
   local head base head_repo is_draft review_decision blocking_reviews closes_issue check_count non_green_count
   head=$(jq -r '.headRefName // ""' <<<"$pr_json")
   base=$(jq -r '.baseRefName // ""' <<<"$pr_json")
@@ -257,6 +244,7 @@ open_pr_default_resume_block_reason() {
     [(.statusCheckRollup // [])[]? | ((.conclusion // .state // .status // "") | ascii_upcase) | select(green | not)] | length
   ' <<<"$pr_json")
 
+  # Basic ownership checks
   if [[ "$head" != "$branch" ]]; then
     echo "open PR #$pr head branch '$head' does not match resume branch '$branch'"
     return 0
@@ -269,24 +257,54 @@ open_pr_default_resume_block_reason() {
     echo "open PR #$pr head repository '$head_repo' is not '$repo'"
     return 0
   fi
-  if [[ "$is_draft" == "true" ]]; then
-    echo "open PR #$pr is draft"
-    return 0
-  fi
-  case "$review_decision" in
-    APPROVED|CHANGES_REQUESTED)
-      echo "open PR #$pr has human review decision $review_decision"
-      return 0
-      ;;
-  esac
-  if [[ -n "$blocking_reviews" ]]; then
-    echo "open PR #$pr has review state $blocking_reviews"
-    return 0
-  fi
   if [[ "$closes_issue" != "true" ]]; then
     echo "open PR #$pr does not close issue #$issue"
     return 0
   fi
+
+  # NEW: Draft PR handling - allow if Ralph-owned (no human comments/reviews)
+  if [[ "$is_draft" == "true" ]]; then
+    # Block if human review evidence exists
+    if [[ "$review_decision" == "CHANGES_REQUESTED" ]]; then
+      echo "open PR #$pr is draft with human review decision $review_decision"
+      return 0
+    fi
+    if [[ -n "$blocking_reviews" ]]; then
+      echo "open PR #$pr is draft with human review state $blocking_reviews"
+      return 0
+    fi
+    # Draft with no human evidence is recoverable (fall through to check validation)
+  fi
+
+  # NEW: Approved-but-red handling - allow CI repair, but still check for human comments
+  if [[ "$review_decision" == "APPROVED" ]]; then
+    # Even when approved, block on human COMMENTED reviews (human-touch evidence)
+    if [[ "$blocking_reviews" == *"COMMENTED"* ]]; then
+      echo "open PR #$pr is approved but has human comment reviews"
+      return 0
+    fi
+    # If approved and checks are red, allow repair (fall through)
+    # If approved and checks are green, signal merge-ready
+    if [[ "$non_green_count" -eq 0 && "$check_count" -gt 0 ]]; then
+      echo "open PR #$pr approved and checks passing - ready to merge"
+      return 0
+    fi
+    # Approved with red checks - allow repair (fall through to check validation)
+  else
+    # Non-approved PRs: block on CHANGES_REQUESTED or human reviews
+    case "$review_decision" in
+      CHANGES_REQUESTED)
+        echo "open PR #$pr has human review decision $review_decision"
+        return 0
+        ;;
+    esac
+    if [[ -n "$blocking_reviews" ]]; then
+      echo "open PR #$pr has review state $blocking_reviews"
+      return 0
+    fi
+  fi
+
+  # Check validation - must have checks to repair
   if [[ "$check_count" -eq 0 ]]; then
     echo "open PR #$pr has no failing or pending checks to repair"
     return 0
@@ -296,7 +314,30 @@ open_pr_default_resume_block_reason() {
     return 0
   fi
 
+  # No blocking reason found - PR is resumable
   return 1
+}
+
+# open_pr_default_resume_block_reason REPO EXPECTED_BASE ISSUE BRANCH PR
+# Prints the reason an open PR is NOT safe to resume by default. Empty output
+# with rc=1 means the PR is Ralph-owned and has failing/pending checks, so the
+# bounded repair loop may continue even though a PR is open.
+open_pr_default_resume_block_reason() {
+  local repo="${1-}" expected_base="${2-}" issue="${3-}" branch="${4-}" pr="${5-}"
+  [[ -z "$repo" || -z "$issue" || -z "$branch" || -z "$pr" ]] && {
+    echo "missing PR resume guard input"
+    return 0
+  }
+
+  local pr_json
+  if ! pr_json=$(gh pr view "$pr" --repo "$repo" \
+    --json number,headRefName,baseRefName,headRepository,isDraft,reviewDecision,latestReviews,closingIssuesReferences,statusCheckRollup,body \
+    2>/dev/null); then
+    echo "could not inspect open PR #$pr"
+    return 0
+  fi
+
+  pr_ownership_block_reason "$pr_json" "$repo" "$expected_base" "$issue" "$branch" "$pr"
 }
 
 # open_pr_allows_default_resume REPO EXPECTED_BASE ISSUE BRANCH PR
