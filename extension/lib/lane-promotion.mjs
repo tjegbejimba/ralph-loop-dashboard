@@ -1,5 +1,5 @@
 import { RALPH_STATES, classifyIssue, parseParentNumber, parseBlockerNumbers } from "./label-taxonomy.mjs";
-import { evaluateIssueForTriage } from "./issue-triage.mjs";
+import { evaluateIssueForTriage, mapPriorityFromScores } from "./issue-triage.mjs";
 import { routeIssueToLane } from "./lane-routing.mjs";
 
 function labelNames(labels) {
@@ -132,6 +132,7 @@ export function promoteLaneForIssue({ issue, opinion, route, live = false }) {
   // Calculate label mutations
   const currentLabels = labelNames(issue.labels);
   const currentRalphStates = currentLabels.filter((name) => RALPH_STATES.includes(name));
+  const classification = classifyIssue(issue);
 
   const labelsAdded = [];
   const labelsRemoved = [];
@@ -144,6 +145,17 @@ export function promoteLaneForIssue({ issue, opinion, route, live = false }) {
   // PRD lane: ensure work:prd label
   if (lane === "PRD" && !currentLabels.includes("work:prd")) {
     labelsAdded.push("work:prd");
+  }
+
+  // Add computed priority label if missing (single source of truth via mapPriorityFromScores)
+  // Only apply when a label is being added (routes with targetLabel !== null)
+  // Never overwrite existing priority:* labels
+  if (classification.priorityLabels.length === 0) {
+    const priorityShort = mapPriorityFromScores(opinion.scores, opinion.recommendation);
+    // Ensure never emitting priority:P0 (human-only stop-the-line priority)
+    if (priorityShort !== "P0") {
+      labelsAdded.push(`priority:${priorityShort}`);
+    }
   }
 
   // Remove conflicting ralph:* state labels

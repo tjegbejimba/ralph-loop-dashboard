@@ -28,7 +28,8 @@ describe("lane promotion", () => {
     const result = promoteLaneForIssue({ issue, opinion, route, live: false });
 
     assert.equal(result.lane, "AUTO");
-    assert.deepEqual(result.labelsAdded, ["ralph:fast-lane"]);
+    // Now includes computed priority label
+    assert.deepEqual(result.labelsAdded, ["ralph:fast-lane", "priority:P1"]);
     assert.deepEqual(result.labelsRemoved, ["ralph:needs-triage"]);
     assert.equal(result.skipped, false);
   });
@@ -54,7 +55,8 @@ describe("lane promotion", () => {
     const result = promoteLaneForIssue({ issue, opinion, route, live: false });
 
     assert.equal(result.lane, "AUTO");
-    assert.deepEqual(result.labelsAdded, ["ralph:fast-lane"]);
+    // Now includes computed priority label
+    assert.deepEqual(result.labelsAdded, ["ralph:fast-lane", "priority:P1"]);
     assert.deepEqual(result.labelsRemoved, ["ralph:evaluated"]);
   });
 
@@ -68,7 +70,8 @@ describe("lane promotion", () => {
         "Acceptance criteria:",
         "- preflight blocks unsafe launches",
       ].join("\n"),
-      labels: [{ name: "ralph:fast-lane" }, { name: "work:standalone" }],
+      // Include priority to prevent auto-addition
+      labels: [{ name: "ralph:fast-lane" }, { name: "work:standalone" }, { name: "priority:P2" }],
       author: { login: "tjegbejimba" },
       authorAssociation: "OWNER",
     };
@@ -108,7 +111,8 @@ describe("lane promotion", () => {
     const result = promoteLaneForIssue({ issue, opinion, route, live: false });
 
     assert.equal(result.lane, "PRD");
-    assert.deepEqual(result.labelsAdded, ["ralph:evaluated", "work:prd"]);
+    // Now includes computed priority label
+    assert.deepEqual(result.labelsAdded, ["ralph:evaluated", "work:prd", "priority:P1"]);
     assert.deepEqual(result.labelsRemoved, ["ralph:needs-triage"]);
   });
 
@@ -137,7 +141,8 @@ describe("lane promotion", () => {
     const result = promoteLaneForIssue({ issue, opinion, route, live: false });
 
     assert.equal(result.lane, "HOLD");
-    assert.deepEqual(result.labelsAdded, ["ralph:blocked"]);
+    // Now includes computed priority label
+    assert.deepEqual(result.labelsAdded, ["ralph:blocked", "priority:P1"]);
     assert.deepEqual(result.labelsRemoved, ["ralph:needs-triage"]);
   });
 

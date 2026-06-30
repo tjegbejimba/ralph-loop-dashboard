@@ -121,6 +121,14 @@ function mapPriority(scores, recommendation) {
   return "P3";
 }
 
+/**
+ * Export mapPriority as mapPriorityFromScores for reuse in lane-promotion.
+ * Single source of truth for priority computation.
+ */
+export function mapPriorityFromScores(scores, recommendation) {
+  return mapPriority(scores, recommendation);
+}
+
 function mapAutomationSafety(scores, issue, recommendation) {
   if (["Close", "Needs info", "Uncertain"].includes(recommendation)) return "hitl-required";
   const labels = namesFromLabels(issue?.labels);
