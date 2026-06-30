@@ -410,12 +410,11 @@ else
   fail "release-base PR with body close and pending CI should be resumable"
 fi
 
-reason=$(RALPH_TEST_PR_SCENARIO=approved PATH="$BIN_RESUME_PR:$PATH" \
-  open_pr_default_resume_block_reason "owner/repo" "main" 7 "slice-7-foo" 23 || true)
-if [[ "$reason" == *"human review decision APPROVED"* ]]; then
-  pass "approved open PR blocks default resume"
+if RALPH_TEST_PR_SCENARIO=approved PATH="$BIN_RESUME_PR:$PATH" \
+  open_pr_allows_default_resume "owner/repo" "main" 7 "slice-7-foo" 23 >/dev/null; then
+  pass "approved PR with pending/failing checks allows CI repair (approved-but-red)"
 else
-  fail "approved PR should block default resume (got '$reason')"
+  fail "approved PR with pending/failing checks should allow CI repair (got '$reason')"
 fi
 
 reason=$(RALPH_TEST_PR_SCENARIO=changes-requested PATH="$BIN_RESUME_PR:$PATH" \
