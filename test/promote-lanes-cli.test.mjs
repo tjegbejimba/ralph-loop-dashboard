@@ -245,7 +245,8 @@ describe("promote-lanes CLI integration", () => {
     assert.equal(result.promotions.length, 1);
     assert.equal(result.promotions[0].issueNumber, 101);
     assert.equal(result.promotions[0].lane, "AUTO");
-    assert.deepEqual(result.promotions[0].labelsAdded, ["ralph:fast-lane"]);
+    // Now expects computed priority label as well as lane label
+    assert.deepEqual(result.promotions[0].labelsAdded, ["ralph:fast-lane", "priority:P1"]);
     assert.deepEqual(result.promotions[0].labelsRemoved, ["ralph:needs-triage"]);
   });
 
@@ -296,7 +297,8 @@ describe("promote-lanes CLI integration", () => {
           "Acceptance criteria:",
           "- preflight blocks",
         ].join("\n"),
-        labels: [{ name: "ralph:fast-lane" }, { name: "work:standalone" }],
+        // Include priority label to prevent auto-addition and maintain no-op status
+        labels: [{ name: "ralph:fast-lane" }, { name: "work:standalone" }, { name: "priority:P2" }],
         author: { login: "tjegbejimba" },
         authorAssociation: "OWNER",
       },
