@@ -276,8 +276,13 @@ pr_ownership_block_reason() {
     # Draft with no human evidence is recoverable (fall through to check validation)
   fi
 
-  # NEW: Approved-but-red handling - allow CI repair
+  # NEW: Approved-but-red handling - allow CI repair, but still check for human comments
   if [[ "$review_decision" == "APPROVED" ]]; then
+    # Even when approved, block on human COMMENTED reviews (human-touch evidence)
+    if [[ "$blocking_reviews" == *"COMMENTED"* ]]; then
+      echo "open PR #$pr is approved but has human comment reviews"
+      return 0
+    fi
     # If approved and checks are red, allow repair (fall through)
     # If approved and checks are green, signal merge-ready
     if [[ "$non_green_count" -eq 0 && "$check_count" -gt 0 ]]; then

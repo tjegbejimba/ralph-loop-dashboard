@@ -131,6 +131,16 @@ else
   fail "Approved PR with passing checks should signal merge-ready (got: $reason)"
 fi
 
+# Test 5b: Approved PR with human comments should block (human-touch evidence)
+echo "Test 5b: Approved PR with human COMMENTED review"
+pr_json=$(mock_pr_json 42 "slice-42-test" "main" "owner/repo" "false" "APPROVED" '[{"state":"APPROVED"},{"state":"COMMENTED"}]' 2 2)
+reason=$(pr_ownership_block_reason "$pr_json" "owner/repo" "main" "42" "slice-42-test" "1" || true)
+if [[ -n "$reason" && "$reason" == *"comment"* ]]; then
+  pass "Approved PR with human comments blocks recovery"
+else
+  fail "Approved PR with human comments should block recovery (got: $reason)"
+fi
+
 # ===========================================================================
 # Group 3 — PR ownership proof
 # ===========================================================================
