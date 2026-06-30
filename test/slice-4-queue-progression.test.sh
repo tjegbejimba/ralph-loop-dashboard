@@ -167,6 +167,7 @@ LOG_DIR="$TEST_ROOT/test2/main/.ralph/logs" \
   bash -c ". .ralph/lib/state.sh && . .ralph/lib/recovery-ledger.sh && ledger_record_recoverable '200' '999' 'slice-200' '1' '$next_retry' 'exit before merge'"
 
 # Run worker for one iteration (--once)
+output_file="$TEST_ROOT/test2-output.log"
 (
   cd "$TEST_ROOT/test2/main"
   export PATH="$TEST_ROOT/test2/bin:$PATH"
@@ -183,9 +184,9 @@ LOG_DIR="$TEST_ROOT/test2/main/.ralph/logs" \
   sleep 12
   kill -0 "$worker_pid" 2>/dev/null && kill "$worker_pid" 2>/dev/null
   wait "$worker_pid" 2>/dev/null || true
-) > /tmp/test2-output.log 2>&1
+) > "$output_file" 2>&1
 
-output=$(cat /tmp/test2-output.log)
+output=$(cat "$output_file")
 
 # Worker should have attempted to claim issue #100 (the ready one), not #200 (recoverable)
 if echo "$output" | grep -q "#100"; then
@@ -200,17 +201,17 @@ fi
 status_100=$(jq -r '.items["100"].status // "missing"' .ralph/runs/mixed/status.json 2>/dev/null || echo "missing")
 status_200=$(jq -r '.items["200"].status // "missing"' .ralph/runs/mixed/status.json 2>/dev/null || echo "missing")
 
-if [[ "$status_100" != "missing" ]]; then
-  pass "Issue #100 (ready) was processed (status: $status_100)"
-elif echo "$output" | grep -q "recoverable_leased=1"; then
-  # Worker saw the recoverable and reported it
-  pass "Worker correctly identified recoverable item"
+if [[ "$status_100" == "missing" ]]; then
+  echo "$output" | head -50
+  fail "Issue #100 (ready) must be processed; got status: missing"
 fi
+pass "Issue #100 (ready) was processed (status: $status_100)"
 
 if [[ "$status_200" == "missing" || "$status_200" == "recoverable" ]]; then
   pass "Issue #200 (recoverable, not due) was skipped"
 else
-  echo "Warning: Issue #200 status is $status_200 (expected missing or recoverable)"
+  echo "$output" | head -50
+  fail "Issue #200 should remain unprocessed or recoverable, got: $status_200"
 fi
 
 #

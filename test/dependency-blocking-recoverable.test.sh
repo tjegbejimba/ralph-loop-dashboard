@@ -92,6 +92,7 @@ LOG_DIR="$TEST_ROOT/main/.ralph/logs" \
   bash -c ". .ralph/lib/state.sh && . .ralph/lib/recovery-ledger.sh && ledger_record_recoverable '200' '999' 'slice-200' '1' '$next_retry' 'exit'"
 
 # Run worker
+output_file="$TEST_ROOT/blocked-output.log"
 (
   cd "$TEST_ROOT/main"
   export PATH="$TEST_ROOT/bin:$PATH"
@@ -106,9 +107,9 @@ LOG_DIR="$TEST_ROOT/main/.ralph/logs" \
   sleep 8
   kill -0 "$worker_pid" 2>/dev/null && kill "$worker_pid" 2>/dev/null
   wait "$worker_pid" 2>/dev/null || true
-) > /tmp/blocked-output.log 2>&1
+) > "$output_file" 2>&1
 
-output=$(cat /tmp/blocked-output.log)
+output=$(cat "$output_file")
 
 # Issue #300 should be rejected because its blocker #200 is OPEN (recoverable but unresolved)
 status_300=$(jq -r '.items["300"].status // "missing"' .ralph/runs/blocked/status.json)

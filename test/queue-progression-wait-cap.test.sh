@@ -89,6 +89,7 @@ LOG_DIR="$TEST_ROOT/main/.ralph/logs" \
 echo "Test: Queue with only recoverable (not due) exits after idle poll cap"
 
 # Run worker with short IDLE_EXIT_POLLS to simulate 30-minute wait cap
+output_file="$TEST_ROOT/wait-cap-output.log"
 (
   cd "$TEST_ROOT/main"
   export PATH="$TEST_ROOT/bin:$PATH"
@@ -103,9 +104,9 @@ echo "Test: Queue with only recoverable (not due) exits after idle poll cap"
   sleep 15
   kill -0 "$worker_pid" 2>/dev/null && kill "$worker_pid" 2>/dev/null
   wait "$worker_pid" 2>/dev/null || true
-) > /tmp/wait-cap-output.log 2>&1
+) > "$output_file" 2>&1
 
-output=$(cat /tmp/wait-cap-output.log)
+output=$(cat "$output_file")
 
 # Worker should report waiting for recoverable leased items
 if ! echo "$output" | grep -q "recoverable_leased=1"; then
