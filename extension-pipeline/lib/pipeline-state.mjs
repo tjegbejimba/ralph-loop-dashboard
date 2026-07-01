@@ -160,6 +160,90 @@ export function discoverFailedRunItems(repoRoot, { maxRuns = 20, maxItems = 20 }
     .slice(0, maxItems);
 }
 
+export function discoverRecoverableRunItems(repoRoot, { maxRuns = 20, maxItems = 20 } = {}) {
+  const runsDir = join(repoRoot, ".ralph", "runs");
+  if (!existsSync(runsDir)) return [];
+
+  const runs = [];
+  for (const entry of readdirSync(runsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const runId = entry.name;
+    const runDir = join(runsDir, runId);
+    const statusPath = join(runDir, "status.json");
+    const queuePath = join(runDir, "queue.json");
+    const metadataPath = join(runDir, "metadata.json");
+    if (!existsSync(statusPath)) continue;
+
+    const status = readJsonSafe(statusPath);
+    const queue = readJsonSafe(queuePath);
+    const metadata = readJsonSafe(metadataPath) || {};
+    if (!status?.items || typeof status.items !== "object") continue;
+
+    let mtimeMs = 0;
+    for (const path of [statusPath, queuePath, metadataPath]) {
+      try {
+        mtimeMs = Math.max(mtimeMs, statSync(path).mtimeMs);
+      } catch {
+        // Missing queue/metadata is tolerated; status.json is the durable signal.
+      }
+    }
+    runs.push({ runId, runDir, status, queue: Array.isArray(queue) ? queue : [], metadata, mtimeMs });
+  }
+
+  const ledgerDir = join(repoRoot, ".ralph", "recovery");
+  const ledgerByIssue = new Map();
+  if (existsSync(ledgerDir)) {
+    for (const entry of readdirSync(ledgerDir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+      const issueNumber = Number(basename(entry.name, ".json"));
+      if (!Number.isFinite(issueNumber)) continue;
+      const ledgerData = readJsonSafe(join(ledgerDir, entry.name));
+      if (ledgerData) ledgerByIssue.set(issueNumber, ledgerData);
+    }
+  }
+
+  return runs
+    .sort((a, b) => runSortTime(b) - runSortTime(a) || b.runId.localeCompare(a.runId))
+    .slice(0, maxRuns)
+    .flatMap((run) => {
+      const queueByIssue = new Map(run.queue.map((item) => [Number(item.number), item]));
+      return Object.entries(run.status.items)
+        .filter(([, item]) => item?.status === "recoverable")
+        .map(([issueNumber, item]) => {
+          const number = Number(issueNumber);
+          const queueItem = queueByIssue.get(number) || {};
+          const ledger = ledgerByIssue.get(number) || {};
+          const logFile = typeof item.logFile === "string" && item.logFile ? basename(item.logFile) : null;
+          return {
+            number,
+            title: queueItem.title || `Issue #${number}`,
+            url: queueItem.url || null,
+            labels: Array.isArray(queueItem.labels) ? queueItem.labels : [],
+            status: "recoverable",
+            reason: item.error || ledger.reason || "Worker exited before merge",
+            runId: run.runId,
+            runDir: run.runDir,
+            runCreatedAt: run.metadata.createdAt || null,
+            runMode: run.metadata.runMode || null,
+            model: run.metadata.model || null,
+            parallelism: run.metadata.parallelism || null,
+            workerId: item.workerId ?? null,
+            pid: item.pid ?? null,
+            logFile,
+            logFilePath: logFile ? join(repoRoot, ".ralph", "logs", logFile) : null,
+            startedAt: item.startedAt || ledger.lastAttemptAt || null,
+            attemptCount: item.attemptCount ?? ledger.attemptCount ?? 0,
+            maxAttempts: ledger.maxAttempts ?? 2,
+            nextRetryAt: item.nextRetryAt || ledger.nextRetryAt || null,
+            prNumber: ledger.prNumber ?? null,
+            branch: ledger.branch ?? null,
+          };
+        });
+    })
+    .sort((a, b) => String(b.nextRetryAt || "").localeCompare(String(a.nextRetryAt || "")))
+    .slice(0, maxItems);
+}
+
 function issueMap(issues, closedIssues) {
   const byNumber = new Map();
   for (const issue of [...(closedIssues || []), ...(issues || [])]) {
@@ -210,6 +294,7 @@ export function computePipelineErrorState({ repo, error, now = Date.now() }) {
     generatedAt: new Date(now).toISOString(),
     error,
     failed: [],
+    recoverable: [],
     running: [],
     ready: [],
     deferred: [],
@@ -222,6 +307,7 @@ export function computePipelineErrorState({ repo, error, now = Date.now() }) {
     lastTick: null,
     counts: {
       failed: 0,
+      recoverable: 0,
       running: 0,
       ready: 0,
       deferred: 0,
@@ -240,6 +326,7 @@ export function computePipelineState({
   claims = {},
   openPrs = [],
   failedRunItems = [],
+  recoverableRunItems = [],
   ledger = null,
   now = Date.now(),
 }) {
@@ -290,6 +377,7 @@ export function computePipelineState({
   };
 
   const running = [];
+  const recoverable = [];
   const ready = [];
   const deferred = [];
   const awaiting = [];
@@ -431,6 +519,51 @@ export function computePipelineState({
     .sort((a, b) => newerTimestamp(b) - newerTimestamp(a) || a.number - b.number)
     .slice(0, 20);
 
+  // Process recoverable run items
+  const currentRecoverableNums = new Set((recoverableRunItems || []).map((item) => Number(item.number)));
+  for (const rec of recoverableRunItems || []) {
+    const currentIssue = issuesByNumber.get(Number(rec.number));
+    // Skip if issue has a live running claim
+    const claim = claims[String(rec.number)] || null;
+    if (claim) continue;
+    
+    const issue =
+      currentIssue ||
+      {
+        number: Number(rec.number),
+        title: rec.title || `Issue #${rec.number}`,
+        url: rec.url,
+        labels: rec.labels || [],
+        assignees: [],
+        body: "",
+        createdAt: null,
+        updatedAt: rec.startedAt || rec.runCreatedAt || null,
+      };
+    
+    recoverable.push(
+      card(issue, {
+        state: primaryState(labelNames(issue)) || "ralph:queued",
+        reason: rec.reason || "Worker exited before merge",
+        runId: rec.runId,
+        runDir: rec.runDir,
+        runCreatedAt: rec.runCreatedAt || null,
+        runMode: rec.runMode || null,
+        model: rec.model || null,
+        parallelism: rec.parallelism || null,
+        workerId: rec.workerId ?? null,
+        pid: rec.pid ?? null,
+        logFile: rec.logFile || null,
+        logFilePath: rec.logFilePath || null,
+        startedAt: rec.startedAt || null,
+        attemptCount: rec.attemptCount ?? 0,
+        maxAttempts: rec.maxAttempts ?? 2,
+        nextRetryAt: rec.nextRetryAt || null,
+        prNumber: rec.prNumber ?? null,
+        branch: rec.branch ?? null,
+      }),
+    );
+  }
+
   let lastTick = null;
   if (ledger) {
     const blockers = Array.isArray(ledger.blockers) ? ledger.blockers : [];
@@ -455,6 +588,7 @@ export function computePipelineState({
     generatedAt: new Date(now).toISOString(),
     error: null,
     failed,
+    recoverable,
     running,
     ready,
     deferred,
@@ -467,6 +601,7 @@ export function computePipelineState({
     lastTick,
     counts: {
       failed: failed.length,
+      recoverable: recoverable.length,
       running: running.length,
       ready: ready.length,
       deferred: deferred.length,

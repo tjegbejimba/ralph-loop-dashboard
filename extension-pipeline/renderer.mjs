@@ -69,6 +69,13 @@ function card(c,extraCls){
       (c.runDir?' · runDir <code>'+esc(c.runDir)+'</code>':'')+
       (c.logFilePath?' · log <code>'+esc(c.logFilePath)+'</code>':(c.logFile?' · log <code>'+esc(c.logFile)+'</code>':''))+'</div>';
   }
+  if(extraCls==="recoverable"){
+    const when=c.nextRetryAt||c.startedAt;
+    note='<div class="note">'+esc(c.reason||"Worker exited before merge")+' · attempt '+c.attemptCount+'/'+c.maxAttempts+'</div>'+
+      '<div class="note">'+(when?('retry '+rel(c.nextRetryAt)+' '):"retry pending")+
+      (c.branch?' · branch <code>'+esc(c.branch)+'</code>':'')+
+      (c.logFilePath?' · log <code>'+esc(c.logFilePath)+'</code>':(c.logFile?' · log <code>'+esc(c.logFile)+'</code>':''))+'</div>';
+  }
   const age=ageTxt(c.ageDays);
   return '<a class="'+cls+'" href="'+esc(href(c.url))+'" target="_blank" rel="noopener">'+
     '<div class="row1"><span class="num">#'+c.number+'</span><span class="ttl">'+esc(c.title)+'</span>'+(age?'<span class="age">'+age+'</span>':'')+'</div>'+
@@ -98,6 +105,7 @@ function render(d){
   if(sub)html+='<div class="sub">'+sub+'</div>';
   html+='</div>';
   html+=section("failed","🚨","Failed · needs attention",d.failed||[],"fail","no failed work");
+  html+=section("recoverable","🔄","Recoverable · parked work",d.recoverable||[],"recoverable","no recoverable work");
   html+=section("running","⚙️","Running",d.running,"running","no active workers");
   html+=section("ready","⏭️","Ready · next run",d.ready,"","no ready work");
   html+=section("deferred","⏸️","Ready · deferred",d.deferred,"","none deferred");

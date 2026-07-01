@@ -442,3 +442,169 @@ export function reorderQueuedIssue({ repoRoot, runId, issueNumber, newIndex }) {
     return { success: false, error: `Failed to reorder issue: ${err.message}` };
   }
 }
+
+/**
+ * Retry a recoverable issue now by setting nextRetryAt to current time
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {string} options.runId - Run identifier
+ * @param {number} options.issueNumber - Issue number to retry
+ * @returns {Object} Result with success flag
+ */
+export function retryNow({ repoRoot, runId, issueNumber }) {
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string" };
+  }
+  if (!runId || typeof runId !== "string") {
+    return { success: false, error: "runId is required and must be a string" };
+  }
+  if (!Number.isFinite(issueNumber) || !Number.isInteger(issueNumber)) {
+    return { success: false, error: "issueNumber must be a finite integer" };
+  }
+
+  const runDir = join(repoRoot, ".ralph", "runs", runId);
+  const statusPath = join(runDir, "status.json");
+
+  if (!existsSync(statusPath)) {
+    return { success: false, error: `Run ${runId} not found` };
+  }
+
+  try {
+    const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+    const itemStatus = status.items[String(issueNumber)];
+    
+    if (!itemStatus || itemStatus.status !== "recoverable") {
+      return {
+        success: false,
+        error: `Issue ${issueNumber} not in recoverable state (current: ${itemStatus?.status || "unknown"})`,
+      };
+    }
+
+    // Set nextRetryAt to now
+    status.items[String(issueNumber)].nextRetryAt = new Date().toISOString();
+
+    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Failed to retry issue: ${err.message}` };
+  }
+}
+
+/**
+ * Pause recovery for an issue (manual takeover)
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {string} options.runId - Run identifier
+ * @param {number} options.issueNumber - Issue number to pause
+ * @returns {Object} Result with success flag
+ */
+export function pauseRecovery({ repoRoot, runId, issueNumber }) {
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string" };
+  }
+  if (!runId || typeof runId !== "string") {
+    return { success: false, error: "runId is required and must be a string" };
+  }
+  if (!Number.isFinite(issueNumber) || !Number.isInteger(issueNumber)) {
+    return { success: false, error: "issueNumber must be a finite integer" };
+  }
+
+  const runDir = join(repoRoot, ".ralph", "runs", runId);
+  const statusPath = join(runDir, "status.json");
+
+  if (!existsSync(statusPath)) {
+    return { success: false, error: `Run ${runId} not found` };
+  }
+
+  try {
+    const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+    const itemStatus = status.items[String(issueNumber)];
+    
+    if (!itemStatus || itemStatus.status !== "recoverable") {
+      return {
+        success: false,
+        error: `Issue ${issueNumber} not in recoverable state (current: ${itemStatus?.status || "unknown"})`,
+      };
+    }
+
+    // Mark as paused
+    status.items[String(issueNumber)].status = "paused";
+    status.items[String(issueNumber)].pausedAt = new Date().toISOString();
+
+    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Failed to pause recovery: ${err.message}` };
+  }
+}
+
+/**
+ * Reset recovery budget and re-queue issue
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {string} options.runId - Run identifier
+ * @param {number} options.issueNumber - Issue number to reset
+ * @returns {Object} Result with success flag
+ */
+export function resetBudget({ repoRoot, runId, issueNumber }) {
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string" };
+  }
+  if (!runId || typeof runId !== "string") {
+    return { success: false, error: "runId is required and must be a string" };
+  }
+  if (!Number.isFinite(issueNumber) || !Number.isInteger(issueNumber)) {
+    return { success: false, error: "issueNumber must be a finite integer" };
+  }
+
+  const runDir = join(repoRoot, ".ralph", "runs", runId);
+  const statusPath = join(runDir, "status.json");
+  const ledgerDir = join(repoRoot, ".ralph", "recovery");
+  const ledgerPath = join(ledgerDir, `${issueNumber}.json`);
+
+  if (!existsSync(statusPath)) {
+    return { success: false, error: `Run ${runId} not found` };
+  }
+
+  try {
+    const status = JSON.parse(readFileSync(statusPath, "utf-8"));
+    const itemStatus = status.items[String(issueNumber)];
+    
+    if (!itemStatus || itemStatus.status !== "recoverable") {
+      return {
+        success: false,
+        error: `Issue ${issueNumber} not in recoverable state (current: ${itemStatus?.status || "unknown"})`,
+      };
+    }
+
+    // Reset status item to queued
+    status.items[String(issueNumber)] = {
+      status: "queued",
+      workerId: null,
+      pid: null,
+      logFile: null,
+      startedAt: null,
+      attemptCount: 0,
+      nextRetryAt: null,
+      error: null,
+    };
+
+    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
+
+    // Reset ledger if it exists
+    if (existsSync(ledgerPath)) {
+      const ledger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+      ledger.attemptCount = 0;
+      ledger.resetAt = new Date().toISOString();
+      ledger.nextRetryAt = null;
+      writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf-8");
+    }
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: `Failed to reset budget: ${err.message}` };
+  }
+}
