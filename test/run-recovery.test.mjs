@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { retryFailedIssue, skipFailedIssue } from "../extension/lib/run-store.mjs";
+import { retryFailedIssue, skipFailedIssue, retryNow, pauseRecovery, resetBudget } from "../extension/lib/run-store.mjs";
 
 describe("Run recovery operations", () => {
   let tmpDir;
@@ -158,5 +158,152 @@ describe("Run recovery operations", () => {
 
     assert.strictEqual(result.success, false);
     assert.match(result.error, /not found in queue/);
+  });
+
+  test("retryNow moves nextRetryAt to now for a recoverable issue", () => {
+    // Create recovery ledger
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 1,
+          nextRetryAt: "2026-05-04T13:00:00Z",
+          reason: "Copilot exited with code 1",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
+      }),
+    );
+
+    // Reset status.json with recoverable item
+    const statusPath = join(runDir, "status.json");
+    const status = {
+      items: {
+        "10": {
+          status: "recoverable",
+          workerId: 1,
+          pid: 99999,
+          logFile: "iter-20260504-120000-w1-issue-10.log",
+          startedAt: "2026-05-04T12:00:00Z",
+          error: "Copilot exited with code 1",
+        },
+      },
+    };
+    writeFileSync(statusPath, JSON.stringify(status, null, 2));
+
+    const result = retryNow({
+      repoRoot: tmpDir,
+      runId,
+      issueNumber: 10,
+    });
+
+    assert.strictEqual(result.success, true);
+
+    // Read recovery-ledger.json and verify nextRetryAt is updated to now or earlier
+    const updatedLedger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    const now = new Date().toISOString();
+    assert.ok(updatedLedger["10"].nextRetryAt <= now);
+  });
+
+  test("pauseRecovery transitions issue to paused state in ledger", () => {
+    // Create recovery ledger
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 1,
+          nextRetryAt: "2026-05-04T13:00:00Z",
+          reason: "Copilot exited with code 1",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
+      }),
+    );
+
+    // Reset status.json with recoverable item
+    const statusPath = join(runDir, "status.json");
+    const status = {
+      items: {
+        "10": {
+          status: "recoverable",
+          workerId: 1,
+          pid: 99999,
+          logFile: "iter-20260504-120000-w1-issue-10.log",
+          startedAt: "2026-05-04T12:00:00Z",
+          error: "Copilot exited with code 1",
+        },
+      },
+    };
+    writeFileSync(statusPath, JSON.stringify(status, null, 2));
+
+    const result = pauseRecovery({
+      repoRoot: tmpDir,
+      runId,
+      issueNumber: 10,
+    });
+
+    assert.strictEqual(result.success, true);
+
+    // Read recovery-ledger.json and verify status is paused
+    const updatedLedger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    assert.strictEqual(updatedLedger["10"].status, "paused");
+    assert.ok(updatedLedger["10"].pausedAt !== null);
+  });
+
+  test("resetBudget clears attempt counters and re-queues issue", () => {
+    // Create recovery ledger
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 2,
+          nextRetryAt: null,
+          reason: "Budget exhausted",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
+      }),
+    );
+
+    // Reset status.json with recoverable item
+    const statusPath = join(runDir, "status.json");
+    const status = {
+      items: {
+        "10": {
+          status: "recoverable",
+          workerId: 1,
+          pid: 99999,
+          logFile: "iter-20260504-120000-w1-issue-10.log",
+          startedAt: "2026-05-04T12:00:00Z",
+          error: "Budget exhausted",
+        },
+      },
+    };
+    writeFileSync(statusPath, JSON.stringify(status, null, 2));
+
+    const result = resetBudget({
+      repoRoot: tmpDir,
+      runId,
+      issueNumber: 10,
+    });
+
+    assert.strictEqual(result.success, true);
+
+    // Read ledger and verify counters are cleared
+    const updatedLedger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    assert.strictEqual(updatedLedger["10"].attempt, 0);
+    assert.ok(updatedLedger["10"].resetAt !== null);
   });
 });

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, utimesSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { computePipelineErrorState, computePipelineState, discoverFailedRunItems } from "../extension-pipeline/lib/pipeline-state.mjs";
+import { computePipelineErrorState, computePipelineState, discoverFailedRunItems, discoverRecoverableRunItems } from "../extension-pipeline/lib/pipeline-state.mjs";
 import { renderHtml } from "../extension-pipeline/renderer.mjs";
 
 function issue(number, labels = []) {
@@ -271,4 +271,151 @@ test("pipeline renderer includes a prominent failed needs-attention lane", () =>
   assert.match(html, /logFilePath/);
   assert.match(html, /function href/);
   assert.match(html, /u\.protocol==="http:"\|\|u\.protocol==="https:"/);
+});
+
+test("pipeline renderer includes recoverable work lane", () => {
+  const html = renderHtml();
+
+  assert.match(html, /Recoverable/);
+  assert.match(html, /d\.recoverable/);
+  assert.match(html, /attemptCount/);
+  assert.match(html, /maxAttempts/);
+  assert.match(html, /nextRetryAt/);
+  assert.match(html, /branch/);
+});
+
+test("discovers recoverable run items from recent durable Ralph run state", () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), "ralph-pipeline-"));
+  try {
+    const runDir = join(repoRoot, ".ralph", "runs", "20260628-165239-1a6a4003");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, "metadata.json"),
+      JSON.stringify({
+        repoRoot,
+        runMode: "until-empty",
+        model: "claude-sonnet-4.5",
+        parallelism: 1,
+        createdAt: "2026-06-28T16:52:39.453Z",
+      }),
+    );
+    writeFileSync(
+      join(runDir, "queue.json"),
+      JSON.stringify([
+        {
+          number: 140,
+          title: "Add recovery budget tracking",
+          url: "https://github.com/tj/repo/issues/140",
+          labels: ["ralph:queued", "priority:P2", "work:standalone"],
+        },
+      ]),
+    );
+    
+    // Create recovery ledger with real schema
+    const ledgerPath = join(repoRoot, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(repoRoot, ".ralph"), { recursive: true });
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "140": {
+          pr: "169",
+          branch: "slice-140-recovery-budget",
+          attempt: 1,
+          nextRetryAt: "2026-06-28T16:57:41Z",
+          reason: "Copilot exited with code 1",
+          status: "recoverable",
+          recordedAt: "2026-06-28T16:52:41Z",
+        },
+      }),
+    );
+    
+    writeFileSync(
+      join(runDir, "status.json"),
+      JSON.stringify({
+        items: {
+          140: {
+            status: "recoverable",
+            workerId: 1,
+            pid: 5642,
+            logFile: "iter-20260628-095241-w1-issue-140.log",
+            startedAt: "2026-06-28T16:52:41Z",
+            error: "Copilot exited with code 1",
+          },
+        },
+      }),
+    );
+
+    const recoverables = discoverRecoverableRunItems(repoRoot);
+
+    assert.equal(recoverables.length, 1);
+    assert.equal(recoverables[0].number, 140);
+    assert.equal(recoverables[0].runId, "20260628-165239-1a6a4003");
+    assert.equal(recoverables[0].runDir, runDir);
+    assert.equal(recoverables[0].reason, "Copilot exited with code 1");
+    assert.equal(recoverables[0].attemptCount, 1);
+    assert.equal(recoverables[0].maxAttempts, 2);
+    assert.equal(recoverables[0].nextRetryAt, "2026-06-28T16:57:41Z");
+    assert.equal(recoverables[0].prNumber, 169);
+    assert.equal(recoverables[0].branch, "slice-140-recovery-budget");
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("pipeline state includes recoverable lane with attempt counts and PR context", () => {
+  const recoverableRunItems = [
+    {
+      number: 140,
+      title: "Add recovery budget tracking",
+      url: "https://github.com/tj/repo/issues/140",
+      labels: ["ralph:queued", "priority:P2", "work:standalone"],
+      runId: "20260628-165239-1a6a4003",
+      runDir: "/repo/.ralph/runs/20260628-165239-1a6a4003",
+      reason: "Copilot exited with code 1",
+      logFile: "iter-20260628-095241-w1-issue-140.log",
+      logFilePath: "/repo/.ralph/logs/iter-20260628-095241-w1-issue-140.log",
+      startedAt: "2026-06-28T16:52:41Z",
+      runCreatedAt: "2026-06-28T16:52:39.453Z",
+      attemptCount: 1,
+      maxAttempts: 2,
+      nextRetryAt: "2026-06-28T16:57:41Z",
+      prNumber: 169,
+      branch: "slice-140-recovery-budget",
+    },
+  ];
+
+  const state = computePipelineState({
+    repo: { slug: "tj/repo", label: "repo", mainCheckout: "/repo" },
+    openIssues: [
+      issue(140, ["ralph:queued", "priority:P2", "work:standalone"]),
+      issue(147, ["ralph:ready", "priority:P2", "work:standalone"]),
+    ],
+    closedIssues: [],
+    openPrs: [
+      {
+        number: 169,
+        title: "Fix #140",
+        url: "https://github.com/tj/repo/pull/169",
+        headRefName: "slice-140-recovery-budget",
+        closingIssuesReferences: [{ number: 140 }],
+      },
+    ],
+    claims: {},
+    failedRunItems: [],
+    recoverableRunItems,
+  });
+
+  assert.equal(state.recoverable.length, 1);
+  assert.equal(state.recoverable[0].number, 140);
+  assert.equal(state.recoverable[0].title, "Issue 140");
+  assert.equal(state.recoverable[0].repoSlug, "tj/repo");
+  assert.equal(state.recoverable[0].state, "ralph:queued");
+  assert.equal(state.recoverable[0].reason, "Copilot exited with code 1");
+  assert.equal(state.recoverable[0].attemptCount, 1);
+  assert.equal(state.recoverable[0].maxAttempts, 2);
+  assert.equal(state.recoverable[0].nextRetryAt, "2026-06-28T16:57:41Z");
+  assert.equal(state.recoverable[0].linkedPR.number, 169);
+  assert.equal(state.recoverable[0].branch, "slice-140-recovery-budget");
+  assert.deepEqual(state.nextQueue, [147]);
+  assert.equal(state.counts.recoverable, 1);
 });
