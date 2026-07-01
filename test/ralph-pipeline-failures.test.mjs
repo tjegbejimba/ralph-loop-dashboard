@@ -311,22 +311,21 @@ test("discovers recoverable run items from recent durable Ralph run state", () =
       ]),
     );
     
-    // Create recovery ledger directory
-    const ledgerDir = join(repoRoot, ".ralph", "recovery");
-    mkdirSync(ledgerDir, { recursive: true });
-    
-    // Write recovery ledger for issue 140
+    // Create recovery ledger with real schema
+    const ledgerPath = join(repoRoot, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(repoRoot, ".ralph"), { recursive: true });
     writeFileSync(
-      join(ledgerDir, "140.json"),
+      ledgerPath,
       JSON.stringify({
-        issueNumber: 140,
-        attemptCount: 1,
-        maxAttempts: 2,
-        lastAttemptAt: "2026-06-28T16:52:41Z",
-        nextRetryAt: "2026-06-28T16:57:41Z",
-        reason: "Copilot exited with code 1",
-        prNumber: 169,
-        branch: "slice-140-recovery-budget",
+        "140": {
+          pr: "169",
+          branch: "slice-140-recovery-budget",
+          attempt: 1,
+          nextRetryAt: "2026-06-28T16:57:41Z",
+          reason: "Copilot exited with code 1",
+          status: "recoverable",
+          recordedAt: "2026-06-28T16:52:41Z",
+        },
       }),
     );
     
@@ -340,8 +339,6 @@ test("discovers recoverable run items from recent durable Ralph run state", () =
             pid: 5642,
             logFile: "iter-20260628-095241-w1-issue-140.log",
             startedAt: "2026-06-28T16:52:41Z",
-            attemptCount: 1,
-            nextRetryAt: "2026-06-28T16:57:41Z",
             error: "Copilot exited with code 1",
           },
         },

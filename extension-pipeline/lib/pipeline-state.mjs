@@ -190,15 +190,15 @@ export function discoverRecoverableRunItems(repoRoot, { maxRuns = 20, maxItems =
     runs.push({ runId, runDir, status, queue: Array.isArray(queue) ? queue : [], metadata, mtimeMs });
   }
 
-  const ledgerDir = join(repoRoot, ".ralph", "recovery");
+  // Load the actual recovery ledger (.ralph/recovery-ledger.json)
+  const ledgerPath = join(repoRoot, ".ralph", "recovery-ledger.json");
   const ledgerByIssue = new Map();
-  if (existsSync(ledgerDir)) {
-    for (const entry of readdirSync(ledgerDir, { withFileTypes: true })) {
-      if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-      const issueNumber = Number(basename(entry.name, ".json"));
-      if (!Number.isFinite(issueNumber)) continue;
-      const ledgerData = readJsonSafe(join(ledgerDir, entry.name));
-      if (ledgerData) ledgerByIssue.set(issueNumber, ledgerData);
+  if (existsSync(ledgerPath)) {
+    const ledger = readJsonSafe(ledgerPath) || {};
+    for (const [issueNumber, entry] of Object.entries(ledger)) {
+      const num = Number(issueNumber);
+      if (!Number.isFinite(num)) continue;
+      ledgerByIssue.set(num, entry);
     }
   }
 
@@ -231,11 +231,11 @@ export function discoverRecoverableRunItems(repoRoot, { maxRuns = 20, maxItems =
             pid: item.pid ?? null,
             logFile,
             logFilePath: logFile ? join(repoRoot, ".ralph", "logs", logFile) : null,
-            startedAt: item.startedAt || ledger.lastAttemptAt || null,
-            attemptCount: item.attemptCount ?? ledger.attemptCount ?? 0,
-            maxAttempts: ledger.maxAttempts ?? 2,
-            nextRetryAt: item.nextRetryAt || ledger.nextRetryAt || null,
-            prNumber: ledger.prNumber ?? null,
+            startedAt: item.startedAt || ledger.recordedAt || null,
+            attemptCount: ledger.attempt ?? item.attemptCount ?? 0,
+            maxAttempts: 2,
+            nextRetryAt: ledger.nextRetryAt || item.nextRetryAt || null,
+            prNumber: ledger.pr ? Number(ledger.pr) : null,
             branch: ledger.branch ?? null,
           };
         });

@@ -465,6 +465,7 @@ export function retryNow({ repoRoot, runId, issueNumber }) {
 
   const runDir = join(repoRoot, ".ralph", "runs", runId);
   const statusPath = join(runDir, "status.json");
+  const ledgerPath = join(repoRoot, ".ralph", "recovery-ledger.json");
 
   if (!existsSync(statusPath)) {
     return { success: false, error: `Run ${runId} not found` };
@@ -481,10 +482,20 @@ export function retryNow({ repoRoot, runId, issueNumber }) {
       };
     }
 
-    // Set nextRetryAt to now
-    status.items[String(issueNumber)].nextRetryAt = new Date().toISOString();
+    // Update recovery-ledger.json
+    if (!existsSync(ledgerPath)) {
+      return { success: false, error: "Recovery ledger not found" };
+    }
 
-    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    if (!ledger[String(issueNumber)]) {
+      return { success: false, error: `Issue ${issueNumber} not found in recovery ledger` };
+    }
+
+    // Set nextRetryAt to now
+    ledger[String(issueNumber)].nextRetryAt = new Date().toISOString();
+
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf-8");
     return { success: true };
   } catch (err) {
     return { success: false, error: `Failed to retry issue: ${err.message}` };
@@ -513,6 +524,7 @@ export function pauseRecovery({ repoRoot, runId, issueNumber }) {
 
   const runDir = join(repoRoot, ".ralph", "runs", runId);
   const statusPath = join(runDir, "status.json");
+  const ledgerPath = join(repoRoot, ".ralph", "recovery-ledger.json");
 
   if (!existsSync(statusPath)) {
     return { success: false, error: `Run ${runId} not found` };
@@ -529,11 +541,21 @@ export function pauseRecovery({ repoRoot, runId, issueNumber }) {
       };
     }
 
-    // Mark as paused
-    status.items[String(issueNumber)].status = "paused";
-    status.items[String(issueNumber)].pausedAt = new Date().toISOString();
+    // Update recovery-ledger.json
+    if (!existsSync(ledgerPath)) {
+      return { success: false, error: "Recovery ledger not found" };
+    }
 
-    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    if (!ledger[String(issueNumber)]) {
+      return { success: false, error: `Issue ${issueNumber} not found in recovery ledger` };
+    }
+
+    // Mark as paused
+    ledger[String(issueNumber)].status = "paused";
+    ledger[String(issueNumber)].pausedAt = new Date().toISOString();
+
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf-8");
     return { success: true };
   } catch (err) {
     return { success: false, error: `Failed to pause recovery: ${err.message}` };
@@ -562,8 +584,7 @@ export function resetBudget({ repoRoot, runId, issueNumber }) {
 
   const runDir = join(repoRoot, ".ralph", "runs", runId);
   const statusPath = join(runDir, "status.json");
-  const ledgerDir = join(repoRoot, ".ralph", "recovery");
-  const ledgerPath = join(ledgerDir, `${issueNumber}.json`);
+  const ledgerPath = join(repoRoot, ".ralph", "recovery-ledger.json");
 
   if (!existsSync(statusPath)) {
     return { success: false, error: `Run ${runId} not found` };
@@ -580,29 +601,22 @@ export function resetBudget({ repoRoot, runId, issueNumber }) {
       };
     }
 
-    // Reset status item to queued
-    status.items[String(issueNumber)] = {
-      status: "queued",
-      workerId: null,
-      pid: null,
-      logFile: null,
-      startedAt: null,
-      attemptCount: 0,
-      nextRetryAt: null,
-      error: null,
-    };
-
-    writeFileSync(statusPath, JSON.stringify(status, null, 2), "utf-8");
-
-    // Reset ledger if it exists
-    if (existsSync(ledgerPath)) {
-      const ledger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
-      ledger.attemptCount = 0;
-      ledger.resetAt = new Date().toISOString();
-      ledger.nextRetryAt = null;
-      writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf-8");
+    // Update recovery-ledger.json
+    if (!existsSync(ledgerPath)) {
+      return { success: false, error: "Recovery ledger not found" };
     }
 
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    if (!ledger[String(issueNumber)]) {
+      return { success: false, error: `Issue ${issueNumber} not found in recovery ledger` };
+    }
+
+    // Reset attempt counter
+    ledger[String(issueNumber)].attempt = 0;
+    ledger[String(issueNumber)].resetAt = new Date().toISOString();
+    ledger[String(issueNumber)].nextRetryAt = new Date().toISOString();
+
+    writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2), "utf-8");
     return { success: true };
   } catch (err) {
     return { success: false, error: `Failed to reset budget: ${err.message}` };

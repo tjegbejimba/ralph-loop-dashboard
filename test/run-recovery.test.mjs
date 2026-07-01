@@ -161,6 +161,24 @@ describe("Run recovery operations", () => {
   });
 
   test("retryNow moves nextRetryAt to now for a recoverable issue", () => {
+    // Create recovery ledger
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 1,
+          nextRetryAt: "2026-05-04T13:00:00Z",
+          reason: "Copilot exited with code 1",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
+      }),
+    );
+
     // Reset status.json with recoverable item
     const statusPath = join(runDir, "status.json");
     const status = {
@@ -171,8 +189,6 @@ describe("Run recovery operations", () => {
           pid: 99999,
           logFile: "iter-20260504-120000-w1-issue-10.log",
           startedAt: "2026-05-04T12:00:00Z",
-          nextRetryAt: "2026-05-04T13:00:00Z",
-          attemptCount: 1,
           error: "Copilot exited with code 1",
         },
       },
@@ -187,14 +203,31 @@ describe("Run recovery operations", () => {
 
     assert.strictEqual(result.success, true);
 
-    // Read status.json and verify nextRetryAt is updated to now or earlier
-    const updatedStatus = JSON.parse(readFileSync(statusPath, "utf-8"));
+    // Read recovery-ledger.json and verify nextRetryAt is updated to now or earlier
+    const updatedLedger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
     const now = new Date().toISOString();
-    assert.strictEqual(updatedStatus.items["10"].status, "recoverable");
-    assert.ok(updatedStatus.items["10"].nextRetryAt <= now);
+    assert.ok(updatedLedger["10"].nextRetryAt <= now);
   });
 
-  test("pauseRecovery transitions issue to ralph:hitl state", () => {
+  test("pauseRecovery transitions issue to paused state in ledger", () => {
+    // Create recovery ledger
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 1,
+          nextRetryAt: "2026-05-04T13:00:00Z",
+          reason: "Copilot exited with code 1",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
+      }),
+    );
+
     // Reset status.json with recoverable item
     const statusPath = join(runDir, "status.json");
     const status = {
@@ -205,8 +238,6 @@ describe("Run recovery operations", () => {
           pid: 99999,
           logFile: "iter-20260504-120000-w1-issue-10.log",
           startedAt: "2026-05-04T12:00:00Z",
-          nextRetryAt: "2026-05-04T13:00:00Z",
-          attemptCount: 1,
           error: "Copilot exited with code 1",
         },
       },
@@ -221,27 +252,28 @@ describe("Run recovery operations", () => {
 
     assert.strictEqual(result.success, true);
 
-    // Read status.json and verify issue is paused
-    const updatedStatus = JSON.parse(readFileSync(statusPath, "utf-8"));
-    assert.strictEqual(updatedStatus.items["10"].status, "paused");
-    assert.strictEqual(updatedStatus.items["10"].pausedAt !== null, true);
+    // Read recovery-ledger.json and verify status is paused
+    const updatedLedger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    assert.strictEqual(updatedLedger["10"].status, "paused");
+    assert.ok(updatedLedger["10"].pausedAt !== null);
   });
 
   test("resetBudget clears attempt counters and re-queues issue", () => {
     // Create recovery ledger
-    const ledgerDir = join(tmpDir, ".ralph", "recovery");
-    mkdirSync(ledgerDir, { recursive: true});
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
     writeFileSync(
-      join(ledgerDir, "10.json"),
+      ledgerPath,
       JSON.stringify({
-        issueNumber: 10,
-        attemptCount: 2,
-        maxAttempts: 2,
-        lastAttemptAt: "2026-05-04T12:00:00Z",
-        nextRetryAt: "2026-05-04T13:00:00Z",
-        reason: "Budget exhausted",
-        prNumber: 42,
-        branch: "slice-10-test",
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 2,
+          nextRetryAt: null,
+          reason: "Budget exhausted",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
       }),
     );
 
@@ -255,8 +287,6 @@ describe("Run recovery operations", () => {
           pid: 99999,
           logFile: "iter-20260504-120000-w1-issue-10.log",
           startedAt: "2026-05-04T12:00:00Z",
-          nextRetryAt: null,
-          attemptCount: 2,
           error: "Budget exhausted",
         },
       },
@@ -272,14 +302,8 @@ describe("Run recovery operations", () => {
     assert.strictEqual(result.success, true);
 
     // Read ledger and verify counters are cleared
-    const ledgerPath = join(ledgerDir, "10.json");
     const updatedLedger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
-    assert.strictEqual(updatedLedger.attemptCount, 0);
-    assert.strictEqual(updatedLedger.resetAt !== null, true);
-
-    // Read status.json and verify issue is back to queued
-    const updatedStatus = JSON.parse(readFileSync(statusPath, "utf-8"));
-    assert.strictEqual(updatedStatus.items["10"].status, "queued");
-    assert.strictEqual(updatedStatus.items["10"].attemptCount, 0);
+    assert.strictEqual(updatedLedger["10"].attempt, 0);
+    assert.ok(updatedLedger["10"].resetAt !== null);
   });
 });

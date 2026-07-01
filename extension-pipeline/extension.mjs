@@ -10,7 +10,7 @@ import { watch, readFileSync, readdirSync, existsSync, statSync } from "node:fs"
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
 
-import { computePipelineErrorState, computePipelineState, discoverFailedRunItems } from "./lib/pipeline-state.mjs";
+import { computePipelineErrorState, computePipelineState, discoverFailedRunItems, discoverRecoverableRunItems } from "./lib/pipeline-state.mjs";
 import { renderHtml } from "./renderer.mjs";
 
 const pexec = promisify(execFile);
@@ -189,6 +189,7 @@ async function computeState(repo) {
   const claims = (await readJsonSafe(join(mainCheckout, ".ralph", "state.json")))?.claims || {};
   const ledger = await readJsonSafe(join(mainCheckout, ".ralph", "orchestrator", "ledger.json"));
   const failedRunItems = discoverFailedRunItems(mainCheckout);
+  const recoverableRunItems = discoverRecoverableRunItems(mainCheckout);
   const state = computePipelineState({
     repo,
     openIssues,
@@ -196,6 +197,7 @@ async function computeState(repo) {
     claims,
     openPrs,
     failedRunItems,
+    recoverableRunItems,
     ledger,
   });
   return { ...state, error };
