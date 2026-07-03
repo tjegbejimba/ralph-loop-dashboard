@@ -81,7 +81,15 @@ ledger_is_recoverable() {
   local issue="$1"
   local entry
   entry=$(ledger_load_entry "$issue")
-  [[ -n "$entry" ]]
+  [[ -z "$entry" ]] && return 1
+  
+  # Not recoverable if terminal
+  if ledger_is_terminal "$issue"; then
+    return 1
+  fi
+  
+  # Recoverable if entry exists and not terminal
+  return 0
 }
 
 # Check if recovery lease has expired (recovery is due)
@@ -235,6 +243,82 @@ ledger_mark_terminal_failed() {
      | .[$issue].failureReason = $reason
      | .[$issue].failedAt = (now | todateiso8601)' "$file" >"$tmp"
   mv "$tmp" "$file"
+}
+
+# Reset budget for an issue (operator/system action to clear terminal state and retry)
+# Args: issue pr branch
+# Clears attempt counter, terminal state, and terminal reason while preserving PR/branch evidence
+ledger_reset_budget() {
+  local issue="$1" pr="$2" branch="$3"
+  local file
+  file=$(ledger_file)
+  
+  ledger_init
+  
+  # Set 5-minute cooldown for immediate retry eligibility
+  local next_retry
+  next_retry=$(date -u -d '+5 minutes' +%FT%TZ 2>/dev/null || date -u -v+5M +%FT%TZ)
+  
+  local tmp
+  tmp=$(ledger_mktemp)
+  jq --arg issue "$issue" \
+     --arg pr "$pr" \
+     --arg branch "$branch" \
+     --arg next_retry "$next_retry" \
+     '.[$issue] = {
+       pr: $pr,
+       branch: $branch,
+       attempt: 0,
+       nextRetryAt: $next_retry,
+       reason: "budget reset by operator",
+       status: "recoverable",
+       recordedAt: (now | todateiso8601)
+     }' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+# Record a terminal failure entry (explicit operator/system terminal marking)
+# Args: issue state attempt terminal_time reason
+# state should be "terminal" for exhausted budgets or operator decisions
+ledger_record_terminal() {
+  local issue="$1" state="$2" attempt="$3" terminal_time="$4" reason="$5"
+  local file
+  file=$(ledger_file)
+  
+  ledger_init
+  
+  local tmp
+  tmp=$(ledger_mktemp)
+  jq --arg issue "$issue" \
+     --arg state "$state" \
+     --arg attempt "$attempt" \
+     --arg terminal_time "$terminal_time" \
+     --arg reason "$reason" \
+     '.[$issue] = {
+       state: $state,
+       attempt: ($attempt | tonumber),
+       terminalAt: $terminal_time,
+       terminal_reason: $reason,
+       status: "failed"
+     }' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+# Check if issue is in terminal state
+# Args: issue
+# Returns: 0 if terminal, 1 otherwise
+ledger_is_terminal() {
+  local issue="$1"
+  local entry
+  entry=$(ledger_load_entry "$issue")
+  [[ -z "$entry" ]] && return 1
+  
+  local state status
+  state=$(echo "$entry" | jq -r '.state // ""')
+  status=$(echo "$entry" | jq -r '.status // ""')
+  
+  # Terminal if state=terminal or status=failed
+  [[ "$state" == "terminal" || "$status" == "failed" ]]
 }
 
 # Remove a recovery ledger entry (called on successful merge)
