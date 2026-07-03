@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { retryFailedIssue, skipFailedIssue, retryNow, pauseRecovery, resetBudget } from "../extension/lib/run-store.mjs";
+import { retryFailedIssue, skipFailedIssue, retryNow, pauseRecovery, resetBudget, getDueRecoverables } from "../extension/lib/run-store.mjs";
 
 describe("Run recovery operations", () => {
   let tmpDir;
@@ -305,5 +305,98 @@ describe("Run recovery operations", () => {
     const updatedLedger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
     assert.strictEqual(updatedLedger["10"].attempt, 0);
     assert.ok(updatedLedger["10"].resetAt !== null);
+  });
+
+  test("getDueRecoverables returns issues whose retry time has passed", () => {
+    // Create recovery ledger with multiple issues
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    
+    const pastTime = new Date(Date.now() - 10 * 60 * 1000).toISOString(); // 10 minutes ago
+    const futureTime = new Date(Date.now() + 10 * 60 * 1000).toISOString(); // 10 minutes from now
+    
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 1,
+          nextRetryAt: pastTime,
+          reason: "Worker crashed",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
+        "20": {
+          pr: "43",
+          branch: "slice-20-test",
+          attempt: 1,
+          nextRetryAt: futureTime,
+          reason: "Cooldown period",
+          status: "recoverable",
+          recordedAt: "2026-05-04T12:05:00Z",
+        },
+        "30": {
+          pr: "44",
+          branch: "slice-30-test",
+          attempt: 1,
+          nextRetryAt: pastTime,
+          reason: "API error",
+          status: "paused",
+          recordedAt: "2026-05-04T12:10:00Z",
+        },
+      }),
+    );
+
+    const result = getDueRecoverables({ repoRoot: tmpDir });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.issues.length, 1);
+    assert.strictEqual(result.issues[0].number, 10);
+    assert.strictEqual(result.issues[0].pr, "42");
+    assert.strictEqual(result.issues[0].branch, "slice-10-test");
+  });
+
+  test("getDueRecoverables excludes paused and terminal states", () => {
+    const ledgerPath = join(tmpDir, ".ralph", "recovery-ledger.json");
+    mkdirSync(join(tmpDir, ".ralph"), { recursive: true });
+    
+    const pastTime = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    
+    writeFileSync(
+      ledgerPath,
+      JSON.stringify({
+        "10": {
+          pr: "42",
+          branch: "slice-10-test",
+          attempt: 1,
+          nextRetryAt: pastTime,
+          reason: "Manual pause",
+          status: "paused",
+          recordedAt: "2026-05-04T12:00:00Z",
+        },
+        "20": {
+          pr: "43",
+          branch: "slice-20-test",
+          attempt: 3,
+          nextRetryAt: pastTime,
+          reason: "Budget exhausted",
+          status: "terminal",
+          recordedAt: "2026-05-04T12:05:00Z",
+        },
+      }),
+    );
+
+    const result = getDueRecoverables({ repoRoot: tmpDir });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.issues.length, 0);
+  });
+
+  test("getDueRecoverables handles missing ledger gracefully", () => {
+    const result = getDueRecoverables({ repoRoot: tmpDir });
+
+    assert.strictEqual(result.success, true);
+    assert.strictEqual(result.issues.length, 0);
   });
 });

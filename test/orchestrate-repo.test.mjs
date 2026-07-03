@@ -923,3 +923,106 @@ test("orchestrator discovery path only queues ralph:ready issues (unchanged by l
 
   rmSync(root, { recursive: true, force: true });
 });
+
+test("discovers due recoverable issues and includes them in bounded queue", async () => {
+  const root = makeRepo();
+  let receivedQueue = null;
+  try {
+    // Create recovery ledger with one due recoverable
+    mkdirSync(join(root, ".ralph"), { recursive: true });
+    // Use a time relative to the FIXED test NOW (2026-06-12T12:00:00.000Z)
+    const pastTime = "2026-06-12T11:50:00.000Z"; // 10 minutes before the fixed NOW
+    writeFileSync(
+      join(root, ".ralph", "recovery-ledger.json"),
+      JSON.stringify({
+        "5": {
+          pr: "42",
+          branch: "slice-5-test",
+          attempt: 1,
+          nextRetryAt: pastTime,
+          reason: "Worker crashed",
+          status: "recoverable",
+          recordedAt: "2026-06-12T11:00:00.000Z",
+        },
+      }),
+    );
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(10), readyIssue(20)]),
+        resolveRepoRootFn: () => ({ ok: true }),
+        orchestrateRunFn: async (args) => {
+          receivedQueue = args.queue;
+          return { ok: true, runId: "test-run-1" };
+        },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.outcome, "launched");
+    // Recoverable issue 5 should be included in the queue alongside ready issues
+    assert.ok(receivedQueue);
+    const queueNumbers = receivedQueue.map((i) => i.number).sort((a, b) => a - b);
+    assert.deepEqual(queueNumbers, [5, 10, 20]);
+    // Verify recoverable has source marker
+    const recoverable = receivedQueue.find((i) => i.number === 5);
+    assert.equal(recoverable.source, "recovery");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("excludes paused and future recoverables from queue", async () => {
+  const root = makeRepo();
+  let receivedQueue = null;
+  try {
+    mkdirSync(join(root, ".ralph"), { recursive: true });
+    // Use times relative to the FIXED test NOW (2026-06-12T12:00:00.000Z)
+    const pastTime = "2026-06-12T11:50:00.000Z"; // 10 minutes before
+    const futureTime = "2026-06-12T12:10:00.000Z"; // 10 minutes after
+    writeFileSync(
+      join(root, ".ralph", "recovery-ledger.json"),
+      JSON.stringify({
+        "5": {
+          pr: "42",
+          branch: "slice-5-test",
+          attempt: 1,
+          nextRetryAt: pastTime,
+          reason: "Paused by user",
+          status: "paused",
+          recordedAt: "2026-06-12T11:00:00.000Z",
+        },
+        "6": {
+          pr: "43",
+          branch: "slice-6-test",
+          attempt: 1,
+          nextRetryAt: futureTime,
+          reason: "Cooldown not expired",
+          status: "recoverable",
+          recordedAt: "2026-06-12T11:05:00.000Z",
+        },
+      }),
+    );
+
+    const result = await runOrchestrateRepo({
+      repoRoot: root,
+      ...baseDeps({
+        execIssueList: ghIssueList([readyIssue(10)]),
+        resolveRepoRootFn: () => ({ ok: true }),
+        orchestrateRunFn: async (args) => {
+          receivedQueue = args.queue;
+          return { ok: true, runId: "test-run-1" };
+        },
+      }),
+    });
+
+    assert.equal(result.ok, true);
+    // Only the ready issue should be in the queue (paused and future excluded)
+    assert.ok(receivedQueue);
+    const queueNumbers = receivedQueue.map((i) => i.number);
+    assert.deepEqual(queueNumbers, [10]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

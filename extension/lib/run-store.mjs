@@ -622,3 +622,63 @@ export function resetBudget({ repoRoot, runId, issueNumber }) {
     return { success: false, error: `Failed to reset budget: ${err.message}` };
   }
 }
+
+/**
+ * Discover due recoverable issues from the recovery ledger
+ * 
+ * Returns issues that are ready to be retried based on their nextRetryAt time
+ * and status. Excludes paused and terminal states.
+ * 
+ * @param {Object} options
+ * @param {string} options.repoRoot - Repository root path
+ * @param {Date} [options.now] - Current time (for testing)
+ * @returns {Object} Result with issues array
+ * @returns {boolean} .success - Whether operation succeeded
+ * @returns {Array} .issues - Due recoverable issues
+ * @returns {number} .issues[].number - Issue number
+ * @returns {string} .issues[].pr - PR number
+ * @returns {string} .issues[].branch - Branch name
+ * @returns {number} .issues[].attempt - Current attempt count
+ * @returns {string} .issues[].reason - Recovery reason
+ */
+export function getDueRecoverables({ repoRoot, now = new Date() }) {
+  if (!repoRoot || typeof repoRoot !== "string") {
+    return { success: false, error: "repoRoot is required and must be a string", issues: [] };
+  }
+
+  const ledgerPath = join(repoRoot, ".ralph", "recovery-ledger.json");
+
+  if (!existsSync(ledgerPath)) {
+    return { success: true, issues: [] };
+  }
+
+  try {
+    const ledger = JSON.parse(readFileSync(ledgerPath, "utf-8"));
+    const currentTime = now.toISOString();
+    const issues = [];
+
+    for (const [issueNumber, entry] of Object.entries(ledger)) {
+      // Skip if not in recoverable state
+      if (entry.status !== "recoverable") {
+        continue;
+      }
+
+      // Skip if retry time hasn't passed yet
+      if (!entry.nextRetryAt || entry.nextRetryAt > currentTime) {
+        continue;
+      }
+
+      issues.push({
+        number: Number(issueNumber),
+        pr: entry.pr,
+        branch: entry.branch,
+        attempt: entry.attempt,
+        reason: entry.reason,
+      });
+    }
+
+    return { success: true, issues };
+  } catch (err) {
+    return { success: false, error: `Failed to read recovery ledger: ${err.message}`, issues: [] };
+  }
+}

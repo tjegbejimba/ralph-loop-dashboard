@@ -34,6 +34,7 @@ import { orchestrateRun as orchestrateRalphRun, resolveOrchestrateRepoRoot } fro
 import { isRalphPidAlive, resolveActiveRun } from "./status-data.mjs";
 import { queryIssues } from "./issue-query.mjs";
 import { classifyIssue, priorityRankFromShort, RALPH_STATES, CANONICAL_LABELS } from "./label-taxonomy.mjs";
+import { getDueRecoverables } from "./run-store.mjs";
 
 export const LEDGER_SCHEMA_VERSION = "ralph-orchestrator/v1";
 
@@ -622,10 +623,33 @@ export async function runOrchestrateRepo(options = {}) {
       title: issue.title,
       url: issue.url,
       priority: priorityShort(tx.priority),
+      source: "ready",
     });
   }
   result.discovered = eligible;
   result.skipped = skipped;
+
+  // Step 6.5: discover due recoverable issues from the recovery ledger
+  const recoverableResult = getDueRecoverables({ repoRoot, now: now() });
+  const recoverables = recoverableResult.success ? recoverableResult.issues : [];
+  
+  // Merge recoverables into eligible set
+  for (const recoverable of recoverables) {
+    // Skip if already in eligible (shouldn't happen, but be defensive)
+    if (eligible.some((e) => e.number === recoverable.number)) {
+      continue;
+    }
+    eligible.push({
+      number: recoverable.number,
+      title: `[Recovery attempt ${recoverable.attempt + 1}] Issue ${recoverable.number}`,
+      url: `https://github.com/${slug}/issues/${recoverable.number}`,
+      priority: "P2", // Recoverable issues use default P2 priority
+      source: "recovery",
+      pr: recoverable.pr,
+      branch: recoverable.branch,
+      attempt: recoverable.attempt,
+    });
+  }
 
   // Step 7: bounded queue (≤ maxIssues, highest priority first, then lowest
   // number within a priority band).
@@ -737,6 +761,7 @@ export async function runOrchestrateRepo(options = {}) {
   const launch = await orchestrateRunFn({
     repoRoot,
     defaultRepoRoot: trustedRepoRoot,
+    queue, // Pass the full queue with recovery metadata
     issueNumbers,
     runOptions: { parallelism, runMode },
     userConfig,
