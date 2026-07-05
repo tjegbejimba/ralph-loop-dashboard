@@ -28,8 +28,8 @@ describe("lane promotion", () => {
     const result = promoteLaneForIssue({ issue, opinion, route, live: false });
 
     assert.equal(result.lane, "AUTO");
-    // Now includes computed priority label
-    assert.deepEqual(result.labelsAdded, ["ralph:fast-lane", "priority:P1"]);
+    // Now includes computed priority label and the materialized runnable work type
+    assert.deepEqual(result.labelsAdded, ["ralph:fast-lane", "priority:P1", "work:standalone"]);
     assert.deepEqual(result.labelsRemoved, ["ralph:needs-triage"]);
     assert.equal(result.skipped, false);
   });

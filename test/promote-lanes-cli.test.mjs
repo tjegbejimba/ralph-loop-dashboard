@@ -245,8 +245,9 @@ describe("promote-lanes CLI integration", () => {
     assert.equal(result.promotions.length, 1);
     assert.equal(result.promotions[0].issueNumber, 101);
     assert.equal(result.promotions[0].lane, "AUTO");
-    // Now expects computed priority label as well as lane label
-    assert.deepEqual(result.promotions[0].labelsAdded, ["ralph:fast-lane", "priority:P1"]);
+    // Now expects computed priority label and the materialized runnable work
+    // type alongside the lane label, so the issue is one-tap promotable.
+    assert.deepEqual(result.promotions[0].labelsAdded, ["ralph:fast-lane", "priority:P1", "work:standalone"]);
     assert.deepEqual(result.promotions[0].labelsRemoved, ["ralph:needs-triage"]);
   });
 

@@ -158,6 +158,22 @@ export function promoteLaneForIssue({ issue, opinion, route, live = false }) {
     }
   }
 
+  // AUTO lane: materialize the recommended runnable work type so the human
+  // one-tap gate (promote-ready, which requires work:slice|work:standalone) can
+  // actually succeed. The AUTO predicate already required
+  // opinion.workTypeRecommendation to be a runnable type to reach this lane, so
+  // persist it as a label instead of discarding it. Never overwrite an existing
+  // work:* label. For work:slice with no parseable Parent #N, promote-ready's
+  // own Parent guard still fail-closes the ready promotion (cannot regress #142).
+  if (
+    lane === "AUTO" &&
+    !classification.workType &&
+    (opinion.workTypeRecommendation === "work:slice" ||
+      opinion.workTypeRecommendation === "work:standalone")
+  ) {
+    labelsAdded.push(opinion.workTypeRecommendation);
+  }
+
   // Remove conflicting ralph:* state labels
   for (const stateLabel of currentRalphStates) {
     if (stateLabel !== targetLabel) {
