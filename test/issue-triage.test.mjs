@@ -597,8 +597,8 @@ describe("issue triage advisory automation", () => {
     assert.ok(entry.promotion, "entry should have promotion field");
     assert.equal(entry.promotion.issueNumber, 502);
     assert.equal(entry.promotion.lane, "AUTO");
-    // Now includes computed priority label
-    assert.deepEqual(entry.promotion.labelsAdded, ["ralph:fast-lane", "priority:P1"]);
+    // Now includes computed priority label and the materialized runnable work type
+    assert.deepEqual(entry.promotion.labelsAdded, ["ralph:fast-lane", "priority:P1", "work:standalone"]);
     assert.deepEqual(entry.promotion.labelsRemoved, ["ralph:needs-triage"]);
     assert.equal(entry.promotion.skipped, false);
   });
