@@ -23,7 +23,9 @@ copilot_session_new_id() {
   elif [[ -r /proc/sys/kernel/random/uuid ]]; then
     tr '[:upper:]' '[:lower:]' </proc/sys/kernel/random/uuid
   else
-    openssl rand -hex 16 | sed -E 's/^(.{8})(.{4})(.{4})(.{4})(.{12})$/\1-\2-\3-\4-\5/'
+    # Force RFC-4122 version (4) and variant (8) nibbles; copilot --session-id
+    # rejects UUID-shaped strings that aren't valid v4.
+    openssl rand -hex 16 | sed -E 's/^(.{8})(.{4}).(.{3}).(.{3})(.{12})$/\1-\2-4\3-8\4-\5/'
   fi
 }
 
