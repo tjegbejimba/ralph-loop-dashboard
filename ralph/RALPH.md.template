@@ -19,9 +19,9 @@ You are running headless inside an automation loop with **no human at the keyboa
 ## Preflight
 
 1. Run `git status --porcelain`. If non-empty, abort: the loop expects a clean tree.
-2. Run `git fetch origin && git pull --ff-only origin main` to sync with the remote.
-3. Read `.ralph/config.json` for this repo's profile, issue-matching metadata, validation commands, and dashboard stage hints.
-4. Read `UBIQUITOUS_LANGUAGE.md` if present and the parent {{PRD_REFERENCE}} for vocabulary. Use those exact terms.
+2. Run `git checkout main && git pull --ff-only origin main`.
+3. Use the validation commands listed in this prompt. Do not read `.ralph/config.json` directly; in worker worktrees `.ralph/` may be a symlink to shared loop state outside the workspace.
+4. Read `UBIQUITOUS_LANGUAGE.md` if present and the parent PRD named in the appended issue body (if any) for vocabulary. Use those exact terms.
 5. Check whether an open PR already references this issue:
    `gh pr list --repo {{REPO}} --state open --search "Closes #<N>"`.
    If one exists, **resume it** — check out its branch, do not open a duplicate.
@@ -31,6 +31,8 @@ You are running headless inside an automation loop with **no human at the keyboa
    git log --oneline -10
    ```
    Inspect existing commits to understand what's done. If a PR already exists and CI is failing or pending, read the failing check logs, fix the branch, push, and re-watch checks before merging. Finish the remaining work, run validation, push, and merge.
+
+**CRITICAL: Stay in your assigned directory.** You are running in a dedicated git worktree. The current working directory when this prompt starts is your workspace — perform ALL git operations here. Never `cd` to parent directories or sibling paths. If you leave your worktree and run git commands elsewhere, you will corrupt the main checkout and fail the iteration.
 
 ## Workflow (TDD — strict)
 

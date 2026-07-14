@@ -219,6 +219,28 @@ fi
 # sync_to_origin_main wipes a slice branch.
 INITIAL_BRANCH="${RALPH_INITIAL_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 
+# Preflight: if the worktree is on a stale branch from a previous iteration
+# (e.g., slice-175-recoverable-dashboard after #175 merged), reset it to the
+# expected worker branch before starting the next iteration. Prevents workers
+# from escaping the worktree and mutating the main checkout (issue #187).
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if [[ "$CURRENT_BRANCH" != "$INITIAL_BRANCH" ]]; then
+  echo "⚠️  Worktree on unexpected branch '$CURRENT_BRANCH' (expected '$INITIAL_BRANCH'). Resetting..." >&2
+  if git checkout -q "$INITIAL_BRANCH" 2>/dev/null; then
+    # Branch exists — switch to it and reset
+    :
+  elif git checkout -qB "$INITIAL_BRANCH" origin/main 2>/dev/null; then
+    # Branch doesn't exist — create from origin/main
+    :
+  else
+    echo "❌ Failed to reset worktree to expected branch '$INITIAL_BRANCH'. Halting." >&2
+    exit 1
+  fi
+  git fetch -q origin main 2>/dev/null || true
+  git reset --hard origin/main >/dev/null
+  echo "✅ Reset to $INITIAL_BRANCH at $(git rev-parse --short HEAD)" >&2
+fi
+
 # Sync the current branch to origin/main. Works both when run on `main` itself
 # (legacy single-checkout mode) and in a dedicated worktree on a non-main branch
 # (preferred — see .ralph/launch.sh, prevents collisions with local edits).
