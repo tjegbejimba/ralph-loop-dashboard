@@ -6,6 +6,7 @@ import {
   buildLabelSchemaPlan,
   classifyIssue,
   orderIssuesForQueue,
+  parseParentNumber,
   planBackfill,
   planRepair,
   planRuntimeTransition,
@@ -14,6 +15,42 @@ import {
   validatePrdForEnqueue,
   validateRunnableForEnqueue,
 } from "../extension/lib/label-taxonomy.mjs";
+
+describe("parseParentNumber", () => {
+  it("parses inline Parent #N format", () => {
+    assert.equal(parseParentNumber("Parent #4"), 4);
+    assert.equal(parseParentNumber("Some text\nParent #42\n\nMore text"), 42);
+    assert.equal(parseParentNumber("Parent #123 and stuff"), 123);
+  });
+
+  it("parses section-style ## Parent with #N", () => {
+    assert.equal(parseParentNumber("## Parent\n#4"), 4);
+    assert.equal(parseParentNumber("## Parent\n\n#4"), 4);
+    assert.equal(parseParentNumber("Some text\n## Parent\n#42\n\nMore text"), 42);
+  });
+
+  it("parses section-style ## Parent with Parent #N", () => {
+    assert.equal(parseParentNumber("## Parent\nParent #4"), 4);
+    assert.equal(parseParentNumber("## Parent\n\nParent #42"), 42);
+  });
+
+  it("returns null when no parent marker is found", () => {
+    assert.equal(parseParentNumber("No parent here"), null);
+    assert.equal(parseParentNumber(""), null);
+    assert.equal(parseParentNumber(null), null);
+    assert.equal(parseParentNumber(undefined), null);
+  });
+
+  it("stops parsing at next section header", () => {
+    assert.equal(parseParentNumber("## Parent\n\n## Blocked by\n#99"), null);
+  });
+
+  it("only matches valid issue numbers (positive integers)", () => {
+    assert.equal(parseParentNumber("Parent #0"), null);
+    assert.equal(parseParentNumber("Parent #-5"), null);
+    assert.equal(parseParentNumber("## Parent\n#0"), null);
+  });
+});
 
 describe("priorityRankFromShort", () => {
   it("maps short priority strings to their numeric rank", () => {
