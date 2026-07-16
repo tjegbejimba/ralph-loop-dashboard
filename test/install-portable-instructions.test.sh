@@ -122,4 +122,56 @@ if ! grep -qF "$REPO_ROOT" "$local_file"; then
   exit 1
 fi
 
+# AC5: Upgrade path — installer should replace old marker-based blocks with new portable content
+UPGRADE_TARGET="$TEST_ROOT/upgrade-target"
+git init -q "$UPGRADE_TARGET"
+cd "$UPGRADE_TARGET"
+git checkout -qb main
+git config user.email "test@example.com"
+git config user.name "Test"
+echo "initial" > README.md
+git add README.md
+git commit -qm "initial"
+
+# Simulate old install with absolute paths
+upgrade_instructions="$UPGRADE_TARGET/.github/copilot-instructions.md"
+mkdir -p "$UPGRADE_TARGET/.github"
+cat > "$upgrade_instructions" <<EOF
+<!-- ralph-loop-instructions -->
+# Copilot instructions
+
+## Ralph Loop
+
+This repo may use Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the \`ralph-loop\` skill.
+
+- Ralph source checkout on this machine: \`/Users/old/Code/ralph-loop-dashboard\`
+- Repo worker prompt: \`.ralph/RALPH.md\`
+- Repo config: \`.ralph/config.json\`
+- Refresh scripts: \`/Users/old/Code/ralph-loop-dashboard/install.sh "$UPGRADE_TARGET" --scripts-only\`
+- Check/stop/cleanup workers: \`.ralph/launch.sh --status\`, \`--stop\`, or \`--cleanup\`
+
+Do not overwrite \`.ralph/RALPH.md\` or \`.ralph/config.json\` unless explicitly asked.
+EOF
+
+# Run new installer — should replace the old block
+"$REPO_ROOT/install.sh" "$UPGRADE_TARGET" --scripts-only --profile generic >/dev/null
+
+if grep -qE '(/Users/|/home/|C:\\Users\\)' "$upgrade_instructions"; then
+  echo "FAIL: installer should replace old block with portable content on upgrade"
+  echo "--- content ---"
+  cat "$upgrade_instructions"
+  echo "---------------"
+  exit 1
+fi
+
+if ! grep -q "\.ralph/RALPH\.md" "$upgrade_instructions"; then
+  echo "FAIL: upgraded instructions should still mention .ralph/RALPH.md"
+  exit 1
+fi
+
+if ! grep -q "ralph-loop" "$upgrade_instructions"; then
+  echo "FAIL: upgraded instructions should still reference ralph-loop skill"
+  exit 1
+fi
+
 echo "PASS: install.sh writes portable instructions and local context separately"

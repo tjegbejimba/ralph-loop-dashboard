@@ -280,11 +280,35 @@ install_agent_instructions() {
 
   mkdir -p "$github_dir"
 
-  if [[ -f "$instructions_file" ]] && { grep -qF "$marker" "$instructions_file" || grep -qE '^[[:space:]]{0,3}##[[:space:]]+Ralph Loop[[:space:]]*#*[[:space:]]*$' "$instructions_file"; }; then
-    echo "ℹ️  Ralph agent instructions already present: $instructions_file"
+  # If file exists and has the installer marker, replace the old block with new portable content
+  if [[ -f "$instructions_file" ]] && grep -qF "$marker" "$instructions_file"; then
+    # Match from marker to the "Do not overwrite" line (end of Ralph block), then preserve rest
+    perl -i -0pe '
+      s{<!-- ralph-loop-instructions -->.*?Do not overwrite.*?(?:unless explicitly asked\.?|\.ralph/config\.json unless explicitly asked\.)}
+       {<!-- ralph-loop-instructions -->
+## Ralph Loop
+
+This repo uses Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.
+
+- Repo worker prompt: `.ralph/RALPH.md`
+- Repo config: `.ralph/config.json`
+- Check/stop/cleanup workers: `.ralph/launch.sh --status`, `--stop`, or `--cleanup`
+
+To refresh `.ralph/` scripts from the Ralph source checkout, run `install.sh --scripts-only` against this repo from your local Ralph source.
+
+Do not overwrite `.ralph/RALPH.md` or `.ralph/config.json` unless explicitly asked.}ms;
+    ' "$instructions_file"
+    echo "✅ Ralph agent instructions updated: $instructions_file"
     return 0
   fi
 
+  # If file has manual Ralph Loop section (no marker), preserve it
+  if [[ -f "$instructions_file" ]] && grep -qE '^[[:space:]]{0,3}##[[:space:]]+Ralph Loop[[:space:]]*#*[[:space:]]*$' "$instructions_file"; then
+    echo "ℹ️  Ralph agent instructions already present (manual): $instructions_file"
+    return 0
+  fi
+
+  # File exists but no Ralph section — append new block
   if [[ -f "$instructions_file" ]]; then
     {
       printf '\n'
@@ -301,6 +325,7 @@ install_agent_instructions() {
     return 0
   fi
 
+  # New file — create with full header
   {
     printf '%s\n' "$marker"
     printf '# Copilot instructions\n\n'
