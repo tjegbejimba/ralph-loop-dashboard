@@ -80,9 +80,42 @@ function namesFromLabels(labels) {
     .filter((name) => typeof name === "string" && name.length > 0);
 }
 
+/**
+ * Remove fenced code blocks (``` … ``` / ~~~ … ~~~) and inline code (`…`) from a
+ * body before scanning for markers. Without this, an issue that merely shows
+ * a marker inside a code example would be misread as genuine.
+ */
+function stripCodeBlocks(body = "") {
+  return String(body || "")
+    .replace(/```[\s\S]*?```/g, "\n")
+    .replace(/~~~[\s\S]*?~~~/g, "\n")
+    .replace(/`[^`\n]*`/g, " ");
+}
+
 export function parseParentNumber(body = "") {
-  const match = String(body || "").match(/(?:^|\n)Parent #([1-9][0-9]*)\b/);
-  return match ? Number(match[1]) : null;
+  const text = stripCodeBlocks(String(body || ""));
+  
+  // First try inline format: "Parent #N"
+  const inlineMatch = text.match(/(?:^|\n)Parent #([1-9][0-9]*)\b/);
+  if (inlineMatch) return Number(inlineMatch[1]);
+  
+  // Then try section format: "## Parent" followed by "#N" or "Parent #N"
+  const lines = text.split(/\r?\n/);
+  let inSection = false;
+  for (const line of lines) {
+    if (/^##\s+Parent\b/i.test(line)) {
+      inSection = true;
+      continue;
+    }
+    if (inSection && /^##\s+/.test(line)) break; // Next section header
+    if (!inSection) continue;
+    
+    // Match "#N" or "Parent #N" in the section
+    const sectionMatch = line.match(/#([1-9][0-9]*)\b/);
+    if (sectionMatch) return Number(sectionMatch[1]);
+  }
+  
+  return null;
 }
 
 export function parseBlockerNumbers(body = "") {
