@@ -252,6 +252,26 @@ render_validation_commands() {
   ' "$config_file"
 }
 
+install_local_context() {
+  local target="$1"
+  local ralph_dir="$target/.ralph"
+  local local_file="$ralph_dir/local.md"
+
+  mkdir -p "$ralph_dir"
+
+  {
+    printf '# Local Ralph context (not tracked)\n\n'
+    printf 'This file contains machine-specific paths for this Ralph installation.\n'
+    printf 'It is gitignored and should not be committed to the repository.\n\n'
+    printf -- '- Ralph source checkout on this machine: `%s`\n' "$REPO_DIR"
+    printf -- '- Refresh command for this repo:\n'
+    printf '  ```bash\n'
+    printf '  %s/install.sh "%s" --scripts-only\n' "$REPO_DIR" "$target"
+    printf '  ```\n'
+  } > "$local_file"
+  echo "✅ Local Ralph context installed: $local_file"
+}
+
 install_agent_instructions() {
   local target="$1"
   local github_dir="$target/.github"
@@ -260,38 +280,61 @@ install_agent_instructions() {
 
   mkdir -p "$github_dir"
 
-  if [[ -f "$instructions_file" ]] && { grep -qF "$marker" "$instructions_file" || grep -qE '^[[:space:]]{0,3}##[[:space:]]+Ralph Loop[[:space:]]*#*[[:space:]]*$' "$instructions_file"; }; then
-    echo "ℹ️  Ralph agent instructions already present: $instructions_file"
+  # If file exists and has the installer marker, replace the old block with new portable content
+  if [[ -f "$instructions_file" ]] && grep -qF "$marker" "$instructions_file"; then
+    # Match from marker to the "Do not overwrite" line (end of Ralph block), then preserve rest
+    perl -i -0pe '
+      s{<!-- ralph-loop-instructions -->.*?Do not overwrite.*?(?:unless explicitly asked\.?|\.ralph/config\.json unless explicitly asked\.)}
+       {<!-- ralph-loop-instructions -->
+## Ralph Loop
+
+This repo uses Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.
+
+- Repo worker prompt: `.ralph/RALPH.md`
+- Repo config: `.ralph/config.json`
+- Check/stop/cleanup workers: `.ralph/launch.sh --status`, `--stop`, or `--cleanup`
+
+To refresh `.ralph/` scripts from the Ralph source checkout, run `install.sh --scripts-only` against this repo from your local Ralph source.
+
+Do not overwrite `.ralph/RALPH.md` or `.ralph/config.json` unless explicitly asked.}ms;
+    ' "$instructions_file"
+    echo "✅ Ralph agent instructions updated: $instructions_file"
     return 0
   fi
 
+  # If file has manual Ralph Loop section (no marker), preserve it
+  if [[ -f "$instructions_file" ]] && grep -qE '^[[:space:]]{0,3}##[[:space:]]+Ralph Loop[[:space:]]*#*[[:space:]]*$' "$instructions_file"; then
+    echo "ℹ️  Ralph agent instructions already present (manual): $instructions_file"
+    return 0
+  fi
+
+  # File exists but no Ralph section — append new block
   if [[ -f "$instructions_file" ]]; then
     {
       printf '\n'
       printf '%s\n' "$marker"
       printf '## Ralph Loop\n\n'
-      printf 'This repo may use Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.\n\n'
-      printf -- '- Ralph source checkout on this machine: `%s`\n' "$REPO_DIR"
+      printf 'This repo uses Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.\n\n'
       printf -- '- Repo worker prompt: `.ralph/RALPH.md`\n'
       printf -- '- Repo config: `.ralph/config.json`\n'
-      printf -- '- Refresh scripts: `%s/install.sh "%s" --scripts-only`\n' "$REPO_DIR" "$target"
       printf -- '- Check/stop/cleanup workers: `.ralph/launch.sh --status`, `--stop`, or `--cleanup`\n\n'
+      printf 'To refresh `.ralph/` scripts from the Ralph source checkout, run `install.sh --scripts-only` against this repo from your local Ralph source.\n\n'
       printf 'Do not overwrite `.ralph/RALPH.md` or `.ralph/config.json` unless explicitly asked.\n'
     } >> "$instructions_file"
     echo "✅ Ralph agent instructions appended: $instructions_file"
     return 0
   fi
 
+  # New file — create with full header
   {
     printf '%s\n' "$marker"
     printf '# Copilot instructions\n\n'
     printf '## Ralph Loop\n\n'
-    printf 'This repo may use Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.\n\n'
-    printf -- '- Ralph source checkout on this machine: `%s`\n' "$REPO_DIR"
+    printf 'This repo uses Ralph Loop. If an agent needs to understand, install, refresh, operate, or troubleshoot Ralph here, load the `ralph-loop` skill.\n\n'
     printf -- '- Repo worker prompt: `.ralph/RALPH.md`\n'
     printf -- '- Repo config: `.ralph/config.json`\n'
-    printf -- '- Refresh scripts: `%s/install.sh "%s" --scripts-only`\n' "$REPO_DIR" "$target"
     printf -- '- Check/stop/cleanup workers: `.ralph/launch.sh --status`, `--stop`, or `--cleanup`\n\n'
+    printf 'To refresh `.ralph/` scripts from the Ralph source checkout, run `install.sh --scripts-only` against this repo from your local Ralph source.\n\n'
     printf 'Do not overwrite `.ralph/RALPH.md` or `.ralph/config.json` unless explicitly asked.\n'
   } > "$instructions_file"
   echo "✅ Ralph agent instructions installed: $instructions_file"
@@ -377,6 +420,7 @@ install_scripts() {
     chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
   fi
   install_config "$target"
+  install_local_context "$target"
   install_agent_instructions "$target"
 
   if [[ "$has_prompt" -eq 1 ]]; then
@@ -415,6 +459,9 @@ lock/
 state.json
 state.lock/
 runs/
+
+# Machine-specific local context — never commit.
+local.md
 EOF
 
   echo "✅ Loop scripts installed. Customize $ralph_dir/RALPH.md if needed."
