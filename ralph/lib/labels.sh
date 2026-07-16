@@ -76,8 +76,26 @@ ralph_issue_state() {
 }
 
 ralph_parent_number() {
-  local body="$1"
-  printf '%s\n' "$body" | sed -nE 's/^Parent #([1-9][0-9]*).*$/\1/p' | head -1
+  local body="$1" line parent_section=0 num
+  
+  # First try inline format: line-anchored "Parent #N"
+  num=$(printf '%s\n' "$body" | sed -nE 's/^Parent #([1-9][0-9]*).*$/\1/p' | head -1)
+  [[ -n "$num" ]] && { printf '%s' "$num"; return; }
+  
+  # Then try section format: ## Parent followed by #N
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^##[[:space:]]+Parent ]]; then
+      parent_section=1
+      continue
+    fi
+    if [[ "$parent_section" -eq 1 && "$line" =~ ^##[[:space:]] ]]; then
+      break  # Next section, stop
+    fi
+    if [[ "$parent_section" -eq 1 && "$line" =~ \#([1-9][0-9]*) ]]; then
+      printf '%s' "${BASH_REMATCH[1]}"
+      return
+    fi
+  done <<< "$body"
 }
 
 _ralph_append_tag() {

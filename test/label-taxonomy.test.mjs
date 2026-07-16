@@ -50,6 +50,12 @@ describe("parseParentNumber", () => {
     assert.equal(parseParentNumber("Parent #-5"), null);
     assert.equal(parseParentNumber("## Parent\n#0"), null);
   });
+
+  it("ignores parent markers inside code blocks", () => {
+    assert.equal(parseParentNumber("Example:\n```markdown\n## Parent\n#123\n```"), null);
+    assert.equal(parseParentNumber("Example: `Parent #99` is the syntax"), null);
+    assert.equal(parseParentNumber("~~~\nParent #88\n~~~"), null);
+  });
 });
 
 describe("priorityRankFromShort", () => {

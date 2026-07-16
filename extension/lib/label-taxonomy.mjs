@@ -80,8 +80,20 @@ function namesFromLabels(labels) {
     .filter((name) => typeof name === "string" && name.length > 0);
 }
 
+/**
+ * Remove fenced code blocks (``` … ``` / ~~~ … ~~~) and inline code (`…`) from a
+ * body before scanning for markers. Without this, an issue that merely shows
+ * a marker inside a code example would be misread as genuine.
+ */
+function stripCodeBlocks(body = "") {
+  return String(body || "")
+    .replace(/```[\s\S]*?```/g, "\n")
+    .replace(/~~~[\s\S]*?~~~/g, "\n")
+    .replace(/`[^`\n]*`/g, " ");
+}
+
 export function parseParentNumber(body = "") {
-  const text = String(body || "");
+  const text = stripCodeBlocks(String(body || ""));
   
   // First try inline format: "Parent #N"
   const inlineMatch = text.match(/(?:^|\n)Parent #([1-9][0-9]*)\b/);
