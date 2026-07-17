@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { computePipelineErrorState, computePipelineState, discoverFailedRunItems, discoverRecoverableRunItems } from "../extension-pipeline/lib/pipeline-state.mjs";
+import { fetchMissingFailedIssueStates } from "../extension-pipeline/lib/failed-issue-state.mjs";
 import { renderHtml } from "../extension-pipeline/renderer.mjs";
 
 function issue(number, labels = []) {
@@ -201,6 +202,64 @@ test("current non-failed Ralph issue state suppresses stale failed run noise", (
 
   assert.equal(state.failed.length, 0);
   assert.deepEqual(state.nextQueue, [139]);
+});
+
+test("closed failed issues remain historical instead of needing attention", () => {
+  const closed = {
+    ...issue(139, ["ralph:failed", "priority:P2", "work:standalone"]),
+    state: "CLOSED",
+    closedAt: "2026-06-29T10:00:00Z",
+  };
+  const state = computePipelineState({
+    repo: { slug: "tj/repo", label: "repo", mainCheckout: "/repo" },
+    openIssues: [],
+    closedIssues: [closed],
+    openPrs: [],
+    claims: {},
+    failedRunItems: [
+      {
+        number: 139,
+        title: "Old failed run",
+        runId: "old-failed-run",
+        reason: "Worker process died",
+        failedAt: "2026-06-20T10:00:00Z",
+      },
+    ],
+  });
+
+  assert.equal(state.failed.length, 0);
+  assert.deepEqual(state.recent, [{
+    number: 139,
+    title: "Issue 139",
+    url: "https://github.com/tj/repo/issues/139",
+    closedAt: "2026-06-29T10:00:00Z",
+    outcome: "failed",
+  }]);
+});
+
+test("fetches current GitHub state for failed runs outside the recent issue window", async () => {
+  const calls = [];
+  const result = await fetchMissingFailedIssueStates({
+    repoSlug: "tj/repo",
+    failedRunItems: [{ number: 188 }, { number: 188 }, { number: 189 }],
+    knownIssues: [{ number: 189 }],
+    fetchIssue: async ({ repoSlug, issueNumber }) => {
+      calls.push({ repoSlug, issueNumber });
+      return {
+        number: issueNumber,
+        state: "CLOSED",
+        closedAt: "2026-05-09T06:13:33Z",
+      };
+    },
+  });
+
+  assert.deepEqual(calls, [{ repoSlug: "tj/repo", issueNumber: 188 }]);
+  assert.deepEqual(result.issues, [{
+    number: 188,
+    state: "CLOSED",
+    closedAt: "2026-05-09T06:13:33Z",
+  }]);
+  assert.deepEqual(result.errors, []);
 });
 
 test("durable failed run overrides stale ralph:running issue label without duplication", () => {

@@ -277,6 +277,7 @@ function failureTimestamp(failure) {
 
 function shouldSuppressRunFailureForCurrentIssue(failure, currentIssue) {
   if (!currentIssue) return false;
+  if (currentIssue.state === "CLOSED" || currentIssue.closedAt) return true;
   const currentLabels = labelNames(currentIssue);
   if (currentLabels.includes("ralph:failed") || currentLabels.includes("ralph:running")) return false;
   if (!currentLabels.some((name) => name.startsWith("ralph:"))) return false;
@@ -463,20 +464,6 @@ export function computePipelineState({
     } else if (st === "ralph:needs-triage") {
       needsTriage.push(card(issue));
     }
-  }
-
-  for (const issue of closedIssues) {
-    const names = labelNames(issue);
-    if (!names.includes("ralph:failed")) continue;
-    upsertFailure({
-      ...card(issue, {
-        state: "ralph:failed",
-        reason: "Closed with ralph:failed label",
-        failedAt: issue.closedAt || null,
-        source: "closed-issue-label",
-      }),
-      ageDays: null,
-    });
   }
 
   for (const failure of failedRunItems || []) {

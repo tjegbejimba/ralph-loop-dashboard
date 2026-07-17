@@ -12,6 +12,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 
 import { computePipelineErrorState, computePipelineState, discoverFailedRunItems, discoverRecoverableRunItems } from "./lib/pipeline-state.mjs";
+import { fetchMissingFailedIssueStates } from "./lib/failed-issue-state.mjs";
 import { fetchPromotionIssue, handlePromoteReadyRequest, promoteReadyFromPipeline } from "./lib/promote-ready.mjs";
 import { renderHtml } from "./renderer.mjs";
 
@@ -177,6 +178,8 @@ async function readJsonSafe(path) {
 async function computeState(repo) {
   const repoSlug = repo.slug;
   const mainCheckout = repo.mainCheckout;
+  const failedRunItems = discoverFailedRunItems(mainCheckout);
+  const recoverableRunItems = discoverRecoverableRunItems(mainCheckout);
   let error = null;
   let openIssues = [];
   let closedIssues = [];
@@ -192,6 +195,34 @@ async function computeState(repo) {
   }
 
   if (!error) {
+    const missing = await fetchMissingFailedIssueStates({
+      repoSlug,
+      failedRunItems,
+      knownIssues: [...openIssues, ...closedIssues],
+      fetchIssue: ({ issueNumber }) =>
+        ghJson([
+          "issue",
+          "view",
+          String(issueNumber),
+          "--repo",
+          repoSlug,
+          "--json",
+          "number,title,labels,assignees,body,url,state,closedAt,createdAt,updatedAt",
+        ]),
+    });
+    for (const issue of missing.issues) {
+      if (issue.state === "CLOSED") closedIssues.push(issue);
+      else openIssues.push(issue);
+    }
+    for (const issueError of missing.errors) {
+      logSafe(
+        `Could not refresh failed issue #${issueError.issueNumber}: ${issueError.message}`,
+        "warning",
+      );
+    }
+  }
+
+  if (!error) {
     try {
       openPrs = await ghJson(["pr", "list", "--repo", repoSlug, "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,closingIssuesReferences"]);
     } catch (err) {
@@ -204,8 +235,6 @@ async function computeState(repo) {
 
   const claims = (await readJsonSafe(join(mainCheckout, ".ralph", "state.json")))?.claims || {};
   const ledger = await readJsonSafe(join(mainCheckout, ".ralph", "orchestrator", "ledger.json"));
-  const failedRunItems = discoverFailedRunItems(mainCheckout);
-  const recoverableRunItems = discoverRecoverableRunItems(mainCheckout);
   const state = computePipelineState({
     repo,
     openIssues,
