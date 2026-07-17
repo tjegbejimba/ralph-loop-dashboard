@@ -1,4 +1,4 @@
-export function renderHtml() {
+export function renderHtml(promotionToken = "") {
   return `<!doctype html><html><head><meta charset="utf-8"/><title>Ralph Pipeline</title>
 <style>
 :root{--p0:var(--true-color-red,#cf222e);--ok:var(--true-color-green,#1a7f37);--run:var(--true-color-blue,#0969da);--warn:var(--true-color-orange,#bc4c00)}
@@ -21,11 +21,12 @@ section{margin:12px 0 6px}
 .sec-h{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-weight:600;font-size:12px;letter-spacing:.02em;cursor:pointer;user-select:none}
 .sec-h .cnt{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--background-color-muted,#161b22);border:1px solid var(--border-color-default,#30363d);color:var(--text-color-muted,#8b949e);font-weight:600;font-size:10.5px}
 .sec-h .car{color:var(--text-color-muted,#8b949e);font-size:10px;width:10px;transition:transform .12s}.sec-h.collapsed .car{transform:rotate(-90deg)}.sec-body.hidden{display:none}
-.card{border:1px solid var(--border-color-default,#30363d);border-radius:8px;padding:8px 10px;margin-bottom:6px;background:var(--background-color-muted,#161b22);display:block;text-decoration:none;color:inherit}
+.card-wrap{position:relative}.card{border:1px solid var(--border-color-default,#30363d);border-radius:8px;padding:8px 10px;margin-bottom:6px;background:var(--background-color-muted,#161b22);display:block;text-decoration:none;color:inherit}.card.promotable{padding-bottom:34px}
 .card:hover{border-color:var(--color-focus-outline,#388bfd)}.card.next{border-left:3px solid var(--run)}.card.running{border-left:3px solid var(--ok)}.card.fail{border-left:3px solid var(--p0)}
 .row1{display:flex;align-items:baseline;gap:6px}.num{font-family:var(--font-mono,monospace);color:var(--text-color-muted,#8b949e);font-size:11px}.ttl{flex:1;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.age{font-size:10px;color:var(--text-color-muted,#8b949e);white-space:nowrap}
 .chips{margin-top:5px;display:flex;flex-wrap:wrap;gap:4px;align-items:center}.chip{font-size:10px;padding:1px 6px;border-radius:10px;border:1px solid var(--border-color-default,#30363d);color:var(--text-color-muted,#8b949e)}
 .chip.p0,.chip.p1,.chip.fail{color:#ff9d9d;border-color:#7d2a2a}.chip.run{color:#a6d4ff;border-color:#1f4e7a}.chip.q{color:#aee5c0;border-color:#1f5e34}.chip.lane{color:#d8c4ff;border-color:#4b3a78}
+.chip.promote{position:absolute;left:10px;bottom:9px;color:#aee5c0;border-color:#1f5e34;background:color-mix(in srgb,var(--ok) 12%,transparent);padding:2px 8px}.chip.promote:hover{border-color:var(--ok)}.chip.promote.failed{color:#ffb4b4;border-color:#7d2a2a}
 .pr{font-size:10px;color:#a6d4ff;text-decoration:none}.pr:hover{text-decoration:underline}
 .note{font-size:10.5px;color:var(--text-color-muted,#8b949e);margin-top:4px}.note.fail{color:#ffb4b4}.note code{font-family:var(--font-mono,monospace);font-size:10px}
 .empty{font-size:11px;color:var(--text-color-muted,#8b949e);padding:2px 2px 6px;font-style:italic}
@@ -35,6 +36,7 @@ section{margin:12px 0 6px}
 <header><div class="htop"><h1>Ralph Pipeline</h1><span class="spacer"></span><span class="meta" id="meta">loading...</span><button id="refresh">↻</button></div><div class="tabs" id="tabs"></div></header>
 <main id="main"><div class="empty">Loading pipeline...</div></main>
 <script>
+const PROMOTION_TOKEN=${JSON.stringify(promotionToken)};
 const $=(s)=>document.querySelector(s);
 let REPOS=[],CUR=null,LAST_OK=0;
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
@@ -44,7 +46,8 @@ function pcls(p){return p?("p"+(p.replace("priority:P",""))):"";}
 function rel(iso){if(!iso)return"";const t=Date.parse(iso);if(isNaN(t))return"";let s=Math.max(0,(Date.now()-t)/1000);if(s<60)return Math.floor(s)+"s";if(s<3600)return Math.floor(s/60)+"m";if(s<86400)return Math.floor(s/3600)+"h";return Math.floor(s/86400)+"d";}
 function ageTxt(d){return d==null?"":(d===0?"today":d+"d old");}
 function card(c,extraCls){
-  const cls="card "+(extraCls||"")+(c.queued?" next":"");
+  const canPromote=c.state==="ralph:fast-lane";
+  const cls="card "+(extraCls||"")+(c.queued?" next":"")+(canPromote?" promotable":"");
   let chips="";
   chips+=chip(c.repoSlug,"");
   chips+=chip(c.priority&&c.priority.replace("priority:",""),pcls(c.priority));
@@ -77,9 +80,11 @@ function card(c,extraCls){
       (c.logFilePath?' · log <code>'+esc(c.logFilePath)+'</code>':(c.logFile?' · log <code>'+esc(c.logFile)+'</code>':''))+'</div>';
   }
   const age=ageTxt(c.ageDays);
-  return '<a class="'+cls+'" href="'+esc(href(c.url))+'" target="_blank" rel="noopener">'+
+  const issueCard='<a class="'+cls+'" href="'+esc(href(c.url))+'" target="_blank" rel="noopener">'+
     '<div class="row1"><span class="num">#'+c.number+'</span><span class="ttl">'+esc(c.title)+'</span>'+(age?'<span class="age">'+age+'</span>':'')+'</div>'+
     (chips?'<div class="chips">'+chips+'</div>':"")+note+'</a>';
+  if(!canPromote)return issueCard;
+  return '<div class="card-wrap">'+issueCard+'<button class="chip promote" data-repo="'+esc(c.repoSlug)+'" data-issue="'+c.number+'" title="Promote to ralph:ready">one-tap</button></div>';
 }
 function collapsed(key){try{return localStorage.getItem("rp.col."+key)==="1";}catch(e){return false;}}
 function setCollapsed(key,v){try{localStorage.setItem("rp.col."+key,v?"1":"0");}catch(e){}}
@@ -115,6 +120,7 @@ function render(d){
   html+=section("recent","✅","Recently completed",d.recent.map(r=>({number:r.number,title:r.title,url:r.url,state:"ralph:"+r.outcome,ageDays:null,repoSlug:d.repoSlug})),"","nothing yet");
   $("#main").innerHTML=html;
   document.querySelectorAll('.sec-h').forEach(h=>{h.onclick=()=>{const k=h.getAttribute("data-k");const body=h.nextElementSibling;const now=!h.classList.contains("collapsed");h.classList.toggle("collapsed",now);body.classList.toggle("hidden",now);setCollapsed(k,now);};});
+  document.querySelectorAll('.chip.promote').forEach(b=>{b.onclick=async(e)=>{e.preventDefault();e.stopPropagation();b.disabled=true;b.textContent="moving...";try{const r=await fetch("/promote-ready?repo="+encodeURIComponent(b.dataset.repo)+"&issue="+encodeURIComponent(b.dataset.issue),{method:"POST",headers:{"X-Ralph-Promotion-Token":PROMOTION_TOKEN}});const result=await r.json();if(!r.ok)throw new Error(result.skipReason||result.error||"Promotion failed");await load();}catch(err){b.disabled=false;b.textContent="blocked";b.title=String(err&&err.message?err.message:err);b.classList.add("failed");}};});
   LAST_OK=Date.now();updateMeta(d);
 }
 function updateMeta(d){const m=$("#meta");if(!LAST_OK){m.textContent="loading...";return;}const secs=Math.floor((Date.now()-LAST_OK)/1000);const ago=secs<2?"just now":secs<60?secs+"s ago":Math.floor(secs/60)+"m ago";m.textContent=(d?d.repoSlug+" · ":"")+"updated "+ago;m.classList.toggle("stale",secs>45);}

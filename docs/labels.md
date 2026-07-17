@@ -32,7 +32,7 @@ conflict and fail closed until repaired.
 - **CLI**: `node extension/cli.mjs promote-ready [--dry-run|--live] [--issue N] [--repo OWNER/NAME]`
   - Dry-run by default (safe preview); `--live` applies mutations.
   - `--issue N` promotes a single issue; omit to batch all fast-lane issues.
-- **Dashboard**: "Awaiting promotion (fast-lane)" section with per-row Promote button (coming soon).
+- **Ralph Pipeline canvas**: tap the `one-tap` chip on a `ralph:fast-lane` card. The same guards run again before the issue moves to `ralph:ready` and appears in the ready queue.
 
 **Promotion guards** (all must pass):
 - Issue must currently be `ralph:fast-lane`.
