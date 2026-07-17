@@ -415,6 +415,7 @@ install_scripts() {
     cp "$REPO_DIR/ralph/lib/recovery-ledger.sh" "$ralph_dir/lib/recovery-ledger.sh"
     cp "$REPO_DIR/ralph/lib/copilot-session.sh" "$ralph_dir/lib/copilot-session.sh"
     cp "$REPO_DIR/ralph/lib/terminal-cli.sh" "$ralph_dir/lib/terminal-cli.sh"
+    cp "$REPO_DIR/ralph/lib/prd-branch.sh" "$ralph_dir/lib/prd-branch.sh"
     rm -rf "$ralph_dir/profiles"
     cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
     chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"

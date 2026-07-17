@@ -138,6 +138,16 @@ else
   fail "Ownership should be rejected for non-existent run"
 fi
 
+# Test 7b: Ownership records remain valid JSON for configuration values
+escaped_run_id="run-escaped"
+if create_prd_ownership_record \
+  "$escaped_run_id" "204" "ralph/prd/escaped-204" 'origin"quoted' "main" "$base_sha" \
+  && jq -e '.remote == "origin\"quoted"' ".ralph/runs/$escaped_run_id/ownership.json" >/dev/null; then
+  pass "Ownership record safely encodes configuration values"
+else
+  fail "Ownership record should remain valid JSON for quoted values"
+fi
+
 # ===========================================================================
 # Group 3 — Branch creation from remote
 # ===========================================================================
@@ -180,6 +190,30 @@ else
   fail "create_prd_branch failed"
 fi
 
+# Test 8b: Resume an owned remote branch at its existing head, not newer main
+git push -q origin "$new_branch"
+owned_remote_sha=$(git rev-parse "$new_branch")
+recorded_base_sha=$(jq -r '.initial_base_sha' ".ralph/runs/$new_run_id/ownership.json")
+git branch -D "$new_branch" >/dev/null
+git checkout -q main
+git reset --hard origin/main >/dev/null
+echo "Newer delivery change" >> README.md
+git add README.md
+git commit -qm "Advance delivery branch"
+git push -q origin main
+
+if create_prd_branch "$new_run_id" "201" "Renamed Feature" "origin" "main" ""; then
+  resumed_sha=$(git rev-parse "$new_branch")
+  resumed_base_sha=$(jq -r '.initial_base_sha' ".ralph/runs/$new_run_id/ownership.json")
+  if [[ "$resumed_sha" == "$owned_remote_sha" && "$resumed_base_sha" == "$recorded_base_sha" ]]; then
+    pass "Owned remote branch resumes at its frozen head and base"
+  else
+    fail "Owned remote resume changed branch head or initial base"
+  fi
+else
+  fail "Owned remote branch should resume safely"
+fi
+
 # Test 9: Refuse to create branch that already exists without ownership
 git checkout -qb "ralph/prd/conflicting-202"
 git checkout -q main
@@ -209,6 +243,16 @@ if create_prd_branch "$frozen_run_id" "203" "Frozen Title" "origin" "main" ""; t
   fi
 else
   fail "Initial PRD branch creation failed"
+fi
+
+# Test 9c: Invalid resolved names fail without leaving ownership evidence
+invalid_run_id="run-invalid-branch"
+if ! create_prd_branch \
+  "$invalid_run_id" "205" "Invalid Branch" "origin" "main" "bad..{prd_number}" 2>/dev/null \
+  && [[ ! -e ".ralph/runs/$invalid_run_id/ownership.json" ]]; then
+  pass "Invalid branch setup fails without partial ownership evidence"
+else
+  fail "Invalid branch setup should not leave ownership evidence"
 fi
 
 # ===========================================================================
@@ -252,6 +296,14 @@ if can_start_prd "201"; then
   pass "Allowed starting PRD when none is active"
 else
   fail "Should allow starting PRD when none is active"
+fi
+
+# Test 14: The same durable run can resume its active PRD
+echo '{"active_prd": "201", "active_run_id": "run-resume"}' > "$STATE_FILE"
+if can_start_prd "201" "run-resume"; then
+  pass "Allowed resuming the same active PRD run"
+else
+  fail "Should allow resuming the same active PRD run"
 fi
 
 # ===========================================================================

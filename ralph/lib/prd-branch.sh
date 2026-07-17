@@ -64,26 +64,49 @@ create_prd_ownership_record() {
   local remote="$4"
   local delivery_branch="$5"
   local base_sha="$6"
-  
+
+  if ! [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "ERROR: Invalid run ID '$run_id'" >&2
+    return 1
+  fi
+  if ! [[ "$prd_number" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: Invalid PRD number '$prd_number'" >&2
+    return 1
+  fi
+
   local run_dir="$STATE_DIR/runs/$run_id"
   mkdir -p "$run_dir" || return 1
-  
+
   local timestamp
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  
-  cat > "$run_dir/ownership.json" <<EOF
-{
-  "run_id": "$run_id",
-  "prd_number": "$prd_number",
-  "branch_name": "$branch_name",
-  "remote": "$remote",
-  "delivery_branch": "$delivery_branch",
-  "initial_base_sha": "$base_sha",
-  "created_at": "$timestamp"
-}
-EOF
-  
-  [[ $? -eq 0 ]]
+
+  local ownership_file="$run_dir/ownership.json"
+  local tmp
+  tmp=$(mktemp "$run_dir/.ownership.XXXXXX") || return 1
+  if ! jq -n \
+    --arg run_id "$run_id" \
+    --arg prd_number "$prd_number" \
+    --arg branch_name "$branch_name" \
+    --arg remote "$remote" \
+    --arg delivery_branch "$delivery_branch" \
+    --arg initial_base_sha "$base_sha" \
+    --arg created_at "$timestamp" \
+    '{
+      run_id: $run_id,
+      prd_number: $prd_number,
+      branch_name: $branch_name,
+      remote: $remote,
+      delivery_branch: $delivery_branch,
+      initial_base_sha: $initial_base_sha,
+      created_at: $created_at
+    }' > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$ownership_file"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # verify_prd_ownership RUN_ID BRANCH_NAME
@@ -101,10 +124,11 @@ verify_prd_ownership() {
   local ownership_file="$STATE_DIR/runs/$run_id/ownership.json"
   [[ -f "$ownership_file" ]] || return 1
   
-  local stored_branch
-  stored_branch=$(jq -r '.branch_name' "$ownership_file" 2>/dev/null) || return 1
-  
-  [[ "$stored_branch" == "$branch_name" ]]
+  jq -e \
+    --arg run_id "$run_id" \
+    --arg branch_name "$branch_name" \
+    '.run_id == $run_id and .branch_name == $branch_name' \
+    "$ownership_file" >/dev/null 2>&1
 }
 
 # create_prd_branch RUN_ID PRD_NUMBER PRD_TITLE REMOTE DELIVERY_BRANCH [TEMPLATE]
@@ -128,68 +152,104 @@ create_prd_branch() {
   local delivery_branch="$5"
   local template="${6:-}"
   
-  # Check if ownership record already exists (resumption case)
   local ownership_file="$STATE_DIR/runs/$run_id/ownership.json"
-  local branch_name
-  
+  local branch_name frozen_base=""
+  local has_ownership=0
+
   if [[ -f "$ownership_file" ]]; then
-    # Reuse frozen branch name from existing ownership record
-    branch_name=$(jq -r '.branch_name' "$ownership_file" 2>/dev/null) || {
-      echo "ERROR: Failed to read frozen branch name from ownership record" >&2
+    has_ownership=1
+    if ! jq -e \
+      --arg run_id "$run_id" \
+      --arg prd_number "$prd_number" \
+      --arg remote "$remote" \
+      --arg delivery_branch "$delivery_branch" \
+      '.run_id == $run_id
+       and .prd_number == $prd_number
+       and .remote == $remote
+       and .delivery_branch == $delivery_branch
+       and (.branch_name | type == "string" and length > 0)
+       and (.initial_base_sha | type == "string" and length > 0)' \
+      "$ownership_file" >/dev/null 2>&1; then
+      echo "ERROR: Ownership record for run '$run_id' conflicts with requested PRD or repository settings" >&2
       return 1
-    }
+    fi
+    branch_name=$(jq -r '.branch_name' "$ownership_file")
+    frozen_base=$(jq -r '.initial_base_sha' "$ownership_file")
   else
-    # First creation - resolve branch name and freeze it
     branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
   fi
-  
+
+  if ! git check-ref-format --branch "$branch_name" >/dev/null 2>&1; then
+    echo "ERROR: Resolved PRD branch name is invalid: '$branch_name'" >&2
+    return 1
+  fi
+
   # Check if local branch already exists
-  if git rev-parse --verify "$branch_name" >/dev/null 2>&1; then
-    # Branch exists - check if we own it
+  if git show-ref --verify --quiet "refs/heads/$branch_name"; then
     if ! verify_prd_ownership "$run_id" "$branch_name"; then
       echo "ERROR: Branch '$branch_name' already exists but is not owned by run '$run_id'" >&2
       return 1
     fi
-    # We own it, safe to proceed
     return 0
   fi
-  
-  # Check if remote branch already exists
-  if git ls-remote --heads "$remote" "$branch_name" | grep -q "$branch_name"; then
-    # Remote branch exists - check if we own it
+
+  local remote_branch_rc=0
+  git ls-remote --exit-code --heads "$remote" "refs/heads/$branch_name" \
+    >/dev/null 2>&1 || remote_branch_rc=$?
+  if [[ "$remote_branch_rc" -eq 0 ]]; then
     if ! verify_prd_ownership "$run_id" "$branch_name"; then
       echo "ERROR: Remote branch '$remote/$branch_name' already exists but is not owned by run '$run_id'" >&2
       return 1
     fi
+    git fetch "$remote" \
+      "refs/heads/$branch_name:refs/remotes/$remote/$branch_name" >/dev/null 2>&1 || {
+      echo "ERROR: Failed to fetch owned branch $remote/$branch_name" >&2
+      return 1
+    }
+    git branch "$branch_name" "refs/remotes/$remote/$branch_name" >/dev/null 2>&1 || {
+      echo "ERROR: Failed to restore owned branch '$branch_name'" >&2
+      return 1
+    }
+    return 0
+  elif [[ "$remote_branch_rc" -ne 2 ]]; then
+    echo "ERROR: Failed to verify whether remote branch '$remote/$branch_name' exists" >&2
+    return 1
   fi
-  
+
   # Fetch latest remote and update remote-tracking ref
-  git fetch "$remote" "$delivery_branch:refs/remotes/$remote/$delivery_branch" >/dev/null 2>&1 || {
+  git fetch "$remote" \
+    "refs/heads/$delivery_branch:refs/remotes/$remote/$delivery_branch" >/dev/null 2>&1 || {
     echo "ERROR: Failed to fetch $remote/$delivery_branch" >&2
     return 1
   }
-  
-  # Get remote SHA from updated remote-tracking ref
-  local remote_sha
-  remote_sha=$(git rev-parse "$remote/$delivery_branch") || {
-    echo "ERROR: Failed to resolve $remote/$delivery_branch" >&2
-    return 1
-  }
-  
-  # Create ownership record atomically before creating branch
-  create_prd_ownership_record "$run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch" "$remote_sha" || {
-    echo "ERROR: Failed to create ownership record" >&2
-    return 1
-  }
-  
-  # Create the branch
-  git branch "$branch_name" "$remote_sha" >/dev/null 2>&1 || {
+
+  local branch_base
+  if [[ "$has_ownership" -eq 1 ]]; then
+    branch_base="$frozen_base"
+    if ! git cat-file -e "${branch_base}^{commit}" 2>/dev/null; then
+      echo "ERROR: Frozen base '$branch_base' for run '$run_id' is unavailable" >&2
+      return 1
+    fi
+  else
+    branch_base=$(git rev-parse "refs/remotes/$remote/$delivery_branch") || {
+      echo "ERROR: Failed to resolve $remote/$delivery_branch" >&2
+      return 1
+    }
+    create_prd_ownership_record \
+      "$run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch" "$branch_base" || {
+      echo "ERROR: Failed to create ownership record" >&2
+      return 1
+    }
+  fi
+
+  git branch "$branch_name" "$branch_base" >/dev/null 2>&1 || {
     echo "ERROR: Failed to create branch '$branch_name'" >&2
-    # Clean up ownership record on failure
-    rm -f "$STATE_DIR/runs/$run_id/ownership.json"
+    if [[ "$has_ownership" -eq 0 ]]; then
+      rm -f "$ownership_file"
+    fi
     return 1
   }
-  
+
   return 0
 }
 
@@ -219,19 +279,51 @@ can_resume_prd_branch() {
 # Returns: 0 if PRD can start, 1 if blocked by another active PRD
 can_start_prd() {
   local prd_number="$1"
-  
-  [[ -f "$STATE_FILE" ]] || {
-    echo "{}" > "$STATE_FILE"
-    return 0
-  }
-  
-  local active_prd
+  local run_id="${2:-}"
+
+  [[ -f "$STATE_FILE" ]] || return 0
+
+  local active_prd active_run_id
   active_prd=$(jq -r '.active_prd // empty' "$STATE_FILE" 2>/dev/null)
-  
-  # No active PRD, can start
+  active_run_id=$(jq -r '.active_run_id // empty' "$STATE_FILE" 2>/dev/null)
+
   [[ -z "$active_prd" ]] && return 0
-  
-  # Another PRD is active
-  echo "ERROR: Cannot start PRD #$prd_number: PRD #$active_prd is already active" >&2
+  if [[ "$active_prd" == "$prd_number" && -n "$run_id" && "$active_run_id" == "$run_id" ]]; then
+    return 0
+  fi
+
+  echo "ERROR: Cannot start PRD #$prd_number: PRD #$active_prd is already active in run '$active_run_id'" >&2
   return 1
+}
+
+# activate_prd_run RUN_ID PRD_NUMBER
+# Atomically records the one active PRD after its owned branch is ready.
+activate_prd_run() {
+  local run_id="$1"
+  local prd_number="$2"
+  local state_dir
+  state_dir=$(dirname "$STATE_FILE")
+  mkdir -p "$state_dir" || return 1
+
+  local current="{}"
+  if [[ -f "$STATE_FILE" ]]; then
+    current=$(cat "$STATE_FILE") || return 1
+    printf '%s\n' "$current" | jq -e 'type == "object"' >/dev/null 2>&1 || return 1
+  fi
+
+  local tmp
+  tmp=$(mktemp "$state_dir/.state.XXXXXX") || return 1
+  if ! printf '%s\n' "$current" | jq \
+    --arg prd_number "$prd_number" \
+    --arg run_id "$run_id" \
+    '.claims //= {}
+     | .active_prd = $prd_number
+     | .active_run_id = $run_id' > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv "$tmp" "$STATE_FILE"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
