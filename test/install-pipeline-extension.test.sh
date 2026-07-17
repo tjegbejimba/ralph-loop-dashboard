@@ -13,7 +13,7 @@ PIPELINE_DIR="$TEST_ROOT/home/.copilot/extensions/ralph-pipeline"
 
 node -e "import('${PIPELINE_DIR}/lib/promote-ready.mjs')"
 
-if ! grep -q '>one-tap</button>' "$PIPELINE_DIR/renderer.mjs"; then
+if ! grep -q '>Promote to ready</button>' "$PIPELINE_DIR/renderer.mjs"; then
   echo "FAIL: installed pipeline renderer does not expose the one-tap control"
   exit 1
 fi

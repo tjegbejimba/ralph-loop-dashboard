@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { promoteOneTapReadiness } from "./promotion-policy.mjs";
 
 const QUEUE_CAP = 10;
 const RUNNABLE_WORK = new Set(["work:slice", "work:standalone"]);
@@ -343,6 +344,23 @@ export function computePipelineState({
 
   const card = (issue, extra = {}) => {
     const names = labelNames(issue);
+    const linkedPR = linkedPrByIssue.get(issue.number) || null;
+    let promotion = null;
+    if (names.includes("ralph:fast-lane")) {
+      const result = promoteOneTapReadiness({
+        issue: {
+          ...issue,
+          closedByPullRequestsReferences: linkedPR
+            ? [{ ...linkedPR, state: "OPEN" }]
+            : [],
+        },
+        live: false,
+      });
+      promotion = {
+        eligible: result.promoted,
+        reason: result.skipReason,
+      };
+    }
     return {
       repoSlug,
       label: repo?.label || null,
@@ -356,7 +374,8 @@ export function computePipelineState({
       lane: predictLane(names),
       ageDays: ageDays(issue.createdAt, now),
       assignee: (issue.assignees || []).map((assignee) => (typeof assignee === "string" ? assignee : assignee.login))[0] || null,
-      linkedPR: linkedPrByIssue.get(issue.number) || null,
+      linkedPR,
+      promotion,
       ...extra,
     };
   };

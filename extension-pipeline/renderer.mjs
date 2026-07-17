@@ -1,5 +1,5 @@
 export function renderHtml(promotionToken = "") {
-  return `<!doctype html><html><head><meta charset="utf-8"/><title>Ralph Pipeline</title>
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"/><title>Ralph Pipeline</title>
 <style>
 :root{--p0:var(--true-color-red,#cf222e);--ok:var(--true-color-green,#1a7f37);--run:var(--true-color-blue,#0969da);--warn:var(--true-color-orange,#bc4c00)}
 *{box-sizing:border-box}
@@ -8,8 +8,8 @@ header{position:sticky;top:0;background:var(--background-color-default,#0d1117);
 .htop{display:flex;align-items:center;gap:10px}
 header h1{font-size:14px;margin:0;font-weight:var(--font-weight-semibold,600);white-space:nowrap}
 .spacer{flex:1}.meta{font-size:11px;color:var(--text-color-muted,#8b949e);white-space:nowrap}.meta.stale{color:var(--warn)}
-button{font:inherit;cursor:pointer;background:var(--button-default-bg,#21262d);color:inherit;border:1px solid var(--border-color-default,#30363d);border-radius:6px;padding:4px 10px}
-button:hover{border-color:var(--color-focus-outline,#388bfd)}
+button{font:inherit;cursor:pointer;background:var(--button-default-bg,#21262d);color:inherit;border:1px solid var(--border-color-default,#30363d);border-radius:6px;padding:4px 10px;transition:border-color .18s ease-out,background-color .18s ease-out,color .18s ease-out}
+button:hover{border-color:var(--color-focus-outline,#388bfd)}button:focus-visible,.tab:focus-visible,.card:focus-visible{outline:2px solid var(--color-focus-outline,#388bfd);outline-offset:2px}button:disabled{cursor:wait;opacity:.72}
 .tabs{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
 .tab{font-size:11.5px;padding:3px 10px;border-radius:14px;border:1px solid var(--border-color-default,#30363d);background:var(--background-color-muted,#161b22);color:var(--text-color-muted,#8b949e);cursor:pointer}
 .tab.active{color:var(--text-color-default,#e6edf3);border-color:var(--color-focus-outline,#388bfd);background:var(--background-color-default,#0d1117)}
@@ -21,17 +21,20 @@ section{margin:12px 0 6px}
 .sec-h{display:flex;align-items:center;gap:8px;margin-bottom:6px;font-weight:600;font-size:12px;letter-spacing:.02em;cursor:pointer;user-select:none}
 .sec-h .cnt{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--background-color-muted,#161b22);border:1px solid var(--border-color-default,#30363d);color:var(--text-color-muted,#8b949e);font-weight:600;font-size:10.5px}
 .sec-h .car{color:var(--text-color-muted,#8b949e);font-size:10px;width:10px;transition:transform .12s}.sec-h.collapsed .car{transform:rotate(-90deg)}.sec-body.hidden{display:none}
-.card-wrap{position:relative}.card{border:1px solid var(--border-color-default,#30363d);border-radius:8px;padding:8px 10px;margin-bottom:6px;background:var(--background-color-muted,#161b22);display:block;text-decoration:none;color:inherit}.card.promotable{padding-bottom:34px}
-.card:hover{border-color:var(--color-focus-outline,#388bfd)}.card.next{border-left:3px solid var(--run)}.card.running{border-left:3px solid var(--ok)}.card.fail{border-left:3px solid var(--p0)}
+.card-wrap{margin-bottom:6px}.card{border:1px solid var(--border-color-default,#30363d);border-radius:8px;padding:8px 10px;margin-bottom:6px;background:var(--background-color-muted,#161b22);display:block;text-decoration:none;color:inherit}
+.card:hover{border-color:var(--color-focus-outline,#388bfd)}.card.next{border-color:color-mix(in srgb,var(--run) 70%,var(--border-color-default,#30363d))}.card.running{border-color:color-mix(in srgb,var(--ok) 70%,var(--border-color-default,#30363d))}.card.fail{border-color:color-mix(in srgb,var(--p0) 70%,var(--border-color-default,#30363d))}
+.card-wrap .card{margin-bottom:0;border-radius:8px 8px 0 0}.promotion-row{display:flex;align-items:center;gap:8px;min-height:38px;padding:7px 8px 7px 10px;border:1px solid var(--border-color-default,#30363d);border-top:0;border-radius:0 0 8px 8px;background:color-mix(in srgb,var(--background-color-muted,#161b22) 76%,var(--background-color-default,#0d1117))}
+.promotion-mark{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;font-size:11px;flex:0 0 auto}.promotion-copy{min-width:0;flex:1;font-size:11px;line-height:1.35;color:var(--text-color-muted,#8b949e)}.promotion-row.eligible .promotion-mark{color:#aee5c0;background:color-mix(in srgb,var(--ok) 22%,transparent)}.promotion-row.eligible .promotion-copy{color:var(--text-color-default,#e6edf3)}.promotion-row.blocked .promotion-mark{color:#ffd8a8;background:color-mix(in srgb,var(--warn) 20%,transparent)}.promotion-row.error .promotion-mark{color:#ffb4b4;background:color-mix(in srgb,var(--p0) 20%,transparent)}.promotion-row.error .promotion-copy{color:#ffb4b4}
+.promote{flex:0 0 auto;color:#f0fff4;border-color:color-mix(in srgb,var(--ok) 70%,var(--border-color-default,#30363d));background:color-mix(in srgb,var(--ok) 28%,var(--button-default-bg,#21262d));font-size:11px;font-weight:600;padding:4px 9px}.promote:hover{border-color:#49b56b;background:color-mix(in srgb,var(--ok) 38%,var(--button-default-bg,#21262d))}
 .row1{display:flex;align-items:baseline;gap:6px}.num{font-family:var(--font-mono,monospace);color:var(--text-color-muted,#8b949e);font-size:11px}.ttl{flex:1;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.age{font-size:10px;color:var(--text-color-muted,#8b949e);white-space:nowrap}
 .chips{margin-top:5px;display:flex;flex-wrap:wrap;gap:4px;align-items:center}.chip{font-size:10px;padding:1px 6px;border-radius:10px;border:1px solid var(--border-color-default,#30363d);color:var(--text-color-muted,#8b949e)}
 .chip.p0,.chip.p1,.chip.fail{color:#ff9d9d;border-color:#7d2a2a}.chip.run{color:#a6d4ff;border-color:#1f4e7a}.chip.q{color:#aee5c0;border-color:#1f5e34}.chip.lane{color:#d8c4ff;border-color:#4b3a78}
-.chip.promote{position:absolute;left:10px;bottom:9px;color:#aee5c0;border-color:#1f5e34;background:color-mix(in srgb,var(--ok) 12%,transparent);padding:2px 8px}.chip.promote:hover{border-color:var(--ok)}.chip.promote.failed{color:#ffb4b4;border-color:#7d2a2a}
 .pr{font-size:10px;color:#a6d4ff;text-decoration:none}.pr:hover{text-decoration:underline}
 .note{font-size:10.5px;color:var(--text-color-muted,#8b949e);margin-top:4px}.note.fail{color:#ffb4b4}.note code{font-family:var(--font-mono,monospace);font-size:10px}
 .empty{font-size:11px;color:var(--text-color-muted,#8b949e);padding:2px 2px 6px;font-style:italic}
 .err{border:1px solid #7d2a2a;background:#2a1414;color:#ffb4b4;border-radius:8px;padding:10px 12px;margin-bottom:10px;font-size:12px}.err b{color:#ffd0d0}.err .fix{display:block;margin-top:5px;font-size:11px;color:#ff9d9d}
 .spin{display:inline-block;width:11px;height:11px;border:2px solid var(--text-color-muted,#8b949e);border-top-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}@keyframes sp{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
 </style></head><body>
 <header><div class="htop"><h1>Ralph Pipeline</h1><span class="spacer"></span><span class="meta" id="meta">loading...</span><button id="refresh">↻</button></div><div class="tabs" id="tabs"></div></header>
 <main id="main"><div class="empty">Loading pipeline...</div></main>
@@ -46,8 +49,10 @@ function pcls(p){return p?("p"+(p.replace("priority:P",""))):"";}
 function rel(iso){if(!iso)return"";const t=Date.parse(iso);if(isNaN(t))return"";let s=Math.max(0,(Date.now()-t)/1000);if(s<60)return Math.floor(s)+"s";if(s<3600)return Math.floor(s/60)+"m";if(s<86400)return Math.floor(s/3600)+"h";return Math.floor(s/86400)+"d";}
 function ageTxt(d){return d==null?"":(d===0?"today":d+"d old");}
 function card(c,extraCls){
-  const canPromote=c.state==="ralph:fast-lane";
-  const cls="card "+(extraCls||"")+(c.queued?" next":"")+(canPromote?" promotable":"");
+  const isCandidate=c.state==="ralph:fast-lane";
+  const promotion=c.promotion||null;
+  const canPromote=isCandidate&&promotion&&promotion.eligible===true;
+  const cls="card "+(extraCls||"")+(c.queued?" next":"");
   let chips="";
   chips+=chip(c.repoSlug,"");
   chips+=chip(c.priority&&c.priority.replace("priority:",""),pcls(c.priority));
@@ -83,8 +88,12 @@ function card(c,extraCls){
   const issueCard='<a class="'+cls+'" href="'+esc(href(c.url))+'" target="_blank" rel="noopener">'+
     '<div class="row1"><span class="num">#'+c.number+'</span><span class="ttl">'+esc(c.title)+'</span>'+(age?'<span class="age">'+age+'</span>':'')+'</div>'+
     (chips?'<div class="chips">'+chips+'</div>':"")+note+'</a>';
-  if(!canPromote)return issueCard;
-  return '<div class="card-wrap">'+issueCard+'<button class="chip promote" data-repo="'+esc(c.repoSlug)+'" data-issue="'+c.number+'" title="Promote to ralph:ready">one-tap</button></div>';
+  if(!isCandidate)return issueCard;
+  const reason=promotion&&promotion.reason?promotion.reason:"Eligibility check unavailable";
+  const row=canPromote
+    ? '<div class="promotion-row eligible" aria-live="polite"><span class="promotion-mark" aria-hidden="true">✓</span><span class="promotion-copy">All safety checks passed</span><button class="promote" data-repo="'+esc(c.repoSlug)+'" data-issue="'+c.number+'">Promote to ready</button></div>'
+    : '<div class="promotion-row blocked"><span class="promotion-mark" aria-hidden="true">!</span><span class="promotion-copy">'+esc(reason)+'</span></div>';
+  return '<div class="card-wrap">'+issueCard+row+'</div>';
 }
 function collapsed(key){try{return localStorage.getItem("rp.col."+key)==="1";}catch(e){return false;}}
 function setCollapsed(key,v){try{localStorage.setItem("rp.col."+key,v?"1":"0");}catch(e){}}
@@ -120,7 +129,7 @@ function render(d){
   html+=section("recent","✅","Recently completed",d.recent.map(r=>({number:r.number,title:r.title,url:r.url,state:"ralph:"+r.outcome,ageDays:null,repoSlug:d.repoSlug})),"","nothing yet");
   $("#main").innerHTML=html;
   document.querySelectorAll('.sec-h').forEach(h=>{h.onclick=()=>{const k=h.getAttribute("data-k");const body=h.nextElementSibling;const now=!h.classList.contains("collapsed");h.classList.toggle("collapsed",now);body.classList.toggle("hidden",now);setCollapsed(k,now);};});
-  document.querySelectorAll('.chip.promote').forEach(b=>{b.onclick=async(e)=>{e.preventDefault();e.stopPropagation();b.disabled=true;b.textContent="moving...";try{const r=await fetch("/promote-ready?repo="+encodeURIComponent(b.dataset.repo)+"&issue="+encodeURIComponent(b.dataset.issue),{method:"POST",headers:{"X-Ralph-Promotion-Token":PROMOTION_TOKEN}});const result=await r.json();if(!r.ok)throw new Error(result.skipReason||result.error||"Promotion failed");await load();}catch(err){b.disabled=false;b.textContent="blocked";b.title=String(err&&err.message?err.message:err);b.classList.add("failed");}};});
+  document.querySelectorAll('.promote').forEach(b=>{b.onclick=async(e)=>{e.preventDefault();e.stopPropagation();const row=b.closest(".promotion-row");const copy=row.querySelector(".promotion-copy");b.disabled=true;b.textContent="Promoting…";copy.textContent="Rechecking live issue state";try{const r=await fetch("/promote-ready?repo="+encodeURIComponent(b.dataset.repo)+"&issue="+encodeURIComponent(b.dataset.issue),{method:"POST",headers:{"X-Ralph-Promotion-Token":PROMOTION_TOKEN}});const result=await r.json();if(!r.ok)throw new Error(result.skipReason||result.error||"Promotion failed");copy.textContent="Promoted. Refreshing queue…";await load();}catch(err){b.disabled=false;b.textContent="Retry promotion";row.classList.remove("eligible");row.classList.add("error");row.querySelector(".promotion-mark").textContent="!";copy.textContent=String(err&&err.message?err.message:err);}};});
   LAST_OK=Date.now();updateMeta(d);
 }
 function updateMeta(d){const m=$("#meta");if(!LAST_OK){m.textContent="loading...";return;}const secs=Math.floor((Date.now()-LAST_OK)/1000);const ago=secs<2?"just now":secs<60?secs+"s ago":Math.floor(secs/60)+"m ago";m.textContent=(d?d.repoSlug+" · ":"")+"updated "+ago;m.classList.toggle("stale",secs>45);}

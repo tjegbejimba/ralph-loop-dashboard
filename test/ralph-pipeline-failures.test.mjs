@@ -419,3 +419,23 @@ test("pipeline state includes recoverable lane with attempt counts and PR contex
   assert.deepEqual(state.nextQueue, [147]);
   assert.equal(state.counts.recoverable, 1);
 });
+
+test("pipeline state exposes promotion eligibility and guard reasons", () => {
+  const state = computePipelineState({
+    repo: { slug: "tj/repo", label: "repo", mainCheckout: "/repo" },
+    openIssues: [
+      issue(188, ["ralph:fast-lane", "priority:P1"]),
+      issue(210, ["ralph:fast-lane", "priority:P2", "work:standalone"]),
+    ],
+    closedIssues: [],
+    openPrs: [],
+    claims: {},
+    failedRunItems: [],
+    recoverableRunItems: [],
+  });
+
+  assert.deepEqual(state.awaiting.map((card) => [card.number, card.promotion]), [
+    [188, { eligible: false, reason: "Not a runnable work type (found: none)" }],
+    [210, { eligible: true, reason: null }],
+  ]);
+});

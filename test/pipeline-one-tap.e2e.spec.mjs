@@ -14,6 +14,7 @@ function pipelineState(promoted) {
     state: promoted ? "ralph:ready" : "ralph:fast-lane",
     lane: promoted ? "REFINE" : "AUTO",
     ageDays: 0,
+    promotion: promoted ? null : { eligible: true, reason: null },
   };
   return {
     repoSlug: "tj/repo",
@@ -67,12 +68,51 @@ test("one-tap promotes an awaiting issue into the ready queue", async ({ page })
 
   try {
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
-    await page.getByRole("button", { name: "one-tap" }).click();
+    await page.getByRole("button", { name: "Promote to ready" }).click();
 
     await expect(page.locator('section[data-k="ready"] .card')).toContainText("#42");
     await expect(page.locator('section[data-k="awaiting"] .card')).toHaveCount(0);
     expect(promotionRequests).toBe(1);
     expect(page.url()).toMatch(/^http:\/\/127\.0\.0\.1:/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("guarded fast-lane work explains the blocker without an action", async ({ page }) => {
+  const state = pipelineState(false);
+  state.awaiting[0].promotion = {
+    eligible: false,
+    reason: "Not a runnable work type (found: none)",
+  };
+  const server = createServer((req, res) => {
+    const url = new URL(req.url || "/", "http://127.0.0.1");
+    res.setHeader("Cache-Control", "no-store");
+    if (url.pathname === "/repos") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify([{ slug: "tj/repo", label: "repo" }]));
+      return;
+    }
+    if (url.pathname === "/state") {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(state));
+      return;
+    }
+    if (url.pathname === "/events") {
+      res.statusCode = 204;
+      res.end();
+      return;
+    }
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.end(renderHtml());
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+
+  try {
+    await page.goto(`http://127.0.0.1:${server.address().port}/`);
+
+    await expect(page.getByText("Not a runnable work type (found: none)")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Promote to ready" })).toHaveCount(0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
