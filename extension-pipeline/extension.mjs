@@ -1,5 +1,5 @@
 // Extension: ralph-pipeline
-// Read-only side-panel canvas for Ralph orchestrator state across repos.
+// Side-panel canvas for Ralph orchestrator state and guarded one-tap promotion.
 
 import { joinSession, createCanvas } from "@github/copilot-sdk/extension";
 import { createServer } from "node:http";
@@ -9,8 +9,10 @@ import { readFile } from "node:fs/promises";
 import { watch, readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, basename } from "node:path";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 import { computePipelineErrorState, computePipelineState, discoverFailedRunItems, discoverRecoverableRunItems } from "./lib/pipeline-state.mjs";
+import { fetchPromotionIssue, handlePromoteReadyRequest, promoteReadyFromPipeline } from "./lib/promote-ready.mjs";
 import { renderHtml } from "./renderer.mjs";
 
 const pexec = promisify(execFile);
@@ -56,6 +58,20 @@ async function gh(args) {
 async function ghJson(args) {
   const out = await gh(args);
   return JSON.parse(out || "[]");
+}
+
+async function promoteReadyIssue({ repoSlug, issueNumber }) {
+  return promoteReadyFromPipeline({
+    repoSlug,
+    issueNumber,
+    fetchIssue: async () => fetchPromotionIssue({ repoSlug, issueNumber, ghJson }),
+    editIssue: async ({ labelsAdded, labelsRemoved }) => {
+      const args = ["issue", "edit", String(issueNumber), "--repo", repoSlug];
+      for (const label of labelsAdded) args.push("--add-label", label);
+      for (const label of labelsRemoved) args.push("--remove-label", label);
+      await gh(args);
+    },
+  });
 }
 
 async function deriveSlug(cwd) {
@@ -246,7 +262,13 @@ function setupWatchers(entry) {
 }
 
 async function startServer(repos) {
-  const entry = { repos, cache: new Map(), clients: new Set(), watchers: [] };
+  const entry = {
+    repos,
+    cache: new Map(),
+    clients: new Set(),
+    watchers: [],
+    promotionToken: randomUUID(),
+  };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
     const slug = url.searchParams.get("repo") || repos[0]?.slug || "";
@@ -254,6 +276,29 @@ async function startServer(repos) {
     if (url.pathname === "/repos") {
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(entry.repos.map((repo) => ({ slug: repo.slug, label: repo.label }))));
+      return;
+    }
+
+    if (url.pathname === "/promote-ready") {
+      try {
+        const result = await handlePromoteReadyRequest({
+          method: req.method,
+          url,
+          repos: entry.repos,
+          expectedToken: entry.promotionToken,
+          requestToken: req.headers["x-ralph-promotion-token"],
+          promote: promoteReadyIssue,
+        });
+        if (result.body.issueNumber) entry.cache.delete(slug);
+        res.statusCode = result.status;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify(result.body));
+        pushRefresh(entry);
+      } catch (err) {
+        res.statusCode = 500;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: String(err && err.message ? err.message : err) }));
+      }
       return;
     }
 
@@ -280,7 +325,7 @@ async function startServer(repos) {
     }
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
-    res.end(renderHtml());
+    res.end(renderHtml(entry.promotionToken));
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
@@ -296,7 +341,7 @@ const session = await joinSession({
       id: "ralph-pipeline",
       displayName: "Ralph Pipeline",
       description:
-        "Live read-only view of the Ralph orchestrator pipeline across orchestrated repos: failed work needing attention, running workers, queue, deferred work, and recent results.",
+        "Live Ralph orchestrator pipeline across repos, with guarded one-tap promotion for fast-lane issues.",
       inputSchema: {
         type: "object",
         properties: {
