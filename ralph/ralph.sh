@@ -1059,6 +1059,14 @@ DO NOT re-plan or open a new branch. Instead:
     exit 125
   fi
 
+  # Safety check (issue #195): verify primary checkout wasn't mutated.
+  # Call this immediately after copilot returns, before any early exits,
+  # so we catch mutations even on failure paths.
+  if ! verify_primary_checkout_unchanged; then
+    echo "❌ Primary checkout mutated during copilot session. Halting." >&2
+    exit 126
+  fi
+
   if [[ "$rc" -ne 0 ]]; then
     if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
       copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "failed" "$RUN_ID" || true
@@ -1369,15 +1377,6 @@ DO NOT re-plan or open a new branch. Instead:
   fi
 
   echo "✅ #$num closed via merged PR."
-  
-  # Safety check (issue #195): verify primary checkout wasn't mutated.
-  # This catches any inadvertent changes to the main checkout during the
-  # worker's iteration (e.g., if something cd'd there and ran git commands).
-  if ! verify_primary_checkout_unchanged; then
-    echo "❌ Primary checkout mutated during worker iteration. This is a critical failure." >&2
-    exit 126
-  fi
-  
   # Release this issue's claim so other workers don't see it as in-flight.
   state_lock && state_release "$num" && state_unlock || true
   CURRENT_CLAIM=""
