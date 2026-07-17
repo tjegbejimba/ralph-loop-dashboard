@@ -191,6 +191,26 @@ else
   fail "Should refuse to adopt existing branch"
 fi
 
+# Test 9b: Branch name is frozen after first creation
+frozen_run_id="run-$(date +%s)-4"
+frozen_branch="ralph/prd/frozen-title-203"
+if create_prd_branch "$frozen_run_id" "203" "Frozen Title" "origin" "main" ""; then
+  # Call again with different title but same run ID
+  if create_prd_branch "$frozen_run_id" "203" "Changed Title After Creation" "origin" "main" ""; then
+    # Verify the branch name did not change
+    stored_branch=$(jq -r '.branch_name' ".ralph/runs/$frozen_run_id/ownership.json")
+    if [[ "$stored_branch" == "$frozen_branch" ]]; then
+      pass "Branch name frozen at run creation (title changes ignored)"
+    else
+      fail "Branch name changed from '$frozen_branch' to '$stored_branch' on resumption"
+    fi
+  else
+    fail "Resumption with changed title should succeed with frozen name"
+  fi
+else
+  fail "Initial PRD branch creation failed"
+fi
+
 # ===========================================================================
 # Group 4 — Resumption safety
 # ===========================================================================

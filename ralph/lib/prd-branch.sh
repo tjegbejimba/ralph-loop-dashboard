@@ -128,11 +128,22 @@ create_prd_branch() {
   local delivery_branch="$5"
   local template="${6:-}"
   
-  # Resolve branch name
+  # Check if ownership record already exists (resumption case)
+  local ownership_file="$STATE_DIR/runs/$run_id/ownership.json"
   local branch_name
-  branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
   
-  # Check if branch already exists
+  if [[ -f "$ownership_file" ]]; then
+    # Reuse frozen branch name from existing ownership record
+    branch_name=$(jq -r '.branch_name' "$ownership_file" 2>/dev/null) || {
+      echo "ERROR: Failed to read frozen branch name from ownership record" >&2
+      return 1
+    }
+  else
+    # First creation - resolve branch name and freeze it
+    branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
+  fi
+  
+  # Check if local branch already exists
   if git rev-parse --verify "$branch_name" >/dev/null 2>&1; then
     # Branch exists - check if we own it
     if ! verify_prd_ownership "$run_id" "$branch_name"; then
@@ -143,13 +154,22 @@ create_prd_branch() {
     return 0
   fi
   
-  # Fetch latest remote
-  git fetch "$remote" "$delivery_branch" >/dev/null 2>&1 || {
+  # Check if remote branch already exists
+  if git ls-remote --heads "$remote" "$branch_name" | grep -q "$branch_name"; then
+    # Remote branch exists - check if we own it
+    if ! verify_prd_ownership "$run_id" "$branch_name"; then
+      echo "ERROR: Remote branch '$remote/$branch_name' already exists but is not owned by run '$run_id'" >&2
+      return 1
+    fi
+  fi
+  
+  # Fetch latest remote and update remote-tracking ref
+  git fetch "$remote" "$delivery_branch:refs/remotes/$remote/$delivery_branch" >/dev/null 2>&1 || {
     echo "ERROR: Failed to fetch $remote/$delivery_branch" >&2
     return 1
   }
   
-  # Get remote SHA
+  # Get remote SHA from updated remote-tracking ref
   local remote_sha
   remote_sha=$(git rev-parse "$remote/$delivery_branch") || {
     echo "ERROR: Failed to resolve $remote/$delivery_branch" >&2
