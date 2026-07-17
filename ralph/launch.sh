@@ -966,7 +966,7 @@ if [[ "${1:-}" == "--foreground" ]]; then
   release_lockdir "$SETUP_LOCK"
   trap - EXIT
   spawn_caffeinate 1 "$$"
-  RALPH_WORKER_ID=1 exec "$MAIN_REPO/.ralph/ralph.sh" "${RALPH_WORKER_ARGS[@]}"
+  RALPH_MAIN_REPO="$MAIN_REPO" RALPH_WORKER_ID=1 exec "$MAIN_REPO/.ralph/ralph.sh" "${RALPH_WORKER_ARGS[@]}"
 fi
 
 echo "🚀 Launching $PARALLELISM worker(s) in background. Tail: tail -f $LOG"
@@ -979,7 +979,7 @@ for ((i = 1; i <= PARALLELISM; i++)); do
   cd "$loop_repo"
   worker_log="$MAIN_REPO/.ralph/logs/worker-${i}.out"
   mkdir -p "$(dirname "$worker_log")"
-  RALPH_WORKER_ID=$i nohup "$MAIN_REPO/.ralph/ralph.sh" "${RALPH_WORKER_ARGS[@]}" \
+  RALPH_MAIN_REPO="$MAIN_REPO" RALPH_WORKER_ID=$i nohup "$MAIN_REPO/.ralph/ralph.sh" "${RALPH_WORKER_ARGS[@]}" \
     >>"$worker_log" 2>&1 < /dev/null &
   worker_pid=$!
   disown
