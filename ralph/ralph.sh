@@ -219,6 +219,76 @@ fi
 # sync_to_origin_main wipes a slice branch.
 INITIAL_BRANCH="${RALPH_INITIAL_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
 
+# Worktree isolation guards (issue #195): record the assigned worktree root
+# at startup and verify the worker never escapes to the primary checkout.
+# Prevents the scenario where a git operation fails and the worker relocates
+# to the primary checkout, mutating it instead of halting cleanly.
+ASSIGNED_WORKTREE_ROOT="$(pwd -P)"
+readonly ASSIGNED_WORKTREE_ROOT
+export RALPH_ASSIGNED_WORKTREE="$ASSIGNED_WORKTREE_ROOT"
+
+# Record primary checkout state so we can detect mutations during the run.
+# In a dedicated worktree setup, the primary checkout is one level up from
+# the loop worktree (e.g., /repo vs /repo-ralph). We only track the primary
+# if it's a valid git repo.
+if [[ -n "${RALPH_MAIN_REPO:-}" && -d "$RALPH_MAIN_REPO" ]]; then
+  PRIMARY_CHECKOUT_ROOT="$RALPH_MAIN_REPO"
+elif [[ -d "../.git" || -f "../.git" ]]; then
+  PRIMARY_CHECKOUT_ROOT="$(cd .. && pwd -P)"
+else
+  PRIMARY_CHECKOUT_ROOT=""
+fi
+
+if [[ -n "$PRIMARY_CHECKOUT_ROOT" ]]; then
+  PRIMARY_BRANCH_INITIAL="$(git -C "$PRIMARY_CHECKOUT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+  PRIMARY_HEAD_INITIAL="$(git -C "$PRIMARY_CHECKOUT_ROOT" rev-parse HEAD 2>/dev/null || echo "")"
+  readonly PRIMARY_CHECKOUT_ROOT PRIMARY_BRANCH_INITIAL PRIMARY_HEAD_INITIAL
+  export RALPH_PRIMARY_CHECKOUT="$PRIMARY_CHECKOUT_ROOT"
+fi
+
+# Safety check: verify we're still in the assigned worktree. Call this before
+# any operation that could have triggered a cd (e.g., after copilot runs).
+verify_worktree_isolation() {
+  local current_root
+  current_root="$(pwd -P)"
+  if [[ "$current_root" != "$ASSIGNED_WORKTREE_ROOT" ]]; then
+    echo "❌ CRITICAL: Worker escaped assigned worktree!" >&2
+    echo "   Assigned: $ASSIGNED_WORKTREE_ROOT" >&2
+    echo "   Current:  $current_root" >&2
+    echo "   This is a stop-the-line safety failure." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Safety check: verify the primary checkout hasn't been mutated. Call this at
+# the end of an iteration to catch any inadvertent changes.
+verify_primary_checkout_unchanged() {
+  [[ -z "$PRIMARY_CHECKOUT_ROOT" ]] && return 0
+  
+  local branch_now head_now
+  branch_now="$(git -C "$PRIMARY_CHECKOUT_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+  head_now="$(git -C "$PRIMARY_CHECKOUT_ROOT" rev-parse HEAD 2>/dev/null || echo "")"
+  
+  if [[ -n "$PRIMARY_BRANCH_INITIAL" && "$PRIMARY_BRANCH_INITIAL" != "$branch_now" ]]; then
+    echo "❌ CRITICAL: Primary checkout branch mutated during worker run!" >&2
+    echo "   Initial: $PRIMARY_BRANCH_INITIAL" >&2
+    echo "   Now:     $branch_now" >&2
+    echo "   This is a stop-the-line safety failure." >&2
+    return 1
+  fi
+  
+  if [[ -n "$PRIMARY_HEAD_INITIAL" && "$PRIMARY_HEAD_INITIAL" != "$head_now" ]]; then
+    echo "❌ CRITICAL: Primary checkout HEAD mutated during worker run!" >&2
+    echo "   Initial: $PRIMARY_HEAD_INITIAL" >&2
+    echo "   Now:     $head_now" >&2
+    echo "   This is a stop-the-line safety failure." >&2
+    return 1
+  fi
+  
+  return 0
+}
+
 # Sync the current branch to origin/main. Works both when run on `main` itself
 # (legacy single-checkout mode) and in a dedicated worktree on a non-main branch
 # (preferred — see .ralph/launch.sh, prevents collisions with local edits).
@@ -981,6 +1051,14 @@ DO NOT re-plan or open a new branch. Instead:
   rc=$?
   set -e
 
+  # Safety check (issue #195): verify the worker didn't escape its worktree.
+  # Copilot runs with --allow-all, so shell commands in the prompt could
+  # theoretically cd to another directory. Catch that early.
+  if ! verify_worktree_isolation; then
+    echo "❌ Worker escaped worktree during copilot session. Halting." >&2
+    exit 125
+  fi
+
   if [[ "$rc" -ne 0 ]]; then
     if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
       copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "failed" "$RUN_ID" || true
@@ -1291,6 +1369,15 @@ DO NOT re-plan or open a new branch. Instead:
   fi
 
   echo "✅ #$num closed via merged PR."
+  
+  # Safety check (issue #195): verify primary checkout wasn't mutated.
+  # This catches any inadvertent changes to the main checkout during the
+  # worker's iteration (e.g., if something cd'd there and ran git commands).
+  if ! verify_primary_checkout_unchanged; then
+    echo "❌ Primary checkout mutated during worker iteration. This is a critical failure." >&2
+    exit 126
+  fi
+  
   # Release this issue's claim so other workers don't see it as in-flight.
   state_lock && state_release "$num" && state_unlock || true
   CURRENT_CLAIM=""
