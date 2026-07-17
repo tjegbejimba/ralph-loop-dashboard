@@ -258,14 +258,33 @@ export function promoteOneTapReadiness({ issue, live = false }) {
 
   // Guard: Must be runnable work type (work:slice or work:standalone)
   const classification = classifyIssue(issue);
-  const workType = classification.workType;
+  const workLabels = currentLabels.filter((label) => label.startsWith("work:"));
+  if (workLabels.length === 0) {
+    return {
+      promoted: false,
+      issueNumber,
+      labelsAdded: [],
+      labelsRemoved: [],
+      skipReason: "Missing work type - add work:standalone or work:slice.",
+    };
+  }
+  if (workLabels.length > 1) {
+    return {
+      promoted: false,
+      issueNumber,
+      labelsAdded: [],
+      labelsRemoved: [],
+      skipReason: `Taxonomy conflict: work has conflicting Ralph labels: ${workLabels.join(", ")}`,
+    };
+  }
+  const workType = workLabels[0];
   if (workType !== "work:slice" && workType !== "work:standalone") {
     return {
       promoted: false,
       issueNumber,
       labelsAdded: [],
       labelsRemoved: [],
-      skipReason: `Not a runnable work type (found: ${workType || "none"})`,
+      skipReason: `Not runnable: found ${workType}; expected work:standalone or work:slice.`,
     };
   }
 

@@ -494,7 +494,43 @@ test("pipeline state exposes promotion eligibility and guard reasons", () => {
   });
 
   assert.deepEqual(state.awaiting.map((card) => [card.number, card.promotion]), [
-    [188, { eligible: false, reason: "Not a runnable work type (found: none)" }],
+    [188, { eligible: false, reason: "Missing work type - add work:standalone or work:slice." }],
     [210, { eligible: true, reason: null }],
   ]);
+});
+
+test("awaiting promotion contains fast-lane candidates but not reviewed PRD parents", () => {
+  const state = computePipelineState({
+    repo: { slug: "tj/repo", label: "repo", mainCheckout: "/repo" },
+    openIssues: [
+      issue(200, ["ralph:evaluated", "priority:P1", "work:prd"]),
+      issue(210, ["ralph:fast-lane", "priority:P2", "work:standalone"]),
+    ],
+    closedIssues: [],
+    openPrs: [],
+    claims: {},
+  });
+
+  assert.deepEqual(state.awaiting.map((card) => card.number), [210]);
+  assert.equal(state.needsTriage.some((card) => card.number === 200), false);
+});
+
+test("unexpected evaluated non-PRD issues remain visible in needs triage", () => {
+  const state = computePipelineState({
+    repo: { slug: "tj/repo", label: "repo", mainCheckout: "/repo" },
+    openIssues: [
+      issue(211, ["ralph:evaluated", "priority:P2", "work:standalone"]),
+    ],
+    closedIssues: [],
+    openPrs: [],
+    claims: {},
+  });
+
+  assert.deepEqual(state.awaiting, []);
+  assert.equal(state.needsTriage.length, 1);
+  assert.equal(state.needsTriage[0].number, 211);
+  assert.equal(
+    state.needsTriage[0].note,
+    "Unexpected ralph:evaluated issue - expected exactly work:prd; review labels.",
+  );
 });

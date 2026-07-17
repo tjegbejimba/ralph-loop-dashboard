@@ -83,7 +83,7 @@ test("guarded fast-lane work explains the blocker without an action", async ({ p
   const state = pipelineState(false);
   state.awaiting[0].promotion = {
     eligible: false,
-    reason: "Not a runnable work type (found: none)",
+    reason: "Missing work type - add work:standalone or work:slice.",
   };
   const server = createServer((req, res) => {
     const url = new URL(req.url || "/", "http://127.0.0.1");
@@ -111,7 +111,7 @@ test("guarded fast-lane work explains the blocker without an action", async ({ p
   try {
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
 
-    await expect(page.getByText("Not a runnable work type (found: none)")).toBeVisible();
+    await expect(page.getByText("Missing work type - add work:standalone or work:slice.")).toBeVisible();
     await expect(page.getByRole("button", { name: "Promote to ready" })).toHaveCount(0);
   } finally {
     await new Promise((resolve) => server.close(resolve));

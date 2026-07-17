@@ -454,8 +454,17 @@ export function computePipelineState({
         else reason = "not a runnable work type";
         deferred.push(card(issue, { reason, blockers }));
       }
-    } else if (st === "ralph:fast-lane" || st === "ralph:evaluated") {
-      awaiting.push(card(issue, { note: st === "ralph:fast-lane" ? "AUTO candidate - awaiting one-tap" : "PRD parent - reviewed" }));
+    } else if (st === "ralph:fast-lane") {
+      awaiting.push(card(issue, { note: "AUTO candidate - awaiting one-tap" }));
+    } else if (st === "ralph:evaluated") {
+      const workLabels = names.filter((name) => name.startsWith("work:"));
+      if (workLabels.length !== 1 || workLabels[0] !== "work:prd") {
+        needsTriage.push(
+          card(issue, {
+            note: "Unexpected ralph:evaluated issue - expected exactly work:prd; review labels.",
+          }),
+        );
+      }
     } else if (st === "ralph:blocked") {
       const reason = blockers.length ? `blocked by ${blockers.map((number) => `#${number}`).join(", ")}` : "blocked before pickup";
       held.push(card(issue, { kind: "blocked", reason, blockers }));

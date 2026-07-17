@@ -6,6 +6,7 @@ import {
   handlePromoteReadyRequest,
   promoteReadyFromPipeline,
 } from "../extension-pipeline/lib/promote-ready.mjs";
+import { computePipelineState } from "../extension-pipeline/lib/pipeline-state.mjs";
 import { renderHtml } from "../extension-pipeline/renderer.mjs";
 
 test("pipeline promotion moves an eligible fast-lane issue to ready", async () => {
@@ -103,6 +104,39 @@ test("pipeline promotion leaves a guarded issue unchanged", async () => {
 
   assert.equal(result.promoted, false);
   assert.match(result.skipReason, /has assignee/i);
+  assert.equal(edited, false);
+});
+
+test("pipeline preview and live promotion return the same work-type blocker", async () => {
+  const issue = {
+    number: 43,
+    title: "Missing work type",
+    body: "Acceptance criteria:\n- Done",
+    labels: ["ralph:fast-lane", "priority:P2"],
+    state: "OPEN",
+    assignees: [],
+    closedByPullRequestsReferences: [],
+  };
+  const preview = computePipelineState({
+    repo: { slug: "tj/repo", label: "repo", mainCheckout: "/repo" },
+    openIssues: [issue],
+  }).awaiting[0].promotion;
+  let edited = false;
+
+  const liveResult = await promoteReadyFromPipeline({
+    repoSlug: "tj/repo",
+    issueNumber: 43,
+    fetchIssue: async () => issue,
+    editIssue: async () => {
+      edited = true;
+    },
+  });
+
+  assert.deepEqual(preview, {
+    eligible: false,
+    reason: "Missing work type - add work:standalone or work:slice.",
+  });
+  assert.equal(liveResult.skipReason, preview.reason);
   assert.equal(edited, false);
 });
 

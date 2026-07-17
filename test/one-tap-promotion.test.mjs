@@ -65,7 +65,55 @@ describe("one-tap promotion from ralph:fast-lane to ralph:ready", () => {
 
     assert.equal(result.promoted, false);
     assert.equal(result.issueNumber, 44);
-    assert.match(result.skipReason, /not a runnable work type/i);
+    assert.equal(
+      result.skipReason,
+      "Not runnable: found work:prd; expected work:standalone or work:slice.",
+    );
+  });
+
+  it("explains how to add a missing runnable work type", () => {
+    const issue = {
+      number: 54,
+      title: "Fix dashboard refresh",
+      body: "Acceptance criteria:\n- Refresh works",
+      labels: ["ralph:fast-lane", "priority:P2"],
+      state: "OPEN",
+      assignees: [],
+      closedByPullRequestsReferences: [],
+    };
+
+    const result = promoteOneTapReadiness({ issue, live: false });
+
+    assert.equal(result.promoted, false);
+    assert.equal(
+      result.skipReason,
+      "Missing work type - add work:standalone or work:slice.",
+    );
+  });
+
+  it("reports conflicting work labels as a taxonomy conflict", () => {
+    const issue = {
+      number: 55,
+      title: "Ambiguous runnable work",
+      body: "Parent #100\n\nAcceptance criteria:\n- Done",
+      labels: [
+        "ralph:fast-lane",
+        "work:standalone",
+        "work:slice",
+        "priority:P2",
+      ],
+      state: "OPEN",
+      assignees: [],
+      closedByPullRequestsReferences: [],
+    };
+
+    const result = promoteOneTapReadiness({ issue, live: false });
+
+    assert.equal(result.promoted, false);
+    assert.match(result.skipReason, /^Taxonomy conflict: work has conflicting Ralph labels:/);
+    assert.match(result.skipReason, /work:standalone/);
+    assert.match(result.skipReason, /work:slice/);
+    assert.doesNotMatch(result.skipReason, /Missing work type/);
   });
 
   it("refuses promotion when priority label is missing", () => {
