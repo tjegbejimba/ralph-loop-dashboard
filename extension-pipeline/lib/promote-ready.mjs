@@ -1,4 +1,4 @@
-import { promoteOneTapReadiness } from "../../extension/lib/lane-promotion.mjs";
+import { promoteOneTapReadiness } from "./promotion-policy.mjs";
 
 function linkedPrRepo(pr, fallbackRepo) {
   try {

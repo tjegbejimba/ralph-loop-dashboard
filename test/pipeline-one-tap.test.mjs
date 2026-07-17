@@ -132,8 +132,10 @@ test("promotion fetch enriches linked PRs with their current states", async () =
 test("pipeline renders a one-tap control that promotes without following the issue link", () => {
   const html = renderHtml("session-secret");
 
-  assert.match(html, /class="chip promote"/);
-  assert.match(html, />one-tap<\/button>/);
+  assert.match(html, /class="promote"/);
+  assert.match(html, />Promote to ready<\/button>/);
+  assert.match(html, /promotion\.eligible/);
+  assert.match(html, /promotion\.reason/);
   assert.match(html, /stopPropagation\(\)/);
   assert.match(html, /fetch\("\/promote-ready\?repo="/);
   assert.match(html, /"X-Ralph-Promotion-Token":PROMOTION_TOKEN/);

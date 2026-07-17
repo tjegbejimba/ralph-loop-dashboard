@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { promoteOneTapReadiness } from "./promotion-policy.mjs";
 
 const QUEUE_CAP = 10;
 const RUNNABLE_WORK = new Set(["work:slice", "work:standalone"]);
@@ -276,6 +277,7 @@ function failureTimestamp(failure) {
 
 function shouldSuppressRunFailureForCurrentIssue(failure, currentIssue) {
   if (!currentIssue) return false;
+  if (currentIssue.state === "CLOSED" || currentIssue.closedAt) return true;
   const currentLabels = labelNames(currentIssue);
   if (currentLabels.includes("ralph:failed") || currentLabels.includes("ralph:running")) return false;
   if (!currentLabels.some((name) => name.startsWith("ralph:"))) return false;
@@ -343,6 +345,23 @@ export function computePipelineState({
 
   const card = (issue, extra = {}) => {
     const names = labelNames(issue);
+    const linkedPR = linkedPrByIssue.get(issue.number) || null;
+    let promotion = null;
+    if (names.includes("ralph:fast-lane")) {
+      const result = promoteOneTapReadiness({
+        issue: {
+          ...issue,
+          closedByPullRequestsReferences: linkedPR
+            ? [{ ...linkedPR, state: "OPEN" }]
+            : [],
+        },
+        live: false,
+      });
+      promotion = {
+        eligible: result.promoted,
+        reason: result.skipReason,
+      };
+    }
     return {
       repoSlug,
       label: repo?.label || null,
@@ -356,7 +375,8 @@ export function computePipelineState({
       lane: predictLane(names),
       ageDays: ageDays(issue.createdAt, now),
       assignee: (issue.assignees || []).map((assignee) => (typeof assignee === "string" ? assignee : assignee.login))[0] || null,
-      linkedPR: linkedPrByIssue.get(issue.number) || null,
+      linkedPR,
+      promotion,
       ...extra,
     };
   };
@@ -444,20 +464,6 @@ export function computePipelineState({
     } else if (st === "ralph:needs-triage") {
       needsTriage.push(card(issue));
     }
-  }
-
-  for (const issue of closedIssues) {
-    const names = labelNames(issue);
-    if (!names.includes("ralph:failed")) continue;
-    upsertFailure({
-      ...card(issue, {
-        state: "ralph:failed",
-        reason: "Closed with ralph:failed label",
-        failedAt: issue.closedAt || null,
-        source: "closed-issue-label",
-      }),
-      ageDays: null,
-    });
   }
 
   for (const failure of failedRunItems || []) {
