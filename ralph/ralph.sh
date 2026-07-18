@@ -208,6 +208,15 @@ fi
 # Recovery ledger for parked recoverable work (issue #173).
 # shellcheck source=lib/recovery-ledger.sh
 . "$SCRIPT_DIR/lib/recovery-ledger.sh"
+# PRD slice integration lifecycle (issue #202).
+# shellcheck source=lib/prd-branch.sh
+if [[ -f "$SCRIPT_DIR/lib/prd-branch.sh" ]]; then
+  . "$SCRIPT_DIR/lib/prd-branch.sh"
+fi
+# shellcheck source=lib/slice-integration.sh
+if [[ -f "$SCRIPT_DIR/lib/slice-integration.sh" ]]; then
+  . "$SCRIPT_DIR/lib/slice-integration.sh"
+fi
 if [[ -n "$RUN_ID" ]]; then
   status_init
 fi
@@ -985,12 +994,35 @@ while true; do
 
 ${body}"
 
+  # Determine the target base branch for PRs
+  if [[ -n "$RUN_ID" ]] && declare -F resolve_slice_pr_base >/dev/null 2>&1; then
+    target_base=$(resolve_slice_pr_base "$RUN_ID" "$default_branch")
+  else
+    target_base="$default_branch"
+  fi
+
   full_prompt="$(cat "$PROMPT_FILE")
 
 ---
 ISSUE #${num}
 ---
 ${issue_text}"
+
+  # Inject target base branch for PRD runs
+  if [[ "$target_base" != "$default_branch" ]]; then
+    full_prompt="${full_prompt}
+
+---
+PRD_INTEGRATION_BRANCH
+---
+This slice is part of a PRD integration workflow. Pull requests MUST target the integration branch:
+
+  Base branch: $target_base
+
+Do NOT create PRs against 'main' or the default branch. The PR base must be '$target_base'.
+Use: gh pr create --base $target_base ...
+"
+  fi
 
   if [[ "$_iter_resume_active" == "1" ]]; then
     full_prompt="${full_prompt}
@@ -1189,6 +1221,103 @@ DO NOT re-plan or open a new branch. Instead:
       if [[ -n "$release_pr" ]]; then
         echo "✅ Found merged PR #$release_pr into release branch '$RELEASE_BRANCH' referencing #$num — accepting." >&2
         merged_count=1
+      fi
+    fi
+  fi
+
+  # PRD integration-branch flow (auto-detected via ownership record). Similar to
+  # release-branch flow: GitHub does not auto-link/auto-close for non-default bases.
+  # We try, in order:
+  #   (a) merge an open PR into the integration branch + manually close issue + record slice-integrated;
+  #   (b) accept a merged integration-branch PR found since iter_start_ts and manually close + record.
+  if [[ "$merged_count" -lt 1 && -n "$RUN_ID" ]] && declare -F resolve_slice_pr_base >/dev/null 2>&1; then
+    integration_base=$(resolve_slice_pr_base "$RUN_ID" "$default_branch")
+    if [[ "$integration_base" != "$default_branch" ]]; then
+      echo "ℹ️  Issue #$num: PRD integration branch detected ($integration_base), checking for merged PR..." >&2
+      
+      # Try to merge an open PR
+      prd_merge_result=0
+      prd_prs=$(gh pr list --repo "$REPO" --state open --base "$integration_base" \
+        --search "in:body \"#$num\"" \
+        --json number,isDraft,baseRefName,mergeable,body \
+        --jq ".[] | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | [.number, .isDraft, .baseRefName, .mergeable] | @tsv" 2>/dev/null || true)
+      
+      if [[ -n "$prd_prs" ]]; then
+        while IFS=$'\t' read -r pr is_draft base_ref mergeable; do
+          [[ -n "$pr" ]] || continue
+          [[ "$is_draft" == "false" ]] || continue
+          [[ "$base_ref" == "$integration_base" ]] || continue
+          [[ "$mergeable" == "MERGEABLE" || "$mergeable" == "UNKNOWN" || -z "$mergeable" ]] || continue
+          
+          if ralph_pr_checks_passed "$pr"; then
+            echo "✅ PR #$pr closes #$num into '$integration_base' and checks are green; merging + recording slice-integrated." >&2
+            if gh pr merge "$pr" --repo "$REPO" --squash --delete-branch; then
+              merge_commit=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null || echo "")
+              
+              # Record slice-integrated lifecycle
+              if declare -F record_slice_integrated >/dev/null 2>&1; then
+                state_lock || true
+                record_slice_integrated "$num" "$pr" "$merge_commit" "$RUN_ID"
+                state_unlock || true
+              fi
+              
+              # Explicitly close the issue
+              if declare -F close_slice_issue >/dev/null 2>&1; then
+                close_slice_issue "$num" "$pr" "$REPO" || true
+              fi
+              
+              state="CLOSED"
+              merged_count=1
+              prd_merge_result=1
+              break
+            fi
+          else
+            echo "ℹ️  PR #$pr closes #$num but checks are not green yet; not auto-merging." >&2
+          fi
+        done <<<"$prd_prs"
+      fi
+      
+      # If no open PR was merged, check for recently merged PRs
+      if [[ "$prd_merge_result" -eq 0 ]]; then
+        prd_pr=$(gh pr list --repo "$REPO" --state merged --limit 20 --base "$integration_base" \
+          --search "in:body \"#$num\"" \
+          --json number,body,mergedAt,baseRefName,mergeCommit \
+          --jq ".[] | select(.mergedAt > \"$iter_start_ts\") | select(.baseRefName == \"$integration_base\") | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | {number, mergeCommit: .mergeCommit.oid} | @json" \
+          | head -1)
+        
+        if [[ -n "$prd_pr" ]]; then
+          pr_number=$(echo "$prd_pr" | jq -r '.number')
+          merge_commit=$(echo "$prd_pr" | jq -r '.mergeCommit')
+          echo "✅ Found merged PR #$pr_number into integration branch '$integration_base' referencing #$num — recording slice-integrated." >&2
+          
+          # Record slice-integrated lifecycle
+          if declare -F record_slice_integrated >/dev/null 2>&1; then
+            state_lock || true
+            record_slice_integrated "$num" "$pr_number" "$merge_commit" "$RUN_ID"
+            state_unlock || true
+          fi
+          
+          # Verify base branch before accepting
+          if declare -F verify_slice_pr_base >/dev/null 2>&1; then
+            if verify_slice_pr_base "$RUN_ID" "$integration_base"; then
+              # Explicitly close the issue
+              if declare -F close_slice_issue >/dev/null 2>&1; then
+                close_slice_issue "$num" "$pr_number" "$REPO" || true
+              fi
+              state="CLOSED"
+              merged_count=1
+            else
+              echo "⚠️  PR #$pr_number merged to wrong base; not accepting as slice-integrated." >&2
+            fi
+          else
+            # No verification function available, accept anyway
+            if declare -F close_slice_issue >/dev/null 2>&1; then
+              close_slice_issue "$num" "$pr_number" "$REPO" || true
+            fi
+            state="CLOSED"
+            merged_count=1
+          fi
+        fi
       fi
     fi
   fi
