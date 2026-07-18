@@ -238,7 +238,7 @@ status_reconcile_stale_workers() {
   fi
 }
 
-# Check if an issue is in a terminal state (merged/failed/skipped/rejected)
+# Check if an issue is in a terminal state (merged/failed/skipped/rejected/slice-integrated)
 # Recoverable is NOT terminal — it can be retried after lease expiry
 # Args: issue_number [run_id]
 # Returns 0 (true) if terminal, 1 (false) otherwise
@@ -247,7 +247,7 @@ status_is_terminal() {
   local status
   status=$(status_load_item "$issue" "status" "$run_id")
   case "$status" in
-    merged|failed|skipped|rejected) return 0 ;;
+    merged|slice-integrated|failed|skipped|rejected) return 0 ;;
     *) return 1 ;;
   esac
 }

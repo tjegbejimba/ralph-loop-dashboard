@@ -954,11 +954,26 @@ while true; do
   fi
 
   default_branch=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
-  if ralph_merge_ready_open_pr_for_issue "$num" "$default_branch"; then
+  
+  # Determine target base branch for this run
+  if [[ -n "$RUN_ID" ]] && declare -F resolve_slice_pr_base >/dev/null 2>&1; then
+    target_base=$(resolve_slice_pr_base "$RUN_ID" "$default_branch")
+  else
+    target_base="$default_branch"
+  fi
+  
+  # Pre-claim fallback merge: only check base that matches this run's target
+  if ralph_merge_ready_open_pr_for_issue "$num" "$target_base"; then
     if wait_for_issue_closed_by_merged_pr "$num" "after pre-claim fallback merge"; then
       if [[ -n "$RUN_ID" ]]; then
         state_lock || true
-        status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+        # Record appropriate status based on target base
+        if [[ "$target_base" != "$default_branch" ]]; then
+          # PRD integration: record slice-integrated (will be set properly in post-copilot flow)
+          status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+        else
+          status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+        fi
         state_unlock || true
         if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
           ralph_apply_label_transition "$num" done || true
@@ -1481,10 +1496,14 @@ DO NOT re-plan or open a new branch. Instead:
     exit 1
   fi
 
-  # Success! Update status to merged (run-aware mode only)
+  # Success! Update status (run-aware mode only)
+  # Preserve slice-integrated status if already set by PRD flow
   if [[ -n "$RUN_ID" ]]; then
     state_lock || true
-    status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+    current_status=$(status_load_item "$num" "status" "$RUN_ID")
+    if [[ "$current_status" != "slice-integrated" ]]; then
+      status_update_item "$num" "merged" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
+    fi
     state_unlock || true
   fi
   if declare -F ralph_apply_label_transition >/dev/null 2>&1; then
