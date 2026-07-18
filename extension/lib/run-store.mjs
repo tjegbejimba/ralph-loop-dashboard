@@ -2,7 +2,7 @@
 
 import { mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 
 /**
  * Generate a unique run ID with timestamp and random suffix
@@ -14,6 +14,35 @@ function generateRunId() {
   const timePart = now.toISOString().slice(11, 19).replace(/:/g, "");
   const randomPart = randomBytes(4).toString("hex");
   return `${datePart}-${timePart}-${randomPart}`;
+}
+
+/**
+ * Canonicalize queue by deduplicating issue numbers
+ * @param {Array} queue - Original queue with potential duplicates
+ * @returns {Array} Deduplicated queue
+ */
+function canonicalizeQueue(queue) {
+  const seen = new Set();
+  const canonical = [];
+  
+  for (const issue of queue) {
+    if (!seen.has(issue.number)) {
+      seen.add(issue.number);
+      canonical.push(issue);
+    }
+  }
+  
+  return canonical;
+}
+
+/**
+ * Compute deterministic digest of frozen queue membership
+ * @param {Array<number>} membership - Sorted array of issue numbers
+ * @returns {string} SHA-256 hex digest
+ */
+function computeQueueDigest(membership) {
+  const canonical = JSON.stringify(membership);
+  return createHash("sha256").update(canonical, "utf-8").digest("hex");
 }
 
 /**
@@ -52,6 +81,9 @@ export function createRun({ repoRoot, queue, runOptions }) {
     throw new TypeError("runOptions.parallelism must be a positive integer");
   }
   
+  // Canonicalize queue by removing duplicates
+  const canonicalQueue = canonicalizeQueue(queue);
+  
   const runId = generateRunId();
   const runsDir = join(repoRoot, ".ralph", "runs");
   const runDir = join(runsDir, runId);
@@ -61,7 +93,7 @@ export function createRun({ repoRoot, queue, runOptions }) {
   
   // Write immutable queue file
   const queuePath = join(runDir, "queue.json");
-  writeFileSync(queuePath, JSON.stringify(queue, null, 2), "utf-8");
+  writeFileSync(queuePath, JSON.stringify(canonicalQueue, null, 2), "utf-8");
   
   // Write initial metadata
   const metadataPath = join(runDir, "metadata.json");
@@ -72,7 +104,42 @@ export function createRun({ repoRoot, queue, runOptions }) {
     parallelism: runOptions.parallelism,
     createdAt: new Date().toISOString(),
   };
+  
+  // Add eventBound flag if present
+  if (runOptions.eventBound === true) {
+    metadata.eventBound = true;
+  }
+  
   writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf-8");
+  
+  // Write event-bound run specification if opted in
+  if (runOptions.eventBound === true) {
+    // Extract frozen membership (issue numbers only, sorted)
+    const frozenMembership = canonicalQueue.map(i => i.number).sort((a, b) => a - b);
+    const queueDigest = computeQueueDigest(frozenMembership);
+    
+    const specification = {
+      version: "v1",
+      eventProtocol: "ralph.run.queue-succeeded/v1",
+      frozenMembership,
+      queueDigest,
+      targetBranch: runOptions.targetBranch,
+      queueProvenance: runOptions.queueProvenance,
+      runOptions: {
+        runMode: runOptions.runMode,
+        model: runOptions.model,
+        parallelism: runOptions.parallelism,
+      },
+    };
+    
+    // Optionally include hook generation
+    if (runOptions.hookGeneration !== undefined) {
+      specification.hookGeneration = runOptions.hookGeneration;
+    }
+    
+    const specPath = join(runDir, "run-specification.json");
+    writeFileSync(specPath, JSON.stringify(specification, null, 2), "utf-8");
+  }
   
   // Write initial empty status
   const statusPath = join(runDir, "status.json");
@@ -121,6 +188,7 @@ export function getActiveRuns(repoRoot) {
     const runDir = join(runsDir, runId);
     const metadataPath = join(runDir, "metadata.json");
     const queuePath = join(runDir, "queue.json");
+    const specPath = join(runDir, "run-specification.json");
     
     // Skip runs missing required files
     if (!existsSync(metadataPath) || !existsSync(queuePath)) {
@@ -140,12 +208,23 @@ export function getActiveRuns(repoRoot) {
         continue;
       }
       
-      runs.push({
+      const run = {
         runId,
         runDir,
         metadata,
         queuePath,
-      });
+      };
+      
+      // Load specification if event-bound
+      if (existsSync(specPath)) {
+        try {
+          run.specification = JSON.parse(readFileSync(specPath, "utf-8"));
+        } catch {
+          // Specification file exists but is invalid - skip loading it
+        }
+      }
+      
+      runs.push(run);
     } catch {
       // Skip runs with invalid JSON or other read errors
       continue;
@@ -323,10 +402,19 @@ export function removeQueuedIssue({ repoRoot, runId, issueNumber }) {
   const runDir = join(repoRoot, ".ralph", "runs", runId);
   const queuePath = join(runDir, "queue.json");
   const statusPath = join(runDir, "status.json");
+  const specPath = join(runDir, "run-specification.json");
 
   // Verify run exists
   if (!existsSync(runDir) || !existsSync(queuePath)) {
     return { success: false, error: `Run ${runId} not found` };
+  }
+
+  // Reject mutation of event-bound runs
+  if (existsSync(specPath)) {
+    return {
+      success: false,
+      error: "Cannot remove issues from event-bound run: frozen membership is immutable after launch",
+    };
   }
 
   try {
