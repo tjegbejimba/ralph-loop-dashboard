@@ -69,6 +69,23 @@ export function normalizeRunOptions(input, { userConfig, repoConfig } = {}) {
     model: raw.model,
   };
 
+  // Preserve event-bound fields if present
+  if (raw.eventBound === true) {
+    runOptions.eventBound = true;
+    
+    if (typeof raw.targetBranch === "string" && raw.targetBranch.length > 0) {
+      runOptions.targetBranch = raw.targetBranch;
+    }
+    
+    if (typeof raw.queueProvenance === "string" && raw.queueProvenance.length > 0) {
+      runOptions.queueProvenance = raw.queueProvenance;
+    }
+    
+    if (typeof raw.hookGeneration === "number" && Number.isInteger(raw.hookGeneration)) {
+      runOptions.hookGeneration = raw.hookGeneration;
+    }
+  }
+
   const runModeResult = validateRunMode(runOptions.runMode);
   if (!runModeResult.valid) return { ok: false, error: runModeResult.error };
 

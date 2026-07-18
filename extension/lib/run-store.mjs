@@ -125,6 +125,11 @@ export function createRun({ repoRoot, queue, runOptions }) {
       queueDigest,
       targetBranch: runOptions.targetBranch,
       queueProvenance: runOptions.queueProvenance,
+      runOptions: {
+        runMode: runOptions.runMode,
+        model: runOptions.model,
+        parallelism: runOptions.parallelism,
+      },
     };
     
     // Optionally include hook generation
@@ -397,10 +402,19 @@ export function removeQueuedIssue({ repoRoot, runId, issueNumber }) {
   const runDir = join(repoRoot, ".ralph", "runs", runId);
   const queuePath = join(runDir, "queue.json");
   const statusPath = join(runDir, "status.json");
+  const specPath = join(runDir, "run-specification.json");
 
   // Verify run exists
   if (!existsSync(runDir) || !existsSync(queuePath)) {
     return { success: false, error: `Run ${runId} not found` };
+  }
+
+  // Reject mutation of event-bound runs
+  if (existsSync(specPath)) {
+    return {
+      success: false,
+      error: "Cannot remove issues from event-bound run: frozen membership is immutable after launch",
+    };
   }
 
   try {

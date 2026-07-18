@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, rmSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { createRun, getActiveRuns } from "../extension/lib/run-store.mjs";
+import { createRun, getActiveRuns, removeQueuedIssue } from "../extension/lib/run-store.mjs";
 
 describe("Event-bound run specifications", () => {
   let tmpDir;
@@ -261,5 +261,67 @@ describe("Event-bound run specifications", () => {
 
     // Same membership should produce same digest
     assert.strictEqual(spec1.queueDigest, spec2.queueDigest);
+  });
+
+  // Test that specification includes frozen runOptions
+  test("specification includes frozen runOptions", () => {
+    const queue = [{ number: 10, title: "Issue" }];
+
+    const runOptions = {
+      runMode: "run-aware",
+      model: "claude-sonnet-4.5",
+      parallelism: 2,
+      eventBound: true,
+      targetBranch: "main",
+      queueProvenance: "dashboard-explicit",
+    };
+
+    const result = createRun({ repoRoot: tmpDir, queue, runOptions });
+
+    const specPath = join(result.runDir, "run-specification.json");
+    const spec = JSON.parse(readFileSync(specPath, "utf-8"));
+
+    // Verify frozen runOptions
+    assert.ok(spec.runOptions);
+    assert.strictEqual(spec.runOptions.runMode, "run-aware");
+    assert.strictEqual(spec.runOptions.model, "claude-sonnet-4.5");
+    assert.strictEqual(spec.runOptions.parallelism, 2);
+  });
+
+  // Test that removeQueuedIssue is rejected for event-bound runs
+  test("removeQueuedIssue rejects mutation of event-bound runs", () => {
+    const queue = [
+      { number: 10, title: "First" },
+      { number: 20, title: "Second" },
+    ];
+
+    const runOptions = {
+      runMode: "run-aware",
+      model: "claude-sonnet-4.5",
+      parallelism: 1,
+      eventBound: true,
+      targetBranch: "main",
+      queueProvenance: "dashboard-explicit",
+    };
+
+    const result = createRun({ repoRoot: tmpDir, queue, runOptions });
+
+    // Attempt to remove an issue should fail
+    const removeResult = removeQueuedIssue({
+      repoRoot: tmpDir,
+      runId: result.runId,
+      issueNumber: 20,
+    });
+
+    assert.strictEqual(removeResult.success, false);
+    assert.ok(removeResult.error.includes("frozen membership is immutable"));
+
+    // Verify queue and specification remain unchanged
+    const persistedQueue = JSON.parse(readFileSync(result.queuePath, "utf-8"));
+    assert.strictEqual(persistedQueue.length, 2);
+
+    const specPath = join(result.runDir, "run-specification.json");
+    const spec = JSON.parse(readFileSync(specPath, "utf-8"));
+    assert.deepStrictEqual(spec.frozenMembership, [10, 20]);
   });
 });
