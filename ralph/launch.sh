@@ -197,6 +197,14 @@ if [[ -f "$_preflight_lib" ]]; then
 fi
 unset _preflight_lib
 
+# PRD integration branch ownership is optional for legacy installs, but a
+# run carrying a PRD reference must have it before workers may start.
+_prd_branch_lib="$MAIN_REPO/.ralph/lib/prd-branch.sh"
+if [[ -f "$_prd_branch_lib" ]]; then
+  # shellcheck disable=SC1090
+  . "$_prd_branch_lib"
+fi
+
 # Terminal CLI helper (optional). Provides resolve_terminal_cli /
 # invoke_terminal_cli for --status augmentation and the new --watch / --follow
 # commands. Sourcing is conditional so older installs still work.
@@ -875,6 +883,74 @@ if ! acquire_lockdir "$COMMON_SETUP_LOCK"; then
   exit 1
 fi
 trap 'release_lockdir "$COMMON_SETUP_LOCK"; release_lockdir "$SETUP_LOCK"' EXIT
+
+initialize_prd_run() {
+  local run_id="${RALPH_RUN_ID:-}"
+  [[ -n "$run_id" ]] || return 0
+
+  local ralph_md="$MAIN_REPO/.ralph/RALPH.md"
+  [[ -f "$ralph_md" ]] || return 0
+
+  local prd_number
+  prd_number=$(sed -nE 's/.*<!-- RALPH_PRD_REF: #([1-9][0-9]*) -->.*/\1/p' "$ralph_md" | head -1)
+  [[ -n "$prd_number" ]] || return 0
+
+  if ! declare -F create_prd_branch >/dev/null 2>&1; then
+    echo "❌ PRD #$prd_number requires .ralph/lib/prd-branch.sh before workers can launch." >&2
+    return 1
+  fi
+
+  local config="$MAIN_REPO/.ralph/config.json"
+  local template="" remote="origin" delivery_branch="main"
+  if [[ -f "$config" ]]; then
+    template=$(jq -r '.prd.integrationBranchTemplate // ""' "$config")
+    remote=$(jq -r '.prd.remote // "origin"' "$config")
+    delivery_branch=$(jq -r '.prd.deliveryBranch // "main"' "$config")
+  fi
+
+  local prd_record prd_title
+  prd_record=$("$GH" issue view "$prd_number" --repo "$REPO" \
+    --json number,title,state 2>/dev/null || echo "")
+  prd_title=$(echo "$prd_record" | jq -r '.title // empty' 2>/dev/null)
+  if [[ -z "$prd_title" ]]; then
+    echo "❌ Cannot resolve title for PRD #$prd_number; refusing to launch workers." >&2
+    return 1
+  fi
+
+  if ! can_start_prd "$prd_number" "$run_id"; then
+    return 1
+  fi
+
+  local ownership_file="$MAIN_REPO/.ralph/runs/$run_id/ownership.json"
+  local ownership_existed=0
+  [[ -f "$ownership_file" ]] && ownership_existed=1
+
+  local branch_name
+  branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
+  if ! (
+    cd "$MAIN_REPO"
+    create_prd_branch \
+      "$run_id" "$prd_number" "$prd_title" "$remote" "$delivery_branch" "$template"
+  ); then
+    return 1
+  fi
+
+  if ! activate_prd_run "$run_id" "$prd_number"; then
+    echo "❌ Failed to activate PRD #$prd_number for run '$run_id'; rolling back new branch setup." >&2
+    if [[ "$ownership_existed" -eq 0 ]]; then
+      git -C "$MAIN_REPO" branch -D "$branch_name" >/dev/null 2>&1 || true
+      rm -f "$ownership_file"
+    fi
+    return 1
+  fi
+
+  echo "🌿 PRD #$prd_number run '$run_id' owns integration branch '$branch_name'."
+}
+
+if ! initialize_prd_run; then
+  exit 1
+fi
+unset _prd_branch_lib
 
 # Setup phase: create N worktrees and symlink .ralph in each.
 # Resolve the exclude file via git so worktree targets (where MAIN_REPO/.git

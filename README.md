@@ -387,6 +387,11 @@ Config is intentionally small:
     "titleNumRegex": "^Slice (?<x>[0-9]+):",
     "issueSearch": "is:open no:assignee label:ralph:ready -label:ralph:failed (label:work:slice OR label:work:standalone)"
   },
+  "prd": {
+    "integrationBranchTemplate": "ralph/prd/{feature-slug}-{prd_number}",
+    "remote": "origin",
+    "deliveryBranch": "main"
+  },
   "validation": {
     "commands": [
       { "name": "Compile", "command": "python3 -m py_compile <changed python files>" },
@@ -411,6 +416,8 @@ Key fields:
 - **`issue.titleRegex`, `issue.titleNumRegex`, `issue.issueSearch`** — Control title matching and GitHub issue discovery.
 - **`issue.numbers`** (array of integers) — Direct-numbers mode enqueue list, populated by `--enqueue`.
 - **`issue.order`** (`"queue"` or `"chronological"`) — Whether to consume issues in queue order or by issue number.
+- **`prd.integrationBranchTemplate`** — Owned PRD branch template. Supports `{feature-slug}` and `{prd_number}`; the resolved name is frozen in the durable run record before workers launch.
+- **`prd.remote`, `prd.deliveryBranch`** — Remote and delivery branch used to establish the PRD branch from the latest fetched delivery head.
 - **`validation.commands`** (array of `{name, command}` objects) — Pre-merge checks (lint, test, build).
 - **`worker.idleExitAfterPolls`** (optional integer) — Number of consecutive empty-queue polls before idling; env var `RALPH_IDLE_EXIT` takes precedence.
 
