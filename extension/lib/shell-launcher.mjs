@@ -193,8 +193,9 @@ export async function launchRun({
       }
       // Windows: invoke launch.sh through Git for Windows bash. Direct
       // spawn(scriptPath, ...) fails because Node on Windows cannot honour
-      // a shebang. We use `bash -lc "exec '<posix-path>'"` so the recorded
-      // PID is launch.sh, not bash.
+      // a shebang. Pass the script as bash's file argument instead of using
+      // a login shell: Git Bash startup scripts can fork before launch.sh,
+      // which is unreliable in native Windows detached mode.
       let bashExe;
       try {
         bashExe = resolveBash(process.env);
@@ -213,8 +214,7 @@ export async function launchRun({
       }
       const scriptBash = toBash(scriptPath);
       const windowsLaunchArgs = ["--foreground", ...launchArgs];
-      const command = `exec '${scriptBash}' ${windowsLaunchArgs.join(" ")}`.trim();
-      child = spawn(bashExe, ["-lc", command], {
+      child = spawn(bashExe, [scriptBash, ...windowsLaunchArgs], {
         detached: true,
         windowsHide: true,
         stdio: "ignore",
