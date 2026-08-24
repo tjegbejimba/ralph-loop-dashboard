@@ -220,6 +220,7 @@ test("startRalphLoop requires launcher startup confirmation before reporting suc
     repoRoot: "/repo",
     queue,
     runOptions,
+    isWindows: false,
     getLoopProcess: async () => {
       processChecks += 1;
       if (processChecks === 1) return [];

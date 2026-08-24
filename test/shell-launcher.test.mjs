@@ -2,14 +2,13 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { launchRun } from "../extension/lib/shell-launcher.mjs";
-import { toBashPath } from "../extension/lib/platform-shim.mjs";
+import { resolveBashExe, toBashPath } from "../extension/lib/platform-shim.mjs";
 
 async function waitForFile(path, { timeoutMs = 2000 } = {}) {
-  const { existsSync } = await import("node:fs");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (existsSync(path)) return true;
@@ -18,19 +17,23 @@ async function waitForFile(path, { timeoutMs = 2000 } = {}) {
   return existsSync(path);
 }
 
+function resolveTestBash() {
+  return process.platform === "win32" ? resolveBashExe() : "/bin/bash";
+}
+
 test("launchRun defaults to installed .ralph launcher and passes run environment", async () => {
   const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-"));
   try {
     const runId = "20260504-120000-installed";
     const runDir = join(tmpRepo, ".ralph", "runs", runId);
-    const runOptions = { runMode: "until-empty", parallelism: 2, model: "claude-sonnet-4.5" };
+    const runOptions = { runMode: "until-empty", parallelism: 1, model: "claude-sonnet-4.5" };
     const envOut = join(tmpRepo, "env-out.txt");
     const installedDir = join(tmpRepo, ".ralph");
     const installedLauncher = join(installedDir, "launch.sh");
     mkdirSync(installedDir, { recursive: true });
     writeFileSync(
       installedLauncher,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$RALPH_RUN_ID|$RALPH_RUN_DIR|$RALPH_MAIN_REPO|$RALPH_MODEL|$RALPH_PARALLELISM|$RALPH_RUN_MODE|$*" > ${envOut}\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$RALPH_RUN_ID|$RALPH_RUN_DIR|$RALPH_MAIN_REPO|$RALPH_MODEL|$RALPH_PARALLELISM|$RALPH_RUN_MODE|$*" > '${toBashPath(envOut)}'\n`,
       "utf-8"
     );
 
@@ -46,7 +49,8 @@ test("launchRun defaults to installed .ralph launcher and passes run environment
     assert.equal(await waitForFile(envOut), true, "installed launcher should have run");
     assert.equal(
       readFileSync(envOut, "utf-8").trim(),
-      `${runId}|${runDir}|${tmpRepo}|claude-sonnet-4.5|2|until-empty|`,
+      `${runId}|${runDir}|${tmpRepo}|claude-sonnet-4.5|1|until-empty|` +
+        (process.platform === "win32" ? "--foreground" : ""),
     );
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
@@ -91,7 +95,7 @@ test("launchRun passes run ID via environment", async () => {
     const mockScript = join(tmpRepo, "launch-mock.sh");
     writeFileSync(
       mockScript,
-      `#!/usr/bin/env bash\necho "$RALPH_RUN_ID" > ${envOut}\nexit 0\n`,
+      `#!/usr/bin/env bash\necho "$RALPH_RUN_ID" > '${toBashPath(envOut)}'\nexit 0\n`,
       "utf-8"
     );
     
@@ -109,11 +113,10 @@ test("launchRun passes run ID via environment", async () => {
     await new Promise(resolve => setTimeout(resolve, 100));
     
     // Verify run ID was passed via environment
-    const { readFileSync, existsSync } = await import("node:fs");
-    if (existsSync(envOut)) {
-      const capturedRunId = readFileSync(envOut, "utf-8").trim();
-      assert.equal(capturedRunId, runId, "Run ID should be passed via RALPH_RUN_ID");
-    }
+    const { readFileSync } = await import("node:fs");
+    assert.equal(await waitForFile(envOut), true, "launcher should capture the run ID");
+    const capturedRunId = readFileSync(envOut, "utf-8").trim();
+    assert.equal(capturedRunId, runId, "Run ID should be passed via RALPH_RUN_ID");
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
@@ -171,7 +174,7 @@ test("launchRun passes --once to launcher for one-pass runs", async () => {
     const mockScript = join(tmpRepo, "launch-mock.sh");
     writeFileSync(
       mockScript,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > ${argsOut}\nexit 0\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > '${toBashPath(argsOut)}'\nexit 0\n`,
       "utf-8"
     );
 
@@ -186,7 +189,10 @@ test("launchRun passes --once to launcher for one-pass runs", async () => {
     assert.ok(result.success, result.error);
     const { readFileSync } = await import("node:fs");
     assert.equal(await waitForFile(argsOut), true, "launcher should have received args");
-    assert.equal(readFileSync(argsOut, "utf-8").trim(), "--once");
+    assert.equal(
+      readFileSync(argsOut, "utf-8").trim(),
+      process.platform === "win32" ? "--foreground --once" : "--once",
+    );
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
@@ -313,7 +319,7 @@ test("launchRun writes Windows launcher pidfile for status and stop tracking", a
     mkdirSync(join(tmpRepo, ".ralph"), { recursive: true });
     writeFileSync(
       mockScript,
-      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > ${argsOut}\nsleep 1\n`,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" > '${toBashPath(argsOut)}'\nsleep 1\n`,
       "utf-8",
     );
     chmodSync(mockScript, 0o755);
@@ -324,7 +330,7 @@ test("launchRun writes Windows launcher pidfile for status and stop tracking", a
       repoRoot: tmpRepo,
       runOptions,
       isWindows: true,
-      resolveBash: () => "/bin/bash",
+      resolveBash: resolveTestBash,
       startupTimeoutMs: 100,
     });
 
@@ -335,6 +341,51 @@ test("launchRun writes Windows launcher pidfile for status and stop tracking", a
     assert.equal(Number(readFileSync(pidfile, "utf-8")) > 0, true);
     assert.equal(await waitForFile(argsOut), true, "Windows launcher should receive args");
     assert.equal(readFileSync(argsOut, "utf-8").trim(), "--foreground");
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("launchRun starts the repo-local launcher and confirms worker registration on Windows", {
+  skip: process.platform !== "win32" ? "requires native Windows" : false,
+}, async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-windows-registration-"));
+  try {
+    const bashExe = resolveBashExe();
+    assert.ok(bashExe, "Git Bash must be installed for the native Windows launch test");
+
+    const runId = "20260824-120000-windows-registration";
+    const runDir = join(tmpRepo, ".ralph", "runs", runId);
+    const runOptions = { runMode: "until-empty", parallelism: 1, model: "fixture-model" };
+    const mockScript = join(tmpRepo, ".ralph", "launch.sh");
+    const statePath = join(tmpRepo, ".ralph", "state.json");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      mockScript,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        `printf '%s\\n' '{"worker":{"pid":12345}}' > '${toBashPath(statePath)}'`,
+        "sleep 2",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: tmpRepo,
+      runOptions,
+      isWindows: true,
+      resolveBash: () => bashExe,
+      confirmStarted: async () => existsSync(statePath),
+      startupTimeoutMs: 750,
+      startupPollMs: 20,
+    });
+
+    assert.equal(result.success, true, result.error);
+    assert.equal(existsSync(statePath), true, "worker registration state must be created");
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
@@ -354,7 +405,7 @@ test("launchRun rejects native Windows parallelism above one", async () => {
       repoRoot: tmpRepo,
       runOptions,
       isWindows: true,
-      resolveBash: () => "/bin/bash",
+      resolveBash: resolveTestBash,
     });
 
     assert.equal(result.success, false);
@@ -381,7 +432,7 @@ test("launchRun removes Windows pidfile when startup fails", async () => {
       repoRoot: tmpRepo,
       runOptions,
       isWindows: true,
-      resolveBash: () => "/bin/bash",
+      resolveBash: resolveTestBash,
       startupTimeoutMs: 3000,
     });
 
@@ -412,7 +463,7 @@ test("launchRun terminates Windows foreground worker when startup confirmation f
       repoRoot: tmpRepo,
       runOptions,
       isWindows: true,
-      resolveBash: () => "/bin/bash",
+      resolveBash: resolveTestBash,
       confirmStarted: async () => false,
       startupTimeoutMs: 500,
       startupPollMs: 10,

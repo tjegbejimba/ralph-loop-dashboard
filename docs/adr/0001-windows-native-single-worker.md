@@ -9,6 +9,11 @@ bash 1026 dofork: child 1027 - died waiting for dll loading, errno 11
 
 We sidestep this by running `launch.sh --foreground`, which skips the
 `nohup ... &` path inside the launcher. Foreground mode runs **one** worker.
+The Node controller invokes Git Bash with `launch.sh` as the script argument
+(`bash.exe /c/.../.ralph/launch.sh --foreground`), not through `bash -lc`.
+The login-shell path runs profile startup commands before `launch.sh`; with
+detached ignored stdio on native Windows, that path can remain alive without
+ever reaching worker registration.
 
 The dashboard supports three plausible behaviours when a Windows user requests
 `parallelism > 1`: silently clamp to 1, clamp to 1 with a UI warning, or
