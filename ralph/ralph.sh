@@ -1010,8 +1010,27 @@ while true; do
     target_base="$default_branch"
   fi
   
-  # Pre-claim fallback merge: only check base that matches this run's target
-  if ralph_merge_ready_open_pr_for_issue "$num" "$target_base"; then
+  # Pre-claim fallback merge is available only when recovery already proved
+  # the exact worker branch and its pushed head SHA.
+  _preclaim_head=""
+  if [[ "$_iter_resume_active" == "1" ]]; then
+    _preclaim_head="${_iter_resume_branch:-}"
+  fi
+  _preclaim_sha=""
+  _preclaim_remote_sha=""
+  _preclaim_author=""
+  if [[ -n "$_preclaim_head" ]]; then
+    _preclaim_sha=$(git rev-parse --verify "refs/heads/${_preclaim_head}^{commit}" 2>/dev/null || true)
+    git fetch origin "$_preclaim_head" >/dev/null 2>&1 || true
+    _preclaim_remote_sha=$(git rev-parse --verify "refs/remotes/origin/${_preclaim_head}^{commit}" 2>/dev/null || true)
+    if [[ "$_preclaim_sha" != "$_preclaim_remote_sha" ]]; then
+      _preclaim_sha=""
+    fi
+    _preclaim_author=$(gh api user --jq .login 2>/dev/null || true)
+  fi
+  if [[ -n "$_preclaim_sha" && -n "$_preclaim_author" ]] \
+      && ralph_merge_ready_open_pr_for_issue \
+        "$num" "$target_base" "$_preclaim_head" "$_preclaim_sha" "$_preclaim_author"; then
     if wait_for_issue_closed_by_merged_pr "$num" "after pre-claim fallback merge"; then
       if [[ -n "$RUN_ID" ]]; then
         state_lock || true
@@ -1179,6 +1198,10 @@ DO NOT re-plan or open a new branch. Instead:
     exit 1
   fi
 
+  expected_pr_head=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+  expected_pr_sha=$(git rev-parse --verify HEAD 2>/dev/null || true)
+  expected_pr_author=$(gh api user --jq .login 2>/dev/null || true)
+
   # Verify issue closed by a merged PR (not just manually closed).
   # closedByPullRequestsReferences items contain {number, url, ...} but not .state,
   # so we look up each referenced PR and require at least one with mergedAt != null.
@@ -1236,7 +1259,9 @@ DO NOT re-plan or open a new branch. Instead:
   #    when the PR merged into the default branch, so non-default merges
   #    couldn't have closed the issue and must not be credited here.
   if [[ "$merged_count" -lt 1 ]]; then
-    if [[ "$state" != "CLOSED" ]] && ralph_merge_ready_open_pr_for_issue "$num" "$default_branch"; then
+    if [[ "$state" != "CLOSED" ]] \
+        && ralph_merge_ready_open_pr_for_issue \
+          "$num" "$default_branch" "$expected_pr_head" "$expected_pr_sha" "$expected_pr_author"; then
       if wait_for_issue_closed_by_merged_pr "$num" "after fallback merge"; then
         merged_count=1
       fi
@@ -1263,12 +1288,16 @@ DO NOT re-plan or open a new branch. Instead:
     #       with no PR, open one and retry (a);
     #   (c) accept state=CLOSED + a release-branch PR merged in this iteration.
     if [[ "$merged_count" -lt 1 && -n "$RELEASE_BRANCH" && "$state" != "CLOSED" ]]; then
-      if ralph_merge_release_branch_pr_for_issue "$num" "$RELEASE_BRANCH"; then
+      if ralph_merge_release_branch_pr_for_issue \
+          "$num" "$RELEASE_BRANCH" "$expected_pr_head" "$expected_pr_sha" "$expected_pr_author"; then
         state="CLOSED"
         merged_count=1
-      elif [[ -n "$BRANCH_PREFIX" ]] && ralph_open_pr_for_pushed_branch "$num" "$RELEASE_BRANCH" "$BRANCH_PREFIX"; then
+      elif [[ -n "$BRANCH_PREFIX" ]] \
+          && ralph_open_pr_for_pushed_branch \
+            "$num" "$RELEASE_BRANCH" "$BRANCH_PREFIX" "$expected_pr_head" "$expected_pr_sha"; then
         sleep 15  # give the new PR a moment to register checks
-        if ralph_merge_release_branch_pr_for_issue "$num" "$RELEASE_BRANCH"; then
+        if ralph_merge_release_branch_pr_for_issue \
+            "$num" "$RELEASE_BRANCH" "$expected_pr_head" "$expected_pr_sha" "$expected_pr_author"; then
           state="CLOSED"
           merged_count=1
         fi
@@ -1298,46 +1327,26 @@ DO NOT re-plan or open a new branch. Instead:
     if [[ "$integration_base" != "$default_branch" ]]; then
       echo "ℹ️  Issue #$num: PRD integration branch detected ($integration_base), checking for merged PR..." >&2
       
-      # Try to merge an open PR
+      # Try to merge the exact worker-owned PR at the approved local head SHA.
       prd_merge_result=0
-      prd_prs=$(gh pr list --repo "$REPO" --state open --base "$integration_base" \
-        --search "in:body \"#$num\"" \
-        --json number,isDraft,baseRefName,mergeable,body \
-        --jq ".[] | select(.body | test(\"(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\\\s+#$num\\\\b\")) | [.number, .isDraft, .baseRefName, .mergeable] | @tsv" 2>/dev/null || true)
-      
-      if [[ -n "$prd_prs" ]]; then
-        while IFS=$'\t' read -r pr is_draft base_ref mergeable; do
-          [[ -n "$pr" ]] || continue
-          [[ "$is_draft" == "false" ]] || continue
-          [[ "$base_ref" == "$integration_base" ]] || continue
-          [[ "$mergeable" == "MERGEABLE" || "$mergeable" == "UNKNOWN" || -z "$mergeable" ]] || continue
-          
-          if ralph_pr_checks_passed "$pr"; then
-            echo "✅ PR #$pr closes #$num into '$integration_base' and checks are green; merging + recording slice-integrated." >&2
-            if gh pr merge "$pr" --repo "$REPO" --squash --delete-branch; then
-              merge_commit=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null || echo "")
-              
-              # Record slice-integrated lifecycle
-              if declare -F record_slice_integrated >/dev/null 2>&1; then
-                state_lock || true
-                record_slice_integrated "$num" "$pr" "$merge_commit" "$RUN_ID"
-                state_unlock || true
-              fi
-              
-              # Explicitly close the issue
-              if declare -F close_slice_issue >/dev/null 2>&1; then
-                close_slice_issue "$num" "$pr" "$REPO" || true
-              fi
-              
-              state="CLOSED"
-              merged_count=1
-              prd_merge_result=1
-              break
-            fi
-          else
-            echo "ℹ️  PR #$pr closes #$num but checks are not green yet; not auto-merging." >&2
-          fi
-        done <<<"$prd_prs"
+      if _ralph_merge_owned_open_pr_for_issue \
+          "$num" "$integration_base" "$expected_pr_head" "$expected_pr_sha" "$expected_pr_author" body; then
+        pr="$RALPH_MERGED_PR"
+        merge_commit=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null || echo "")
+
+        if declare -F record_slice_integrated >/dev/null 2>&1; then
+          state_lock || true
+          record_slice_integrated "$num" "$pr" "$merge_commit" "$RUN_ID"
+          state_unlock || true
+        fi
+
+        if declare -F close_slice_issue >/dev/null 2>&1; then
+          close_slice_issue "$num" "$pr" "$REPO" || true
+        fi
+
+        state="CLOSED"
+        merged_count=1
+        prd_merge_result=1
       fi
       
       # If no open PR was merged, check for recently merged PRs
