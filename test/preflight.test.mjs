@@ -23,7 +23,26 @@ function createTestRepo(tmpDir, { hasRalphMd = true, hasConfig = true, validConf
   }
 }
 
-const execGitStatusClean = async () => ({ exitCode: 0, stdout: "", stderr: "" });
+const BASE_COMMIT = "0123456789abcdef0123456789abcdef01234567";
+function execGitAtBase({
+  branch = "main",
+  headCommit = BASE_COMMIT,
+  baseCommit = BASE_COMMIT,
+  status = "",
+  fetchResult = { exitCode: 0, stdout: "", stderr: "" },
+} = {}) {
+  return async (_repoRoot, args) => {
+    if (args[0] === "fetch") return fetchResult;
+    if (args[0] === "status") return { exitCode: 0, stdout: status, stderr: "" };
+    if (args[0] === "rev-parse" && args[1] === "HEAD") {
+      return { exitCode: 0, stdout: headCommit, stderr: "" };
+    }
+    if (args[0] === "rev-parse" && args[1] === `refs/remotes/origin/${branch}`) {
+      return { exitCode: 0, stdout: baseCommit, stderr: "" };
+    }
+    throw new Error(`Unexpected git args: ${args.join(" ")}`);
+  };
+}
 const execGhIssueReady = async () => ({
   exitCode: 0,
   stdout: JSON.stringify({
@@ -37,6 +56,19 @@ const execGhIssueReady = async () => ({
   stderr: "",
 });
 
+function passingPreflightOptions(repoRoot, execGit, overrides = {}) {
+  return {
+    repoRoot,
+    queue: [{ number: 1, title: "Test" }],
+    runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+    execGit,
+    execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+    execGhIssue: execGhIssueReady,
+    ...overrides,
+  };
+}
+
 test("runPreflight passes when all conditions met", async () => {
   const tmpDir = join(import.meta.dirname, "tmp-preflight-1");
   createTestRepo(tmpDir);
@@ -47,15 +79,177 @@ test("runPreflight passes when all conditions met", async () => {
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
       // Mock successful external commands
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: execGhIssueReady,
     });
     
     assert.equal(result.passed, true);
-    assert.equal(result.checks.length, 7); // queue, ralph.md, config.json, git status, gh auth, gh repo, canonical issue safety
+    assert.equal(result.checks.length, 8);
     assert.ok(result.checks.every(c => c.status === "pass"));
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("runPreflight accepts a clean coordinator at the fetched remote base", async () => {
+  const tmpDir = join(import.meta.dirname, "tmp-preflight-base-match");
+  createTestRepo(tmpDir);
+  const gitCalls = [];
+
+  try {
+    const result = await runPreflight({
+      repoRoot: tmpDir,
+      queue: [{ number: 1, title: "Test" }],
+      runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
+      baseBranch: "main",
+      execGit: async (_repoRoot, args) => {
+        gitCalls.push(args);
+        if (args[0] === "fetch") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "status") {
+          return { exitCode: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "rev-parse" && args[1] === "HEAD") {
+          return { exitCode: 0, stdout: "0123456789abcdef", stderr: "" };
+        }
+        if (args[0] === "rev-parse" && args[1] === "refs/remotes/origin/main") {
+          return { exitCode: 0, stdout: "0123456789abcdef", stderr: "" };
+        }
+        throw new Error(`Unexpected git args: ${args.join(" ")}`);
+      },
+      execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
+      execGhIssue: execGhIssueReady,
+    });
+
+    assert.equal(result.passed, true);
+    assert.deepEqual(gitCalls[0], ["fetch", "--quiet", "origin", "main"]);
+    const baseCheck = result.checks.find(c => c.id === "coordinator-base-revision");
+    assert.equal(baseCheck.status, "pass");
+    assert.match(baseCheck.message, /origin\/main/);
+    assert.match(baseCheck.message, /0123456789abcdef/);
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+for (const checkoutKind of ["detached worktree", "temporary local branch"]) {
+  test(`runPreflight accepts a clean ${checkoutKind} at the fetched remote base`, async () => {
+    const tmpDir = join(
+      import.meta.dirname,
+      `tmp-preflight-${checkoutKind.replaceAll(" ", "-")}`,
+    );
+    createTestRepo(tmpDir);
+
+    try {
+      const result = await runPreflight(
+        passingPreflightOptions(tmpDir, execGitAtBase()),
+      );
+
+      assert.equal(result.passed, true);
+      assert.equal(
+        result.checks.find(c => c.id === "coordinator-base-revision").status,
+        "pass",
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const mismatch of [
+  {
+    name: "stale coordinator behind the fetched base",
+    headCommit: "1111111111111111111111111111111111111111",
+    baseCommit: "2222222222222222222222222222222222222222",
+  },
+  {
+    name: "coordinator with a local commit ahead of the fetched base",
+    headCommit: "3333333333333333333333333333333333333333",
+    baseCommit: "2222222222222222222222222222222222222222",
+  },
+]) {
+  test(`runPreflight rejects a ${mismatch.name}`, async () => {
+    const tmpDir = join(import.meta.dirname, `tmp-preflight-mismatch-${mismatch.headCommit[0]}`);
+    createTestRepo(tmpDir);
+
+    try {
+      const result = await runPreflight(
+        passingPreflightOptions(
+          tmpDir,
+          execGitAtBase({
+            headCommit: mismatch.headCommit,
+            baseCommit: mismatch.baseCommit,
+          }),
+        ),
+      );
+
+      assert.equal(result.passed, false);
+      const baseCheck = result.checks.find(c => c.id === "coordinator-base-revision");
+      assert.equal(baseCheck.status, "fail");
+      assert.match(baseCheck.message, new RegExp(mismatch.headCommit));
+      assert.match(baseCheck.message, new RegExp(mismatch.baseCommit));
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("runPreflight compares an explicitly configured release branch", async () => {
+  const tmpDir = join(import.meta.dirname, "tmp-preflight-release-base");
+  createTestRepo(tmpDir);
+  const gitCalls = [];
+  const execGit = execGitAtBase({ branch: "release/v2" });
+
+  try {
+    const result = await runPreflight(
+      passingPreflightOptions(
+        tmpDir,
+        async (repoRoot, args) => {
+          gitCalls.push(args);
+          return execGit(repoRoot, args);
+        },
+        { baseBranch: "release/v2" },
+      ),
+    );
+
+    assert.equal(result.passed, true);
+    assert.deepEqual(gitCalls[0], ["fetch", "--quiet", "origin", "release/v2"]);
+    const baseCheck = result.checks.find(c => c.id === "coordinator-base-revision");
+    assert.match(baseCheck.message, /origin\/release\/v2/);
+    assert.match(baseCheck.message, new RegExp(BASE_COMMIT));
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("runPreflight fails closed when the configured base cannot be fetched", async () => {
+  const tmpDir = join(import.meta.dirname, "tmp-preflight-fetch-failure");
+  createTestRepo(tmpDir);
+
+  try {
+    const result = await runPreflight(
+      passingPreflightOptions(
+        tmpDir,
+        execGitAtBase({
+          fetchResult: {
+            exitCode: 1,
+            stdout: "",
+            stderr: "fatal: couldn't find remote ref missing",
+          },
+        }),
+        { baseBranch: "missing" },
+      ),
+    );
+
+    assert.equal(result.passed, false);
+    const baseCheck = result.checks.find(c => c.id === "coordinator-base-revision");
+    assert.equal(baseCheck.status, "fail");
+    assert.match(baseCheck.message, /origin\/missing/);
+    assert.match(baseCheck.message, /couldn't find remote ref/);
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }
@@ -70,7 +264,7 @@ test("runPreflight passes for already queued canonical issues", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 2, title: "Queued standalone" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: async () => ({
@@ -104,7 +298,7 @@ test("runPreflight blocks when queue is empty", async () => {
       repoRoot: tmpDir,
       queue: [], // Empty queue
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: execGhIssueReady,
@@ -129,7 +323,7 @@ test("runPreflight blocks when RALPH.md missing", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: execGhIssueReady,
@@ -154,7 +348,7 @@ test("runPreflight blocks when config.json missing", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: execGhIssueReady,
@@ -180,7 +374,7 @@ test("runPreflight blocks when GitHub auth fails", async () => {
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
       // Mock failed gh auth
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 1, stdout: "", stderr: "Not authenticated" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: execGhIssueReady,
@@ -205,7 +399,7 @@ test("runPreflight blocks when repo identity cannot be verified", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       // Mock failed gh repo view
       execGhRepo: async () => ({ exitCode: 1, stdout: "", stderr: "Repository not found" }),
@@ -231,14 +425,14 @@ test("runPreflight returns all checks even when some fail", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 1, stdout: "", stderr: "" }),
       execGhIssue: execGhIssueReady,
     });
     
     // Should run all checks, not short-circuit
-    assert.equal(result.checks.length, 7);
+    assert.equal(result.checks.length, 8);
     
     // Queue should pass (has items)
     const queueCheck = result.checks.find(c => c.id === "queue-not-empty");
@@ -271,7 +465,7 @@ test("runPreflight blocks when worktree has uncommitted changes", async () => {
       repoRoot: tmpDir,
       queue: [{ number: 1, title: "Test" }],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: async () => ({ exitCode: 0, stdout: " M src/app.js\n?? tmp.txt", stderr: "" }),
+      execGit: execGitAtBase({ status: " M src/app.js\n?? tmp.txt" }),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: execGhIssueReady,
@@ -300,7 +494,7 @@ test("runPreflight blocks queued issues that are not canonical Ralph-runnable wo
         { number: 3, title: "Triage" },
       ],
       runOptions: { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" },
-      execGitStatus: execGitStatusClean,
+      execGit: execGitAtBase(),
       execGhAuth: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
       execGhRepo: async () => ({ exitCode: 0, stdout: "{}", stderr: "" }),
       execGhIssue: async (_repo, number) => {
