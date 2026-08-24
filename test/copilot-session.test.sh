@@ -62,6 +62,7 @@ cat > "$BIN_DIR/copilot" <<'EOF'
 set -euo pipefail
 session_id=""
 session_name=""
+model=""
 has_no_remote=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -71,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --name)
       session_name="${2:-}"
+      shift 2
+      ;;
+    --model)
+      model="${2:-}"
       shift 2
       ;;
     --no-remote)
@@ -86,6 +91,7 @@ done
 [[ -n "$session_id" ]] || { echo "missing --session-id" >&2; exit 42; }
 [[ -n "$session_name" ]] || { echo "missing --name" >&2; exit 43; }
 [[ "$has_no_remote" -eq 1 ]] || { echo "missing --no-remote" >&2; exit 44; }
+[[ "$model" == "gpt-5.6-sol" ]] || { echo "unexpected --model '$model'" >&2; exit 45; }
 
 printf '%s\n' "$session_id" > "${COPILOT_SESSION_ID_OUT:?}"
 printf '%s\n' "$session_name" > "${COPILOT_SESSION_NAME_OUT:?}"

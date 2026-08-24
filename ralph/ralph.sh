@@ -13,7 +13,7 @@
 #   .ralph/ralph.sh --once    # run a single iteration then exit
 #
 # Env:
-#   RALPH_MODEL                   model passed to copilot (default: claude-sonnet-4.5)
+#   RALPH_MODEL                   model passed to copilot (default: gpt-5.6-sol)
 #   RALPH_TIMEOUT_SEC             per-iteration timeout in seconds (default: 7200)
 #   RALPH_AUTOPILOT_CONTINUES     copilot --max-autopilot-continues value (default: 15).
 #                                 Copilot CLI's default is 5, which is enough for short TDD
@@ -91,7 +91,7 @@ PROMPT_FILE="$SCRIPT_DIR/RALPH.md"
 LOG_DIR="$SCRIPT_DIR/logs"
 WORKER_ID="${RALPH_WORKER_ID:-1}"
 LOCK_DIR="$SCRIPT_DIR/lock/worker-${WORKER_ID}"
-MODEL="${RALPH_MODEL:-claude-sonnet-4.5}"
+MODEL="${RALPH_MODEL:-gpt-5.6-sol}"
 TIMEOUT_SEC="${RALPH_TIMEOUT_SEC:-7200}"
 AUTOPILOT_CONTINUES="${RALPH_AUTOPILOT_CONTINUES:-15}"
 POLL_SEC="${RALPH_POLL_SEC:-30}"

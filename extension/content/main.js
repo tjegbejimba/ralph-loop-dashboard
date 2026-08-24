@@ -1310,7 +1310,7 @@ document.querySelectorAll('input[name="run-mode"]').forEach((input) => {
 });
 
 // Load user config defaults into form
-const DEFAULT_RUN_MODEL = "claude-sonnet-4.5";
+const DEFAULT_RUN_MODEL = "gpt-5.6-sol";
 
 async function loadUserConfigDefaults() {
   try {

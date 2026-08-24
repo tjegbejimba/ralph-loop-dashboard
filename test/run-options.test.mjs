@@ -9,7 +9,7 @@ test("getRunOptions returns safe defaults when no user config provided", () => {
   
   assert.equal(result.runMode, "one-pass");
   assert.equal(result.parallelism, 1);
-  assert.equal(result.model, "claude-sonnet-4.5");
+  assert.equal(result.model, "gpt-5.6-sol");
 });
 
 test("getRunOptions uses defaults from user config when available", () => {
@@ -91,6 +91,13 @@ test("validateModel allows the claude-opus-4.8 review model used by RALPH.md.tem
   assert.equal(result.error, undefined);
 });
 
+test("validateModel accepts the default gpt-5.6-sol worker model", () => {
+  const result = validateModel("gpt-5.6-sol");
+
+  assert.equal(result.valid, true, "gpt-5.6-sol should be in the allowlist");
+  assert.equal(result.error, undefined);
+});
+
 test("validateModel rejects empty string", () => {
   const result = validateModel("");
   
@@ -129,7 +136,7 @@ test("getRunOptions uses built-in default when neither config has model", () => 
   
   const result = getRunOptions({ userConfig, repoConfig });
   
-  assert.equal(result.model, "claude-sonnet-4.5");
+  assert.equal(result.model, "gpt-5.6-sol");
 });
 
 test("validateModel accepts mai-code-1-flash-internal", () => {
