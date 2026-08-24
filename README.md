@@ -418,7 +418,7 @@ Config is intentionally small:
 
 Key fields:
 
-- **`model`** (optional) — Copilot model to use for this repo (e.g., `mai-code-1-flash-internal`, `gpt-5.5`, `claude-opus-4.7`). Overrides the global default from `~/.ralph-dashboard/config.json`. Falls back to global `defaultModel` if omitted, then to built-in default (`claude-sonnet-4.5`).
+- **`model`** (optional) — Copilot model to use for this repo (e.g., `gpt-5.6-sol`, `mai-code-1-flash-internal`, `claude-opus-4.7`). Overrides the global default from `~/.ralph-dashboard/config.json`. Falls back to global `defaultModel` if omitted, then to built-in default (`gpt-5.6-sol`).
 - **`profile`** — Profile name (`generic`, `bun`, `python`) for template and config hydration.
 - **`issue.titleRegex`, `issue.titleNumRegex`, `issue.issueSearch`** — Control title matching and GitHub issue discovery.
 - **`issue.numbers`** (array of integers) — Direct-numbers mode enqueue list, populated by `--enqueue`.
@@ -438,7 +438,7 @@ Environment variables still override config:
 | `RALPH_TITLE_REGEX` | config or `^Slice [0-9]+:` | Matches issues to work on (extension + script) |
 | `RALPH_TITLE_NUM_REGEX` | config or `^Slice (?<x>[0-9]+):` | jq-compatible capture for the number |
 | `RALPH_ISSUE_SEARCH` | config or `Slice in:title` | `gh issue list --search` query (extension) |
-| `RALPH_MODEL` | `claude-sonnet-4.5` | Model passed to `copilot -p` |
+| `RALPH_MODEL` | `gpt-5.6-sol` | Model passed to `copilot -p` |
 | `RALPH_TIMEOUT_SEC` | `7200` | Per-iteration timeout |
 | `RALPH_AUTOPILOT_CONTINUES` | `15` | `copilot --max-autopilot-continues` value. Copilot CLI's default is 5, which often runs out before commit/push/PR if the agent has to debug a build. Bump this if iterations halt after staging changes but before opening a PR. |
 | `RALPH_COPILOT_BIN` | `copilot` | Copilot CLI binary path, mostly for tests or advanced local wrappers |

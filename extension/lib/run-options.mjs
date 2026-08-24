@@ -14,13 +14,14 @@ const VALID_MODELS = new Set([
   "gpt-5.4",
   "gpt-5.4-mini",
   "gpt-5.5",
+  "gpt-5.6-sol",
   "gpt-4.1",
   "mai-code-1-flash-internal",
 ]);
 
 const DEFAULT_RUN_MODE = "one-pass";
 const DEFAULT_PARALLELISM = 1;
-const DEFAULT_MODEL = "claude-sonnet-4.5";
+const DEFAULT_MODEL = "gpt-5.6-sol";
 const MIN_PARALLELISM = 1;
 const MAX_PARALLELISM = 10;
 

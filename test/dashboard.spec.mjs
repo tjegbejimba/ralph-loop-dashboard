@@ -865,7 +865,7 @@ test("run options form displays with default values", async ({ page }) => {
   // Check default values
   await expect(page.locator('input[name="run-mode"][value="one-pass"]')).toBeChecked();
   await expect(page.locator("#parallelism-input")).toHaveValue("1");
-  await expect(page.locator("#model-input")).toHaveValue("claude-sonnet-4.5");
+  await expect(page.locator("#model-input")).toHaveValue("gpt-5.6-sol");
 });
 
 test("run options form loads user config defaults", async ({ page }) => {
