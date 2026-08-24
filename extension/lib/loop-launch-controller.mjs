@@ -339,6 +339,7 @@ export async function startRalphLoop({
     runId: run.runId,
     runDir: run.runDir,
     runOptions: normalizedRunOptions.runOptions,
+    base: preflight.base,
     startupTimeoutMs,
     startupPollMs,
     confirmStarted: async () => {

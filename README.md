@@ -450,6 +450,9 @@ Environment variables still override config:
 | `RALPH_POLL_SEC` | `30` | How long a worker sleeps when no eligible issue is available |
 | `RALPH_IDLE_EXIT_POLLS` | `20` | Consecutive idle polls before a worker exits (0 = disabled, "sleep forever") |
 | `RALPH_REPO_ROOT` | walks up from cwd | Override for the dashboard's project detection |
+| `RALPH_BASE_REMOTE` | `origin` | Remote that owns the worker base branch. |
+| `RALPH_BASE_BRANCH` | `RALPH_RELEASE_BRANCH`, then `main` | Explicit worker base branch. Takes precedence over the release-branch compatibility variable. |
+| `RALPH_BASE_COMMIT` | fetched base commit | Immutable preflight-approved commit used for worker worktree setup and the worker's first sync. Later iteration syncs advance from the configured remote branch. |
 | `RALPH_RELEASE_BRANCH` | unset | Name of a non-default base branch to target (e.g. `multi-user`, `next`, `v2`). When set, the post-iteration verifier accepts PRs merged into that branch as closing their referenced issue, and may call `gh pr merge` + `gh issue close` itself if copilot leaves a green PR open. See [`docs/release-branch.md`](docs/release-branch.md). |
 | `RALPH_BRANCH_PREFIX` | unset | Per-issue branch prefix used by the branch-only fallback (e.g. `mu-`, `release-`). Only meaningful when `RALPH_RELEASE_BRANCH` is also set. If copilot pushed `${prefix}${N}-…` but never opened a PR, the verifier opens one and retries the merge. |
 

@@ -97,13 +97,14 @@ async function defaultGitCommand(repoRoot, args) {
  * @returns {Promise<Object>} Preflight result
  * @returns {boolean} .passed - Whether all blocking checks passed
  * @returns {Array<Object>} .checks - Individual check results
+ * @returns {Object|null} .base - Approved remote, branch, ref, and commit
  */
 export async function runPreflight({
   repoRoot,
   queue,
   runOptions,
-  baseBranch = process.env.RALPH_RELEASE_BRANCH || "main",
-  baseRemote = "origin",
+  baseBranch = process.env.RALPH_BASE_BRANCH || process.env.RALPH_RELEASE_BRANCH || "main",
+  baseRemote = process.env.RALPH_BASE_REMOTE || "origin",
   execGit = defaultGitCommand,
   execGitStatus,
   execGhAuth = defaultGhAuthCheck,
@@ -111,6 +112,7 @@ export async function runPreflight({
   execGhIssue = defaultGhIssueCheck,
 }) {
   const checks = [];
+  let approvedBase = null;
 
   const remoteBaseRef = `${baseRemote}/${baseBranch}`;
   const remoteTrackingRef = `refs/remotes/${baseRemote}/${baseBranch}`;
@@ -127,10 +129,18 @@ export async function runPreflight({
     } else {
       const headResult = await execGit(repoRoot, ["rev-parse", "HEAD"]);
       const baseResult = await execGit(repoRoot, ["rev-parse", remoteTrackingRef]);
-      const headCommit = headResult.stdout.trim();
-      const baseCommit = baseResult.stdout.trim();
+      const headCommit = (headResult.stdout || "").trim();
+      const baseCommit = (baseResult.stdout || "").trim();
       const resolved = headResult.exitCode === 0 && baseResult.exitCode === 0 && headCommit && baseCommit;
       const matches = resolved && headCommit === baseCommit;
+      if (matches) {
+        approvedBase = {
+          remote: baseRemote,
+          branch: baseBranch,
+          ref: remoteBaseRef,
+          commit: baseCommit,
+        };
+      }
       checks.push({
         id: "coordinator-base-revision",
         label: "Coordinator matches fetched base",
@@ -356,5 +366,6 @@ export async function runPreflight({
   return {
     passed,
     checks,
+    base: approvedBase,
   };
 }
