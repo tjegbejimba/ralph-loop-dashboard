@@ -6,6 +6,7 @@ import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:f
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { launchRun } from "../extension/lib/shell-launcher.mjs";
+import { toBashPath } from "../extension/lib/platform-shim.mjs";
 
 async function waitForFile(path, { timeoutMs = 2000 } = {}) {
   const { existsSync } = await import("node:fs");
@@ -113,6 +114,48 @@ test("launchRun passes run ID via environment", async () => {
       const capturedRunId = readFileSync(envOut, "utf-8").trim();
       assert.equal(capturedRunId, runId, "Run ID should be passed via RALPH_RUN_ID");
     }
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("launchRun passes the preflight-approved base via environment", async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-base-"));
+  try {
+    const runId = "20260824-120000-approved-base";
+    const runDir = join(tmpRepo, ".ralph", "runs", runId);
+    const runOptions = { runMode: "one-pass", parallelism: 1, model: "claude-sonnet-4.5" };
+    const base = {
+      remote: "upstream",
+      branch: "release/v2",
+      ref: "upstream/release/v2",
+      commit: "0123456789abcdef0123456789abcdef01234567",
+    };
+    const envOut = join(tmpRepo, "base-env-out.txt");
+    const envOutBash = toBashPath(envOut);
+    const mockScript = join(tmpRepo, "launch-base-mock.sh");
+    writeFileSync(
+      mockScript,
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$RALPH_BASE_REMOTE|$RALPH_BASE_BRANCH|$RALPH_BASE_COMMIT" > '${envOutBash}'\n`,
+      "utf-8",
+    );
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: tmpRepo,
+      runOptions,
+      shellScript: mockScript,
+      base,
+    });
+
+    assert.ok(result.success, result.error);
+    const { readFileSync } = await import("node:fs");
+    assert.equal(await waitForFile(envOut), true, "launcher should receive approved base env");
+    assert.equal(
+      readFileSync(envOut, "utf-8").trim(),
+      `${base.remote}|${base.branch}|${base.commit}`,
+    );
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }

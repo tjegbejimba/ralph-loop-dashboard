@@ -86,6 +86,7 @@ async function waitForStartup({
  * @param {string} options.runDir - Run directory path
  * @param {string} options.repoRoot - Repository root path
  * @param {Object} options.runOptions - Run configuration (runMode, parallelism, model)
+ * @param {Object} [options.base] - Preflight-approved remote, branch, and commit
  * @param {string} [options.shellScript] - Override shell script path (for testing)
  * @param {Function} [options.confirmStarted] - Optional startup verifier
  * @param {number} [options.startupTimeoutMs] - Startup confirmation timeout
@@ -104,6 +105,7 @@ export async function launchRun({
   runDir,
   repoRoot,
   runOptions,
+  base,
   shellScript,
   confirmStarted,
   startupTimeoutMs,
@@ -174,6 +176,11 @@ export async function launchRun({
       RALPH_PARALLELISM: String(runOptions.parallelism),
       RALPH_RUN_MODE: runOptions.runMode,
     };
+    if (base) {
+      env.RALPH_BASE_REMOTE = base.remote;
+      env.RALPH_BASE_BRANCH = base.branch;
+      env.RALPH_BASE_COMMIT = base.commit;
+    }
     const launchArgs = runOptions.runMode === "one-pass" ? ["--once"] : [];
 
     let child;

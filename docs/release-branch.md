@@ -18,6 +18,12 @@ The default Ralph verifier therefore halts on every iteration of a release
 branch loop, even when the agent merged the PR cleanly. To unblock these
 flows, set `RALPH_RELEASE_BRANCH` and (optionally) `RALPH_BRANCH_PREFIX`.
 
+Launcher base resolution uses `RALPH_BASE_BRANCH` when it is non-empty, then
+falls back to `RALPH_RELEASE_BRANCH`, then `main`. `RALPH_BASE_REMOTE` defaults
+to `origin`. Preflighted launchers should also pass the exact approved commit as
+`RALPH_BASE_COMMIT`; worker setup and the first worker sync stay pinned to that
+commit even if the remote branch advances between preflight and launch.
+
 ## Env vars
 
 ### `RALPH_RELEASE_BRANCH`

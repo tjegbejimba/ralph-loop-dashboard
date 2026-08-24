@@ -113,10 +113,10 @@ test("runPreflight accepts a clean coordinator at the fetched remote base", asyn
           return { exitCode: 0, stdout: "", stderr: "" };
         }
         if (args[0] === "rev-parse" && args[1] === "HEAD") {
-          return { exitCode: 0, stdout: "0123456789abcdef", stderr: "" };
+          return { exitCode: 0, stdout: BASE_COMMIT, stderr: "" };
         }
         if (args[0] === "rev-parse" && args[1] === "refs/remotes/origin/main") {
-          return { exitCode: 0, stdout: "0123456789abcdef", stderr: "" };
+          return { exitCode: 0, stdout: BASE_COMMIT, stderr: "" };
         }
         throw new Error(`Unexpected git args: ${args.join(" ")}`);
       },
@@ -130,7 +130,13 @@ test("runPreflight accepts a clean coordinator at the fetched remote base", asyn
     const baseCheck = result.checks.find(c => c.id === "coordinator-base-revision");
     assert.equal(baseCheck.status, "pass");
     assert.match(baseCheck.message, /origin\/main/);
-    assert.match(baseCheck.message, /0123456789abcdef/);
+    assert.match(baseCheck.message, new RegExp(BASE_COMMIT));
+    assert.deepEqual(result.base, {
+      remote: "origin",
+      branch: "main",
+      ref: "origin/main",
+      commit: BASE_COMMIT,
+    });
   } finally {
     rmSync(tmpDir, { recursive: true, force: true });
   }

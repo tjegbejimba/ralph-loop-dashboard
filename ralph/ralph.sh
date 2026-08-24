@@ -28,6 +28,9 @@
 #   RALPH_RUN_ID         run identifier for queue-based mode (optional)
 #                        When set, worker consumes .ralph/runs/<RUN_ID>/queue.json
 #                        instead of searching GitHub with TITLE_REGEX
+#   RALPH_BASE_REMOTE    remote that owns the worker base (default: origin)
+#   RALPH_BASE_BRANCH    worker base branch (default: RALPH_RELEASE_BRANCH, then main)
+#   RALPH_BASE_COMMIT    immutable preflight-approved startup commit (optional)
 
 set -euo pipefail
 
@@ -99,6 +102,28 @@ RUN_ID="${RALPH_RUN_ID:-}"
 # PR open or pushed a branch without opening a PR. See docs/release-branch.md.
 RELEASE_BRANCH="${RALPH_RELEASE_BRANCH:-}"
 BRANCH_PREFIX="${RALPH_BRANCH_PREFIX:-$(config_get '.issue.branchPrefix')}"
+BASE_REMOTE="${RALPH_BASE_REMOTE:-origin}"
+BASE_BRANCH="${RALPH_BASE_BRANCH:-${RELEASE_BRANCH:-main}}"
+BASE_COMMIT="${RALPH_BASE_COMMIT:-}"
+BASE_COMMIT_PENDING="$BASE_COMMIT"
+BASE_REF="refs/remotes/${BASE_REMOTE}/${BASE_BRANCH}"
+
+if ! [[ "$BASE_REMOTE" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+  echo "❌ RALPH_BASE_REMOTE is not a valid remote name: $BASE_REMOTE" >&2
+  exit 1
+fi
+if ! git check-ref-format --branch "$BASE_BRANCH" >/dev/null 2>&1; then
+  echo "❌ RALPH_BASE_BRANCH is not a valid branch name: $BASE_BRANCH" >&2
+  exit 1
+fi
+if ! git config --get "remote.${BASE_REMOTE}.url" >/dev/null 2>&1; then
+  echo "❌ RALPH_BASE_REMOTE is not configured in this repository: $BASE_REMOTE" >&2
+  exit 1
+fi
+if [[ -n "$BASE_COMMIT" && ! "$BASE_COMMIT" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]]; then
+  echo "❌ RALPH_BASE_COMMIT must be a full commit hash" >&2
+  exit 1
+fi
 
 # Source state.sh early so the boolean-normalisation helper is available
 # before we resolve the verbose / acceptManuallyClosed / resume flags below.
@@ -298,19 +323,20 @@ verify_primary_checkout_unchanged() {
   return 0
 }
 
-# Sync the current branch to origin/main. Works both when run on `main` itself
-# (legacy single-checkout mode) and in a dedicated worktree on a non-main branch
-# (preferred — see .ralph/launch.sh, prevents collisions with local edits).
+# On startup, preserve the immutable preflight-approved base commit supplied by
+# launch.sh. Later iteration syncs advance from the configured remote branch so
+# workers can consume changes merged by earlier iterations.
 #
 # Wraps git fetch in a retry loop because N concurrent workers share a single
-# .git/ and can race on refs/remotes/origin/main.lock. With set -euo pipefail,
+# .git/ and can race on the remote-tracking ref lock. With set -euo pipefail,
 # a single ref-lock collision would kill the worker; nohup launches don't
 # respawn, silently degrading parallelism.
 sync_to_origin_main() {
-  local branch attempt rc
+  local branch attempt rc approved_commit fetched_commit
   branch=$(git rev-parse --abbrev-ref HEAD)
+
   for attempt in 1 2 3 4 5; do
-    if git fetch origin main >/dev/null 2>&1; then
+    if git fetch "$BASE_REMOTE" "$BASE_BRANCH" >/dev/null 2>&1; then
       rc=0
       break
     fi
@@ -319,15 +345,37 @@ sync_to_origin_main() {
     sleep "$(awk -v a="$attempt" 'BEGIN{srand(); printf "%.2f", a*(0.5+rand())}')"
   done
   if [[ "${rc:-1}" -ne 0 ]]; then
-    echo "⚠️  git fetch origin main failed after 5 attempts (rc=$rc). Halting." >&2
+    echo "⚠️  git fetch $BASE_REMOTE $BASE_BRANCH failed after 5 attempts (rc=$rc). Halting." >&2
     return "$rc"
   fi
-  if [[ "$branch" == "main" ]]; then
-    git checkout main >/dev/null
-    git pull --ff-only origin main >/dev/null
+
+  fetched_commit=$(git rev-parse --verify "${BASE_REF}^{commit}" 2>/dev/null || true)
+  if [[ -z "$fetched_commit" ]]; then
+    echo "⚠️  Cannot resolve fetched base $BASE_REMOTE/$BASE_BRANCH. Halting." >&2
+    return 1
+  fi
+
+  if [[ -n "$BASE_COMMIT_PENDING" ]]; then
+    approved_commit=$(git rev-parse --verify "${BASE_COMMIT_PENDING}^{commit}" 2>/dev/null || true)
+    if [[ -z "$approved_commit" ]]; then
+      echo "⚠️  Approved base commit $BASE_COMMIT_PENDING is unavailable. Halting." >&2
+      return 1
+    fi
+    if ! git merge-base --is-ancestor "$approved_commit" "$fetched_commit"; then
+      echo "⚠️  Approved base commit $approved_commit does not belong to $BASE_REMOTE/$BASE_BRANCH at $fetched_commit. Halting." >&2
+      return 1
+    fi
+    git reset --hard "$approved_commit" >/dev/null
+    BASE_COMMIT_PENDING=""
+    return 0
+  fi
+
+  if [[ "$branch" == "$BASE_BRANCH" ]]; then
+    git checkout "$BASE_BRANCH" >/dev/null
+    git merge --ff-only "$fetched_commit" >/dev/null
   else
-    # Dedicated loop worktree — force-sync the branch to origin/main.
-    git reset --hard origin/main >/dev/null
+    # Dedicated loop worktree — force-sync its home branch to the configured base.
+    git reset --hard "$fetched_commit" >/dev/null
   fi
 }
 

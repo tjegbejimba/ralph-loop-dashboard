@@ -58,6 +58,32 @@ test("startRalphLoop runs preflight, creates a run, and launches it", async () =
   });
 });
 
+test("startRalphLoop passes the preflight-approved base to the shell launcher", async () => {
+  const base = {
+    remote: "upstream",
+    branch: "release/v2",
+    ref: "upstream/release/v2",
+    commit: "0123456789abcdef0123456789abcdef01234567",
+  };
+  let launchedBase;
+
+  const result = await startRalphLoop({
+    repoRoot: "/repo",
+    queue,
+    runOptions,
+    getLoopProcess: async () => [],
+    runPreflight: async () => ({ ...passingPreflight(), base }),
+    createRun: () => ({ runId: "run-1", runDir: "/repo/.ralph/runs/run-1" }),
+    launchLoop: async (args) => {
+      launchedBase = args.base;
+      return { success: true, pid: 1234 };
+    },
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(launchedBase, base);
+});
+
 test("startRalphLoop blocks on failed preflight before creating or launching", async () => {
   let created = false;
   let launched = false;
