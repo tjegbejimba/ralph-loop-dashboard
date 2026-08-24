@@ -168,6 +168,13 @@ For an end-to-end autonomous run, `to-prd` hands the PRD issue number to the `ra
 
 Unlike `to-ralph`, the orchestrator *can* launch — but every launch is gated by `allowAgentLaunch: true` in `~/.ralph-dashboard/config.json` (default `false`) plus a passing preflight, both enforced inside `orchestrateRun()`. On any hard stop (gate not met, unresolved preflight, product decision, repeated worker stall, destructive action, missing access) it pauses and sends an owner-decision brief instead of improvising. It never claims, implements, reviews, or merges work itself. A dry-run/plan request performs zero mutations and emits the planned mode detection, triage summary, slice plan, enqueue plan, gated launch decision, and ledger JSON.
 
+The dashboard/agent launch preflight fetches the configured remote base (`origin/main`
+by default, or `origin/$RALPH_RELEASE_BRANCH` for an explicit release flow), requires
+a clean coordinator worktree, and requires coordinator `HEAD` to equal that fetched
+revision exactly. The local branch name is irrelevant, so a detached or temporary
+worktree is safe when it is pinned to the reported base commit; stale or local-only
+commits fail closed.
+
 `repo-maintain` also ships as a **headless CLI**, `node extension/cli.mjs orchestrate-repo`, so a local scheduler (launchd/cron) can run the sweep from a repo's main checkout. This is required because `.ralph/` is gitignored and local-only, so it never exists in the throwaway worktree a Copilot scheduled workflow runs in. The CLI discovers ready work read-only and launches only through the same gated `orchestrateRun()` path. See [docs/repo-maintain-local-runner.md](docs/repo-maintain-local-runner.md) (run `--dry-run` first).
 
 ### Issue triage boundary

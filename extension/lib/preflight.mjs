@@ -76,8 +76,8 @@ async function defaultGhIssueCheck(repo, number) {
 /**
  * Default git worktree checker
  */
-async function defaultGitStatusCheck(repoRoot) {
-  return execCommand("git", ["-C", repoRoot, "status", "--porcelain"]);
+async function defaultGitCommand(repoRoot, args) {
+  return execCommand("git", ["-C", repoRoot, ...args]);
 }
 
 /**
@@ -87,6 +87,9 @@ async function defaultGitStatusCheck(repoRoot) {
  * @param {string} options.repoRoot - Repository root path
  * @param {Array<Object>} options.queue - Selected issue queue
  * @param {Object} options.runOptions - Run configuration (runMode, parallelism, model)
+ * @param {string} [options.baseBranch] - Remote branch the coordinator must exactly match
+ * @param {string} [options.baseRemote] - Git remote that owns the configured base branch
+ * @param {Function} [options.execGit] - Git command runner (for testing)
  * @param {Function} [options.execGitStatus] - Git worktree checker (for testing)
  * @param {Function} [options.execGhAuth] - GitHub auth checker (for testing)
  * @param {Function} [options.execGhRepo] - GitHub repo checker (for testing)
@@ -99,12 +102,56 @@ export async function runPreflight({
   repoRoot,
   queue,
   runOptions,
-  execGitStatus = defaultGitStatusCheck,
+  baseBranch = process.env.RALPH_RELEASE_BRANCH || "main",
+  baseRemote = "origin",
+  execGit = defaultGitCommand,
+  execGitStatus,
   execGhAuth = defaultGhAuthCheck,
   execGhRepo = defaultGhRepoCheck,
   execGhIssue = defaultGhIssueCheck,
 }) {
   const checks = [];
+
+  const remoteBaseRef = `${baseRemote}/${baseBranch}`;
+  const remoteTrackingRef = `refs/remotes/${baseRemote}/${baseBranch}`;
+  try {
+    const fetchResult = await execGit(repoRoot, ["fetch", "--quiet", baseRemote, baseBranch]);
+    if (fetchResult.exitCode !== 0) {
+      checks.push({
+        id: "coordinator-base-revision",
+        label: "Coordinator matches fetched base",
+        status: "fail",
+        message: `Cannot fetch configured base ${remoteBaseRef}: ${fetchResult.stderr || "git fetch failed"}`,
+        blocking: true,
+      });
+    } else {
+      const headResult = await execGit(repoRoot, ["rev-parse", "HEAD"]);
+      const baseResult = await execGit(repoRoot, ["rev-parse", remoteTrackingRef]);
+      const headCommit = headResult.stdout.trim();
+      const baseCommit = baseResult.stdout.trim();
+      const resolved = headResult.exitCode === 0 && baseResult.exitCode === 0 && headCommit && baseCommit;
+      const matches = resolved && headCommit === baseCommit;
+      checks.push({
+        id: "coordinator-base-revision",
+        label: "Coordinator matches fetched base",
+        status: matches ? "pass" : "fail",
+        message: matches
+          ? `Coordinator HEAD matches ${remoteBaseRef} at ${baseCommit}`
+          : resolved
+            ? `Coordinator HEAD ${headCommit} does not match ${remoteBaseRef} at ${baseCommit}`
+            : `Cannot resolve coordinator HEAD and fetched base ${remoteBaseRef}: ${headResult.stderr || baseResult.stderr || "git rev-parse failed"}`,
+        blocking: true,
+      });
+    }
+  } catch (err) {
+    checks.push({
+      id: "coordinator-base-revision",
+      label: "Coordinator matches fetched base",
+      status: "fail",
+      message: `Cannot verify configured base ${remoteBaseRef}: ${err.message}`,
+      blocking: true,
+    });
+  }
   
   // Check 1: Queue not empty
   const queueEmpty = !Array.isArray(queue) || queue.length === 0;
@@ -146,7 +193,9 @@ export async function runPreflight({
 
   // Check 4: Main worktree is clean
   try {
-    const gitResult = await execGitStatus(repoRoot);
+    const gitResult = execGitStatus
+      ? await execGitStatus(repoRoot)
+      : await execGit(repoRoot, ["status", "--porcelain"]);
     const dirtyFiles = gitResult.stdout
       ? gitResult.stdout.split(/\r?\n/).filter(Boolean).length
       : 0;
