@@ -229,7 +229,7 @@ Each issue body should describe the slice's intent + acceptance criteria. The lo
 .ralph/launch.sh --watch [SEC]       # live local-only refresh (default 2s, Ctrl-C to exit)
 .ralph/launch.sh --follow [N]        # tail worker N's iteration log (worker 1 by default)
 .ralph/launch.sh --stop              # SIGTERM all workers
-.ralph/launch.sh --cleanup           # stop workers + remove clean worker worktrees
+.ralph/launch.sh --cleanup           # stop workers + safely retire terminal run assets
 .ralph/launch.sh --enqueue <N>...    # write issue numbers to config.json + preflight
 .ralph/launch.sh --enqueue-prd <N>   # resolve PRD slices + enqueue + preflight
 .ralph/launch.sh --help | -h         # print flag list and exit
@@ -345,7 +345,12 @@ recorded session ID so completed sessions can be cleaned without matching by
 prompt text. Use `--cleanup` after a run to remove worker worktrees that Ralph
 created and archive recorded completed Copilot session state. Dirty worktrees,
 running sessions, failed sessions, and unrecorded/user sessions are left in
-place for inspection instead of being deleted.
+place for inspection instead of being deleted. Cleanup also retires a stale
+local PRD integration branch only when its ownership record and complete queue
+prove the prior run terminal, no live worker or claim, worktree, pull request,
+or remote branch exists, and the branch still equals its frozen base. A fresh
+run applies the same gates before reinitializing that branch from current main;
+any unprovable condition stops recovery without adopting or deleting the branch.
 
 ### Per-worktree loops
 
