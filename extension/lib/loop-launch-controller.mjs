@@ -119,7 +119,16 @@ function hasRunStatusActivity({ queue, runDir }) {
   const statusResult = readStatusJson(join(runDir, "status.json"));
   if (!statusResult.ok) return false;
   const statusItems = statusResult.status?.items || {};
-  return queue.some((issue) => Object.hasOwn(statusItems, String(issue.number)));
+  return queue.some((issue) => {
+    const item = statusItems[String(issue.number)];
+    return (
+      item &&
+      Number.isInteger(Number(item.workerId)) &&
+      Number(item.workerId) > 0 &&
+      Number.isInteger(Number(item.pid)) &&
+      Number(item.pid) > 0
+    );
+  });
 }
 
 export function summarizeRunVerification({ queue, runDir, status, timedOut = false, statusError = null }) {

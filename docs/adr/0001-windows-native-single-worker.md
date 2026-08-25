@@ -15,6 +15,30 @@ The login-shell path runs profile startup commands before `launch.sh`; with
 detached ignored stdio on native Windows, that path can remain alive without
 ever reaching worker registration.
 
+Worker registration remains the only startup-success signal. Setup can
+legitimately take longer than the controller's 30-second startup window, so
+`launch.sh` atomically records phase changes in the run's `startup.json`.
+Each new phase renews the 30-second inactivity deadline, while a five-minute
+hard limit prevents an unhealthy launcher from extending startup forever. A
+status entry counts as registration only when it carries positive `workerId`
+and `pid` fields. The controller verifies the installed launch-protocol marker
+before spawning, so an extension/script version skew fails with a refresh
+instruction rather than silently losing progress and diagnostics.
+
+Launcher output is written to the run's `launcher.log`; controller errors
+include only its final 16 KiB. Redirection happens inside `launch.sh` because
+passing inherited file handles to detached Git Bash can prevent the script from
+starting at all.
+
+Windows does not deliver Node's `SIGTERM` to Git Bash as a trappable POSIX
+signal. A timeout can therefore bypass Bash's `EXIT` trap and strand both setup
+locks. The controller terminates the full Windows process tree, waits for exit,
+and then removes only setup locks stamped with that launch's random token.
+Missing or mismatched tokens are retained and reported fail-closed.
+The Windows launcher pidfile is also created exclusively and removed only when
+it still contains the exiting launcher's PID; a concurrent launcher cannot
+overwrite or delete another launcher's process identity.
+
 Linked worktrees add a second Windows path constraint. Git for Windows returns
 both `git rev-parse --git-common-dir` and `git rev-parse --git-path
 info/exclude` as drive-letter absolute paths (`C:/...`). The installer and
@@ -44,4 +68,6 @@ The error message names the cause and the workaround
 > Windows native mode runs one worker at a time (Cygwin fork limitation).
 > Reduce parallelism to 1 in Run options, or use WSL2 for parallel workers.
 
-This decision is gated to Windows only; POSIX paths are untouched.
+The single-worker decision is gated to Windows only. Progress-aware startup and
+per-run launcher diagnostics apply on every platform; process-tree termination
+is Windows-specific.

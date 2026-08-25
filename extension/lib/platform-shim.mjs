@@ -35,19 +35,22 @@ export function readPidFile(path) {
   }
 }
 
-export function writePidFile(path, pid) {
+export function writePidFile(path, pid, { exclusive = false } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) {
     throw new TypeError(`writePidFile: invalid pid ${pid}`);
   }
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, String(pid), "utf-8");
+  writeFileSync(path, String(pid), { encoding: "utf-8", flag: exclusive ? "wx" : "w" });
 }
 
-export function removePidFile(path) {
+export function removePidFile(path, expectedPid = null) {
+  if (expectedPid !== null && readPidFile(path) !== expectedPid) return false;
   try {
     unlinkSync(path);
+    return true;
   } catch {
     // already gone — fine
+    return false;
   }
 }
 

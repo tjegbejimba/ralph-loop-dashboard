@@ -1,9 +1,24 @@
 // Shell launcher module — starts shell engine detached from dashboard process
 
-import { spawn } from "node:child_process";
-import { join } from "node:path";
-import { chmodSync, accessSync, constants } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
+  accessSync,
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+} from "node:fs";
+import { isAbsolute, join, resolve } from "node:path";
+import {
+  isAlive,
+  readPidFile,
   removePidFile,
   resolveBashExe,
   toBashPath,
@@ -15,6 +30,9 @@ const IS_WINDOWS = process.platform === "win32";
 const DEFAULT_SPAWN_CHECK_MS = 100;
 const DEFAULT_CONFIRM_START_MS = 30000;
 const DEFAULT_STARTUP_POLL_MS = 50;
+const DEFAULT_STARTUP_MAX_MS = 300000;
+const DIAGNOSTIC_TAIL_BYTES = 16 * 1024;
+const LAUNCH_PROTOCOL_MARKER = "# RALPH_LAUNCH_PROTOCOL: 1";
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -25,20 +43,159 @@ function formatExit({ code, signal }) {
   return `exited from signal ${signal || "unknown"}`;
 }
 
+function readStartupProgress(runDir) {
+  const startupPath = join(runDir, "startup.json");
+  try {
+    return readFileSync(startupPath, "utf-8").trim() || null;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function resolveSetupLockPaths(repoRoot) {
+  const lockPaths = [join(repoRoot, ".ralph", "launch.lock")];
+  try {
+    const rawCommonDir = execFileSync(
+      "git",
+      ["-C", repoRoot, "rev-parse", "--git-common-dir"],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+    ).trim();
+    if (rawCommonDir) {
+      const commonDir = isAbsolute(rawCommonDir)
+        ? rawCommonDir
+        : resolve(repoRoot, rawCommonDir);
+      lockPaths.push(join(commonDir, "ralph-launch.lock"));
+    }
+  } catch {
+    // Non-git launcher fixtures have only the per-repo setup lock.
+  }
+  return [...new Set(lockPaths)];
+}
+
+function cleanupTokenOwnedSetupLocks(lockPaths, launchToken) {
+  const retained = [];
+  const errors = [];
+
+  for (const lockPath of lockPaths) {
+    if (!existsSync(lockPath)) continue;
+
+    let observedToken;
+    try {
+      observedToken = readFileSync(join(lockPath, "token"), "utf-8").trim();
+    } catch (error) {
+      retained.push(`${lockPath} (missing or unreadable launch token: ${error.code ?? error.message})`);
+      continue;
+    }
+    if (observedToken !== launchToken) {
+      retained.push(`${lockPath} (owned by a different launch)`);
+      continue;
+    }
+
+    try {
+      rmSync(lockPath, { recursive: true, force: false });
+    } catch (error) {
+      errors.push(`${lockPath}: ${error.message}`);
+    }
+  }
+
+  return { retained, errors };
+}
+
+function terminateWindowsProcessTree(pid) {
+  if (!isAlive(pid)) return;
+  try {
+    execFileSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  } catch (error) {
+    if (isAlive(pid)) {
+      throw new Error(`Failed to terminate Windows launcher process tree ${pid}: ${error.message}`);
+    }
+  }
+}
+
+function terminateLauncher(pid, { isWindows, killProcess }) {
+  if (typeof killProcess === "function") {
+    killProcess(pid, "SIGTERM");
+    return;
+  }
+  if (isWindows) {
+    terminateWindowsProcessTree(pid);
+    return;
+  }
+  process.kill(pid, "SIGTERM");
+}
+
+async function waitForExit(getExit, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const exit = getExit();
+    if (exit) return exit;
+    await sleep(Math.min(25, Math.max(0, deadline - Date.now())));
+  }
+  return getExit();
+}
+
+function readDiagnosticTail(logPath, maxBytes = DIAGNOSTIC_TAIL_BYTES) {
+  let fd;
+  try {
+    fd = openSync(logPath, "r");
+    const size = fstatSync(fd).size;
+    if (size === 0) return "";
+    const bytesToRead = Math.min(size, maxBytes);
+    const buffer = Buffer.alloc(bytesToRead);
+    readSync(fd, buffer, 0, bytesToRead, size - bytesToRead);
+    return buffer.toString("utf-8").trim();
+  } catch (error) {
+    if (error.code === "ENOENT") return "";
+    return `[launcher log unreadable: ${error.message}]`;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function withFailureDetails(message, launcherLog, cleanup = null) {
+  const details = [message];
+  const diagnostics = readDiagnosticTail(launcherLog);
+  details.push(
+    diagnostics
+      ? `Launcher diagnostics (${launcherLog}):\n${diagnostics}`
+      : `Launcher diagnostics: ${launcherLog} (empty)`,
+  );
+  if (cleanup?.retained?.length) {
+    details.push(`Setup locks retained fail-closed:\n${cleanup.retained.join("\n")}`);
+  }
+  if (cleanup?.errors?.length) {
+    details.push(`Setup lock cleanup errors:\n${cleanup.errors.join("\n")}`);
+  }
+  return details.join("\n");
+}
+
 async function waitForStartup({
   child,
   getExit,
   scriptPath,
   confirmStarted,
+  getStartupProgress,
   startupTimeoutMs,
+  startupMaxTimeoutMs,
   startupPollMs,
 }) {
   const timeoutMs = startupTimeoutMs ?? (confirmStarted ? DEFAULT_CONFIRM_START_MS : DEFAULT_SPAWN_CHECK_MS);
+  const maxTimeoutMs = Math.max(
+    startupMaxTimeoutMs ?? DEFAULT_STARTUP_MAX_MS,
+    timeoutMs,
+  );
   const pollMs = startupPollMs ?? DEFAULT_STARTUP_POLL_MS;
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  let inactivityDeadline = startedAt + timeoutMs;
+  const absoluteDeadline = startedAt + maxTimeoutMs;
+  let lastProgress = null;
 
   if (typeof confirmStarted === "function") {
-    while (Date.now() < deadline) {
+    while (Date.now() < inactivityDeadline && Date.now() < absoluteDeadline) {
       const exit = getExit();
       if (exit && exit.code !== 0) {
         return { success: false, error: `${scriptPath} ${formatExit(exit)} during startup` };
@@ -55,7 +212,23 @@ async function waitForStartup({
       if (confirmed) {
         return { success: true, pid: child.pid };
       }
-      await sleep(pollMs);
+      if (typeof getStartupProgress === "function") {
+        let progress;
+        try {
+          progress = await getStartupProgress();
+        } catch (err) {
+          return {
+            success: false,
+            error: `Startup progress read failed for ${scriptPath}: ${String(err.message || err)}`,
+          };
+        }
+        if (progress !== null && progress !== undefined && progress !== lastProgress) {
+          lastProgress = progress;
+          inactivityDeadline = Math.min(Date.now() + timeoutMs, absoluteDeadline);
+        }
+      }
+      const deadline = Math.min(inactivityDeadline, absoluteDeadline);
+      await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
     }
     const exit = getExit();
     if (exit && exit.code !== 0) {
@@ -63,11 +236,14 @@ async function waitForStartup({
     }
     return {
       success: false,
-      error: `Timed out waiting for Ralph workers to start after launching ${scriptPath}`,
+      error: Date.now() >= absoluteDeadline
+        ? `Reached hard startup limit waiting for Ralph workers after launching ${scriptPath}`
+        : `Timed out waiting for startup progress after launching ${scriptPath}`,
+      timedOut: true,
     };
   }
 
-  while (Date.now() < deadline) {
+  while (Date.now() < inactivityDeadline) {
     const exit = getExit();
     if (exit) {
       if (exit.code === 0) return { success: true, pid: child.pid };
@@ -89,7 +265,9 @@ async function waitForStartup({
  * @param {Object} [options.base] - Preflight-approved remote, branch, and commit
  * @param {string} [options.shellScript] - Override shell script path (for testing)
  * @param {Function} [options.confirmStarted] - Optional startup verifier
+ * @param {Function} [options.getStartupProgress] - Optional setup progress probe
  * @param {number} [options.startupTimeoutMs] - Startup confirmation timeout
+ * @param {number} [options.startupMaxTimeoutMs] - Hard cap across progress renewals
  * @param {number} [options.startupPollMs] - Startup confirmation poll interval
  * @param {boolean} [options.isWindows] - Platform override for tests
  * @param {Function} [options.resolveBash] - Bash resolver override for tests
@@ -108,12 +286,14 @@ export async function launchRun({
   base,
   shellScript,
   confirmStarted,
+  getStartupProgress,
   startupTimeoutMs,
+  startupMaxTimeoutMs,
   startupPollMs,
   isWindows = IS_WINDOWS,
   resolveBash = resolveBashExe,
   toBash = toBashPath,
-  killProcess = process.kill,
+  killProcess = null,
 }) {
   // Validate required parameters
   if (!runId || typeof runId !== "string") {
@@ -151,6 +331,27 @@ export async function launchRun({
       error: `Shell script not found: ${scriptPath}`,
     };
   }
+  if (!shellScript && typeof confirmStarted === "function") {
+    const installedScript = readFileSync(scriptPath, "utf-8");
+    if (!installedScript.includes(LAUNCH_PROTOCOL_MARKER)) {
+      return {
+        success: false,
+        error:
+          `Installed launcher does not support the controller startup protocol: ${scriptPath}. ` +
+          `Refresh this repository's Ralph scripts from canonical main before launching.`,
+      };
+    }
+  }
+  if (isWindows) {
+    const existingPid = readPidFile(launcherPidFile);
+    if (existingPid && isAlive(existingPid)) {
+      return {
+        success: false,
+        error: `Ralph launcher is already running with PID ${existingPid}.`,
+      };
+    }
+    if (existingPid) removePidFile(launcherPidFile, existingPid);
+  }
   
   // Make script executable if needed. Skip on Windows: NTFS doesn't carry
   // POSIX exec bits, and chmodSync on Windows is a no-op that can still
@@ -165,7 +366,19 @@ export async function launchRun({
       }
     }
   }
-  
+
+  mkdirSync(runDir, { recursive: true });
+  const launcherLog = join(runDir, "launcher.log");
+  try {
+    closeSync(openSync(launcherLog, "a"));
+  } catch (error) {
+    return {
+      success: false,
+      error: `Cannot open launcher diagnostics at ${launcherLog}: ${error.message}`,
+    };
+  }
+  const launchToken = randomUUID();
+
   const childResult = await new Promise((resolve) => {
     const env = {
       ...process.env,
@@ -175,6 +388,8 @@ export async function launchRun({
       RALPH_MODEL: runOptions.model,
       RALPH_PARALLELISM: String(runOptions.parallelism),
       RALPH_RUN_MODE: runOptions.runMode,
+      RALPH_LAUNCH_TOKEN: launchToken,
+      RALPH_LAUNCH_LOG: isWindows ? toBash(launcherLog) : launcherLog,
     };
     if (base) {
       env.RALPH_BASE_REMOTE = base.remote;
@@ -236,30 +451,29 @@ export async function launchRun({
     child.on("error", (err) => {
       resolve({
         success: false,
-        error: `Failed to spawn ${scriptPath}: ${err.message}`,
+        error: withFailureDetails(`Failed to spawn ${scriptPath}: ${err.message}`, launcherLog),
       });
     });
     
     // On successful spawn, unref and confirm startup
     child.on("spawn", () => {
+      let pidfileOwned = false;
       if (isWindows) {
         try {
-          writePidFile(launcherPidFile, child.pid);
+          writePidFile(launcherPidFile, child.pid, { exclusive: true });
+          pidfileOwned = true;
         } catch (err) {
-          try {
-            killProcess(child.pid, "SIGTERM");
-          } catch {
-            // best effort; the caller receives the pidfile error below
-          }
           resolve({
-            success: false,
-            error: `Failed to write launcher pidfile: ${String(err.message || err)}`,
+            child,
+            getExit: () => exit,
+            pidfileOwned,
+            startupError: `Failed to claim launcher pidfile: ${String(err.message || err)}`,
           });
           return;
         }
       }
       child.unref();
-      resolve({ child, getExit: () => exit });
+      resolve({ child, getExit: () => exit, pidfileOwned });
     });
   });
 
@@ -267,27 +481,45 @@ export async function launchRun({
     return childResult;
   }
 
-  const result = await waitForStartup({
-    child: childResult.child,
-    getExit: childResult.getExit,
-    scriptPath,
-    confirmStarted,
-    startupTimeoutMs,
-    startupPollMs,
-  });
+  const result = childResult.startupError
+    ? { success: false, error: childResult.startupError }
+    : await waitForStartup({
+      child: childResult.child,
+      getExit: childResult.getExit,
+      scriptPath,
+      confirmStarted,
+      getStartupProgress: getStartupProgress ?? (() => readStartupProgress(runDir)),
+      startupTimeoutMs,
+      startupMaxTimeoutMs,
+      startupPollMs,
+    });
   if (!result.success) {
+    let terminationError = null;
+    let cleanup = null;
     try {
-      killProcess(childResult.child.pid, "SIGTERM");
-    } catch {
-      // already exited
+      terminateLauncher(childResult.child.pid, { isWindows, killProcess });
+    } catch (error) {
+      if (isAlive(childResult.child.pid)) terminationError = error;
     }
-    if (isWindows) {
-      removePidFile(launcherPidFile);
+    const terminated = await waitForExit(childResult.getExit);
+    if (terminated) {
+      cleanup = cleanupTokenOwnedSetupLocks(resolveSetupLockPaths(repoRoot), launchToken);
+    } else {
+      terminationError ??= new Error(
+        `Launcher process ${childResult.child.pid} did not exit; setup locks were retained fail-closed.`,
+      );
     }
+    if (isWindows && childResult.pidfileOwned && terminated) {
+      removePidFile(launcherPidFile, childResult.child.pid);
+    }
+    let error = result.error;
+    if (terminationError) error += `\n${terminationError.message}`;
     return {
       ...result,
       pid: childResult.child.pid,
+      launcherLog,
+      error: withFailureDetails(error, launcherLog, cleanup),
     };
   }
-  return result;
+  return { ...result, launcherLog };
 }

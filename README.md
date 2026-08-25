@@ -77,6 +77,9 @@ Limitations (these are why WSL2 is still recommended for heavy use):
   Start, removed on Stop). Externally launched loops that write the same
   pidfile (e.g., Glasswork's `scripts/launch-ralph.ps1`) appear in the
   dashboard automatically.
+- Startup phases and launcher diagnostics are stored in each run directory as
+  `startup.json` and `launcher.log`. The controller treats phase changes as
+  progress but does not report success until a worker registers.
 
 ### WSL2 with Ubuntu (recommended)
 

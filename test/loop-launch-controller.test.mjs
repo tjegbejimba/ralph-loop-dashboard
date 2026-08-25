@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { startRalphLoop } from "../extension/lib/loop-launch-controller.mjs";
@@ -265,6 +265,41 @@ test("startRalphLoop does not treat the Windows launcher pidfile as startup conf
 
     assert.equal(result.ok, false);
     assert.match(result.error, /not started/);
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("startRalphLoop requires worker identity in Windows run status", async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-controller-registration-"));
+  try {
+    const runDir = join(tmpRepo, ".ralph", "runs", "run-1");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      join(runDir, "status.json"),
+      JSON.stringify({
+        items: {
+          "42": { status: "rejected", workerId: null, pid: null },
+        },
+      }),
+    );
+
+    const result = await startRalphLoop({
+      repoRoot: tmpRepo,
+      queue,
+      runOptions,
+      isWindows: true,
+      getLoopProcess: async () => [],
+      runPreflight: async () => passingPreflight(),
+      createRun: () => ({ runId: "run-1", runDir }),
+      launchLoop: async ({ confirmStarted }) =>
+        await confirmStarted()
+          ? { success: true, pid: 1234 }
+          : { success: false, error: "worker not registered" },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.error, /worker not registered/);
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }

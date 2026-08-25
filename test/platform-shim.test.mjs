@@ -44,6 +44,21 @@ test("pidfile round-trip: write then read returns the same pid", () => {
   }
 });
 
+test("exclusive pidfile write does not replace an existing owner", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ralph-shim-"));
+  try {
+    const path = join(dir, "launcher.pid");
+    writePidFile(path, 12345, { exclusive: true });
+    assert.throws(
+      () => writePidFile(path, 67890, { exclusive: true }),
+      (error) => error.code === "EEXIST",
+    );
+    assert.equal(readPidFile(path), 12345);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("readPidFile returns null when the file is missing", () => {
   const dir = mkdtempSync(join(tmpdir(), "ralph-shim-"));
   try {
@@ -97,6 +112,20 @@ test("removePidFile deletes an existing file", () => {
     writePidFile(path, 1234);
     assert.equal(existsSync(path), true);
     removePidFile(path);
+    assert.equal(existsSync(path), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("removePidFile retains a pidfile owned by a different process", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ralph-shim-"));
+  try {
+    const path = join(dir, "launcher.pid");
+    writePidFile(path, 1234);
+    assert.equal(removePidFile(path, 5678), false);
+    assert.equal(readPidFile(path), 1234);
+    assert.equal(removePidFile(path, 1234), true);
     assert.equal(existsSync(path), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RALPH_LAUNCH_PROTOCOL: 1
 # Launches the Ralph loop in dedicated git worktree(s) alongside your main
 # checkout so loop work never conflicts with local edits. Setup is idempotent.
 #
@@ -29,6 +30,11 @@
 #   RALPH_BASE_COMMIT  Immutable preflight-approved base commit (optional)
 
 set -euo pipefail
+
+if [[ -n "${RALPH_LAUNCH_LOG:-}" ]]; then
+  mkdir -p "$(dirname "$RALPH_LAUNCH_LOG")"
+  exec >>"$RALPH_LAUNCH_LOG" 2>&1
+fi
 
 # Ensure homebrew tools (gh, git, etc.) are on PATH even when launched from
 # minimal-PATH contexts (nohup, launchd, dashboard, etc.)
@@ -226,10 +232,46 @@ unset _terminal_cli_lib
 # worktrees, or PRD ownership. Both normal launch and --cleanup use it.
 SETUP_LOCK=""
 COMMON_SETUP_LOCK=""
+STARTUP_SEQUENCE=0
+
+write_startup_phase() {
+  local phase="$1"
+  local run_dir="${RALPH_RUN_DIR:-}"
+  [[ -n "$run_dir" ]] || return 0
+
+  STARTUP_SEQUENCE=$((STARTUP_SEQUENCE + 1))
+  mkdir -p "$run_dir"
+  local startup_file="$run_dir/startup.json"
+  local tmp
+  tmp=$(mktemp "$run_dir/.startup.XXXXXX")
+  jq -n \
+    --arg phase "$phase" \
+    --argjson sequence "$STARTUP_SEQUENCE" \
+    --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '{sequence:$sequence,phase:$phase,updated_at:$updated_at}' >"$tmp"
+  mv "$tmp" "$startup_file"
+}
+
+stamp_launcher_setup_lock() {
+  local lockdir="$1"
+  local launch_token="${RALPH_LAUNCH_TOKEN:-}"
+  [[ -n "$launch_token" ]] || return 0
+  if ! [[ "$launch_token" =~ ^[A-Za-z0-9._-]{16,128}$ ]]; then
+    echo "❌ RALPH_LAUNCH_TOKEN has an invalid format; refusing controller-owned setup." >&2
+    return 1
+  fi
+  printf '%s\n' "$launch_token" >"$lockdir/token"
+}
+
 acquire_launcher_setup_locks() {
   SETUP_LOCK="$MAIN_REPO/.ralph/launch.lock"
   if ! acquire_lockdir "$SETUP_LOCK"; then
     echo "❌ Another launch.sh is in flight (lock at $SETUP_LOCK). Aborting." >&2
+    return 1
+  fi
+  if ! stamp_launcher_setup_lock "$SETUP_LOCK"; then
+    release_lockdir "$SETUP_LOCK"
+    SETUP_LOCK=""
     return 1
   fi
 
@@ -245,6 +287,13 @@ acquire_launcher_setup_locks() {
     release_lockdir "$SETUP_LOCK"
     SETUP_LOCK=""
     echo "❌ Another launch.sh is in flight against this repo's common gitdir (lock at $COMMON_SETUP_LOCK). Aborting." >&2
+    return 1
+  fi
+  if ! stamp_launcher_setup_lock "$COMMON_SETUP_LOCK"; then
+    release_lockdir "$COMMON_SETUP_LOCK"
+    release_lockdir "$SETUP_LOCK"
+    COMMON_SETUP_LOCK=""
+    SETUP_LOCK=""
     return 1
   fi
 }
@@ -645,6 +694,7 @@ if [[ "${1:-}" == "--cleanup" ]]; then
     exit 1
   fi
   trap 'release_launcher_setup_locks' EXIT
+  write_startup_phase "setup-locks-acquired"
 
   pids=$(scoped_ralph_processes | awk '{print $1}')
   if [[ -n "$pids" ]]; then
@@ -1015,6 +1065,7 @@ initialize_prd_run() {
 if ! initialize_prd_run; then
   exit 1
 fi
+write_startup_phase "prd-ready"
 unset _prd_branch_lib
 
 # Setup phase: create N worktrees and symlink .ralph in each.
@@ -1078,6 +1129,7 @@ fi
 export RALPH_BASE_REMOTE="$BASE_REMOTE"
 export RALPH_BASE_BRANCH="$BASE_BRANCH"
 export RALPH_BASE_COMMIT="$BASE_COMMIT"
+write_startup_phase "base-ready"
 
 for ((i = 1; i <= PARALLELISM; i++)); do
   loop_repo=$(worker_repo "$i")
@@ -1115,6 +1167,7 @@ for ((i = 1; i <= PARALLELISM; i++)); do
   fi
   git reset --hard "$BASE_COMMIT" >/dev/null
   echo "✅ Worker $i: on $(git rev-parse --abbrev-ref HEAD) at $(git rev-parse --short HEAD)"
+  write_startup_phase "worker-$i-worktree-ready"
 done
 
 # Launch phase.
@@ -1126,6 +1179,7 @@ fi
 
 if [[ "${1:-}" == "--foreground" ]]; then
   cd "$(worker_repo 1)"
+  write_startup_phase "worker-launching"
   release_lockdir "$COMMON_SETUP_LOCK"
   release_lockdir "$SETUP_LOCK"
   trap - EXIT
