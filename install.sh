@@ -366,11 +366,10 @@ install_scripts() {
   if git -C "$target" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     local exclude_rel exclude_file
     exclude_rel="$(git -C "$target" rev-parse --git-path info/exclude)"
-    if [[ "$exclude_rel" = /* ]]; then
-      exclude_file="$exclude_rel"
-    else
-      exclude_file="$target/$exclude_rel"
-    fi
+    case "$exclude_rel" in
+      /*|[A-Za-z]:/*) exclude_file="$exclude_rel" ;;
+      *) exclude_file="$target/$exclude_rel" ;;
+    esac
     mkdir -p "$(dirname "$exclude_file")"
     if ! grep -qxF ".ralph" "$exclude_file" 2>/dev/null; then
       echo ".ralph" >> "$exclude_file"

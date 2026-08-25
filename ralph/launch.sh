@@ -986,11 +986,10 @@ unset _prd_branch_lib
 # want — .ralph/ should be ignored everywhere once any worktree opts in.
 _exclude_rel="$(git -C "$MAIN_REPO" rev-parse --git-path info/exclude 2>/dev/null || echo "")"
 if [[ -n "$_exclude_rel" ]]; then
-  if [[ "$_exclude_rel" = /* ]]; then
-    EXCLUDE_FILE="$_exclude_rel"
-  else
-    EXCLUDE_FILE="$MAIN_REPO/$_exclude_rel"
-  fi
+  case "$_exclude_rel" in
+    /*|[A-Za-z]:/*) EXCLUDE_FILE="$_exclude_rel" ;;
+    *) EXCLUDE_FILE="$MAIN_REPO/$_exclude_rel" ;;
+  esac
 else
   EXCLUDE_FILE="$MAIN_REPO/.git/info/exclude"
 fi

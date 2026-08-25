@@ -48,6 +48,9 @@ test("native Windows launch registers a worker from a linked worktree", {
     git(mainRepo, "checkout", "-b", "main");
     git(mainRepo, "config", "user.email", "ralph-fixture@example.invalid");
     git(mainRepo, "config", "user.name", "Ralph Fixture");
+    const globalExcludes = join(fixtureRoot, "global-excludes");
+    writeFileSync(globalExcludes, "", "utf8");
+    git(mainRepo, "config", "core.excludesFile", globalExcludes);
     writeFileSync(join(mainRepo, "README.md"), "safe Windows worktree fixture\n", "utf8");
     git(mainRepo, "add", "README.md");
     git(mainRepo, "commit", "-m", "fixture");
@@ -65,6 +68,8 @@ test("native Windows launch registers a worker from a linked worktree", {
       [
         "#!/usr/bin/env bash",
         "set -euo pipefail",
+        "dirty=\"$(git status --porcelain --untracked-files=normal)\"",
+        "[[ -z \"$dirty\" ]] || { printf 'worker worktree is dirty:\\n%s\\n' \"$dirty\" >&2; exit 1; }",
         "printf '{\"items\":{\"42\":{\"status\":\"running\",\"workerId\":1,\"pid\":%s}}}\\n' \"$$\" > \"$RALPH_RUN_DIR/status.json\"",
         "sleep 1",
         "",
@@ -100,12 +105,14 @@ test("native Windows launch registers a worker from a linked worktree", {
           throw error;
         }
       },
-      startupTimeoutMs: 12000,
+      startupTimeoutMs: 30000,
       startupPollMs: 25,
     });
 
     assert.equal(result.success, true, result.error);
     assert.equal(existsSync(loopRepo), true, "worker worktree should be created");
+    const excludePath = git(coordinatorRepo, "rev-parse", "--git-path", "info/exclude");
+    assert.match(readFileSync(excludePath, "utf8"), /^\.ralph$/m);
     const status = JSON.parse(readFileSync(statusPath, "utf8"));
     assert.equal(status.items?.["42"]?.status, "running");
   } finally {
