@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdtempSync,
@@ -70,6 +71,7 @@ test("native Windows launch registers a worker from a linked worktree", {
       ].join("\n"),
       "utf8",
     );
+    chmodSync(join(ralphDir, "ralph.sh"), 0o755);
     writeFileSync(statusPath, '{"items":{}}\n', "utf8");
     process.env.RALPH_LOOP_REPO = loopRepo;
 
