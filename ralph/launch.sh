@@ -345,20 +345,38 @@ stop_all_caffeinate() {
 }
 
 scoped_ralph_processes() {
-  # macOS/Linux use `ps -axww`; Cygwin/MSYS ps doesn't accept the BSD flags
-  # and exits non-zero, which would abort callers under `set -euo pipefail`.
-  # Fall back to an empty list when ps can't run our query so --status/--stop
-  # stay usable in any shell environment.
-  local ps_out
-  if ! ps_out=$(ps -axww -o pid=,ppid=,command= 2>/dev/null); then
-    return 0
-  fi
-  printf '%s\n' "$ps_out" | awk -v script="$RALPH_SCRIPT" '
+  # Status/stop use best-effort inspection, while guarded PRD retirement passes
+  # "strict" and must fail when the process table cannot be read.
+  local mode="${1:-best-effort}"
+  local ps_out pid_col=1 ppid_col=2 command_col=3
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      pid_col=2
+      ppid_col=3
+      command_col=6
+      if ! ps_out=$(ps -ef 2>/dev/null); then
+        [[ "$mode" == "strict" ]] && return 1
+        return 0
+      fi
+      ;;
+    *)
+      if ! ps_out=$(ps -axww -o pid=,ppid=,command= 2>/dev/null); then
+        [[ "$mode" == "strict" ]] && return 1
+        return 0
+      fi
+      ;;
+  esac
+  printf '%s\n' "$ps_out" | awk \
+    -v script="$RALPH_SCRIPT" \
+    -v pid_col="$pid_col" \
+    -v ppid_col="$ppid_col" \
+    -v command_col="$command_col" '
     {
-      pid=$1
-      ppid=$2
+      pid=$pid_col
+      ppid=$ppid_col
+      if (pid !~ /^[0-9]+$/ || ppid !~ /^[0-9]+$/) next
       cmd=""
-      for (i=3; i<=NF; i++) cmd = cmd (i==3 ? "" : " ") $i
+      for (i=command_col; i<=NF; i++) cmd = cmd (i==command_col ? "" : " ") $i
       pids[++n]=pid
       parent[pid]=ppid
       command[pid]=cmd
@@ -988,6 +1006,7 @@ if ! acquire_launcher_setup_locks; then
   exit 1
 fi
 trap 'release_launcher_setup_locks' EXIT
+write_startup_phase "setup-locks-acquired"
 
 initialize_prd_run() {
   local run_id="${RALPH_RUN_ID:-}"

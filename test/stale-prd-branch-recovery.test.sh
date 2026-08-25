@@ -131,6 +131,35 @@ jq -e \
 echo "PASS: --cleanup retires an eligible stale PRD integration branch"
 
 echo ""
+echo "Test 2: --cleanup retires an ownership-created run that never registered a worker"
+IFS='|' read -r repo origin bin prior_run branch base < <(create_fixture zero-registration)
+printf '{"items":{}}\n' >"$repo/.ralph/runs/$prior_run/status.json"
+mkdir -p "$repo/.ralph/launch.lock" "$repo/.git/ralph-launch.lock"
+printf '999999\n' >"$repo/.ralph/launch.lock/owner"
+printf '999999\n' >"$repo/.git/ralph-launch.lock/owner"
+cleanup_output=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$repo/.ralph/launch.sh" --cleanup 2>&1
+) || {
+  echo "$cleanup_output"
+  fail "zero-registration PRD cleanup should succeed after proving abandonment"
+}
+if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+  echo "$cleanup_output"
+  fail "zero-registration PRD branch should be retired"
+fi
+jq -e \
+  '.retired_at != null
+   and .retired_by_run_id == "cleanup"
+   and .retirement_reason
+     == "abandoned before worker registration (zero-item guarded recovery)"' \
+  "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
+  || fail "zero-registration retirement should record its distinct reason"
+echo "PASS: --cleanup recovers an ownership-created zero-registration crash"
+
+echo ""
 echo "Test 2: --cleanup waits for the shared launcher setup lock"
 IFS='|' read -r repo origin bin prior_run branch base < <(create_fixture serialized)
 mkdir -p "$repo/.git/ralph-launch.lock"
@@ -256,6 +285,23 @@ cd "$repo"
 . "$repo/.ralph/lib/status.sh"
 . "$repo/.ralph/lib/prd-branch.sh"
 
+# Direct seam tests model launch.sh after it has successfully inspected the
+# process table. Integration tests above exercise the real implementation.
+scoped_ralph_processes() {
+  return 0
+}
+
+if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then
+  current_winpid=$(ps -p "$$" -l | awk '
+    NR > 1 && $1 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { print $4; exit }
+  ')
+  prd_launcher_pid_is_current "$current_winpid" \
+    || fail "native Windows launcher PID should map to the current Bash process"
+else
+  prd_launcher_pid_is_current "$$" \
+    || fail "POSIX launcher PID should match the current Bash process"
+fi
+
 reset_guard_fixture() {
   local extra_worktree="$TEST_ROOT/guards/branch-worktree"
   if [[ -d "$extra_worktree" ]]; then
@@ -359,6 +405,130 @@ delivery_commit=$(printf 'unmerged delivery\n' | git -C "$repo" commit-tree "$tr
 git -C "$repo" update-ref "refs/heads/$branch" "$delivery_commit"
 expect_guard "contains delivery beyond frozen base"
 
+reset_zero_registration_fixture() {
+  local worker_worktree="$TEST_ROOT/guards/worker-worktree"
+  if [[ -d "$worker_worktree" ]]; then
+    git -C "$repo" worktree remove -f "$worker_worktree" >/dev/null 2>&1 || true
+  fi
+  git -C "$repo" branch -D ralph-loop-fixture >/dev/null 2>&1 || true
+  reset_guard_fixture
+  rm -rf "$repo/.ralph/launch.lock" "$repo/.git/ralph-launch.lock"
+  rm -f \
+    "$repo/.ralph/launcher.pid" \
+    "$repo/.ralph/runs/$prior_run/copilot-sessions.jsonl"
+  printf '{"items":{}}\n' >"$repo/.ralph/runs/$prior_run/status.json"
+  mkdir -p "$repo/.ralph/launch.lock" "$repo/.git/ralph-launch.lock"
+  printf '%s\n' "$$" >"$repo/.ralph/launch.lock/owner"
+  printf '%s\n' "$$" >"$repo/.git/ralph-launch.lock/owner"
+}
+
+reset_zero_registration_fixture
+printf '{"items":{"506":{"status":"running","workerId":1,"pid":999999}}}\n' \
+  >"$repo/.ralph/runs/$prior_run/status.json"
+expect_guard "worker registration evidence"
+
+reset_zero_registration_fixture
+printf '{"claims":{"506":{"workerId":1,"pid":999999}}}\n' \
+  >"$repo/.ralph/state.json"
+expect_guard "explicit empty claim evidence"
+
+reset_zero_registration_fixture
+printf '{"event":"start","sessionId":"fixture"}\n' \
+  >"$repo/.ralph/runs/$prior_run/copilot-sessions.jsonl"
+expect_guard "Copilot session registration evidence"
+
+reset_zero_registration_fixture
+scoped_ralph_processes() {
+  printf '123 fixture-ralph-process\n'
+}
+expect_guard "still has a live Ralph process"
+
+reset_zero_registration_fixture
+scoped_ralph_processes() {
+  return 1
+}
+expect_guard "could not inspect Ralph process evidence"
+scoped_ralph_processes() {
+  return 0
+}
+
+reset_zero_registration_fixture
+git -C "$repo" worktree add -q -b ralph-loop-fixture \
+  "$TEST_ROOT/guards/worker-worktree" "$base"
+expect_guard "Ralph worker worktree"
+
+reset_zero_registration_fixture
+"$TEST_ROOT/guards/live-ralph.sh" &
+LIVE_PID=$!
+printf '%s\n' "$LIVE_PID" >"$repo/.ralph/launcher.pid"
+expect_guard "exclusive launcher shutdown evidence"
+kill "$LIVE_PID" 2>/dev/null || true
+wait "$LIVE_PID" 2>/dev/null || true
+LIVE_PID=""
+
+reset_zero_registration_fixture
+rm -f "$repo/.ralph/launch.lock/owner"
+expect_guard "exclusive launcher shutdown evidence"
+
+reset_zero_registration_fixture
+rm -f "$repo/.ralph/runs/$prior_run/status.json"
+expect_guard "invalid status evidence"
+
+reset_zero_registration_fixture
+printf '{not-json\n' >"$repo/.ralph/state.json"
+expect_guard "explicit empty claim evidence"
+
+reset_zero_registration_fixture
+git -C "$repo" update-ref -d "refs/heads/$branch" "$base"
+set +e
+branchless_zero_output=$(
+  retire_owned_prd_branch "$prior_run" "replacement-run" 2>&1
+)
+branchless_zero_status=$?
+set -e
+[[ "$branchless_zero_status" -ne 0 ]] \
+  || fail "unproven branchless zero-registration ownership must not retire"
+grep -Fq "requires local branch" <<<"$branchless_zero_output" \
+  || fail "branchless zero-registration refusal should be diagnosed"
+jq -e '.retired_at == null and .retirement_pending == null' \
+  "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
+  || fail "branchless refusal must preserve active ownership without staging retirement"
+
+reset_zero_registration_fixture
+printf '{"claims":{},"active_prd":"505","active_run_id":"%s"}\n' "$prior_run" \
+  >"$repo/.ralph/state.json"
+set +e
+pending_retry_output=$(
+  state_mktemp() { return 1; }
+  retire_owned_prd_branch "$prior_run" "replacement-run" 2>&1
+)
+pending_retry_status=$?
+set -e
+[[ "$pending_retry_status" -ne 0 ]] \
+  || fail "state failure should interrupt zero-registration retirement"
+grep -Fq "pending ownership remains recoverable" <<<"$pending_retry_output" \
+  || fail "partial zero-registration retirement should report durable recovery"
+if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+  fail "partial zero-registration retirement should have CAS-deleted the branch"
+fi
+jq -e \
+  --arg base "$base" \
+  '.retired_at == null
+   and .retirement_pending.reason
+     == "abandoned before worker registration (zero-item guarded recovery)"
+   and .retirement_pending.expected_branch_tip == $base' \
+  "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
+  || fail "partial zero-registration retirement should durably record CAS evidence"
+retire_owned_prd_branch "$prior_run" "replacement-run" >/dev/null \
+  || fail "pending zero-registration retirement should retry without manual repair"
+jq -e \
+  '.retired_at != null
+   and .retirement_pending == null
+   and .retirement_reason
+     == "abandoned before worker registration (zero-item guarded recovery)"' \
+  "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
+  || fail "pending zero-registration retirement should finalize durable ownership"
+
 reset_guard_fixture
 export GH_PR_MODE=fail
 expect_guard "could not verify pull requests"
@@ -433,6 +603,26 @@ retire_owned_prd_branch "$prior_run" "replacement-run" >/dev/null \
   || fail "branchless ownership should retry without manual branch deletion"
 
 reset_guard_fixture
+set +e
+ownership_cas_output=$(
+  state_lock() {
+    jq '.created_at = "changed-during-retirement"' \
+      "$repo/.ralph/runs/$prior_run/ownership.json" \
+      >"$repo/.ralph/runs/$prior_run/ownership.tmp"
+    mv "$repo/.ralph/runs/$prior_run/ownership.tmp" \
+      "$repo/.ralph/runs/$prior_run/ownership.json"
+  }
+  retire_owned_prd_branch "$prior_run" "replacement-run" 2>&1
+)
+ownership_cas_status=$?
+set -e
+[[ "$ownership_cas_status" -ne 0 ]] \
+  || fail "ownership evidence changes must fail branch retirement"
+grep -Fq "changed during retirement" <<<"$ownership_cas_output" \
+  || fail "ownership CAS failure should be diagnosed"
+assert_branch_exists "$repo" "$branch" "ownership CAS"
+
+reset_guard_fixture
 mkdir -p "$repo/.ralph/runs/malformed"
 printf '{not-json\n' >"$repo/.ralph/runs/malformed/ownership.json"
 expect_guard "Could not validate PRD ownership evidence"
@@ -445,6 +635,6 @@ cat "$ownership_file.single" "$ownership_file.single" >"$ownership_file"
 expect_guard "Could not validate PRD ownership evidence"
 mv "$ownership_file.single" "$ownership_file"
 
-echo "PASS: terminal, live-run, claim, worktree, PR, remote, delivery, and evidence guards fail closed"
+echo "PASS: terminal, registration, launcher, claim, session, worktree, PR, remote, delivery, and evidence guards fail closed"
 echo ""
 echo "All stale PRD branch recovery tests passed!"
