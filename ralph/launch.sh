@@ -222,6 +222,38 @@ if [[ -f "$_terminal_cli_lib" ]]; then
 fi
 unset _terminal_cli_lib
 
+# The launcher setup mutex serializes every operation that mutates shared refs,
+# worktrees, or PRD ownership. Both normal launch and --cleanup use it.
+SETUP_LOCK=""
+COMMON_SETUP_LOCK=""
+acquire_launcher_setup_locks() {
+  SETUP_LOCK="$MAIN_REPO/.ralph/launch.lock"
+  if ! acquire_lockdir "$SETUP_LOCK"; then
+    echo "❌ Another launch.sh is in flight (lock at $SETUP_LOCK). Aborting." >&2
+    return 1
+  fi
+
+  local common_git_dir
+  common_git_dir="$(git -C "$MAIN_REPO" rev-parse --git-common-dir 2>/dev/null || echo "$MAIN_REPO/.git")"
+  case "$common_git_dir" in
+    /*|[A-Za-z]:/*) ;;
+    *) common_git_dir="$MAIN_REPO/$common_git_dir" ;;
+  esac
+  common_git_dir="$(cd "$common_git_dir" 2>/dev/null && pwd -P || echo "$common_git_dir")"
+  COMMON_SETUP_LOCK="$common_git_dir/ralph-launch.lock"
+  if ! acquire_lockdir "$COMMON_SETUP_LOCK"; then
+    release_lockdir "$SETUP_LOCK"
+    SETUP_LOCK=""
+    echo "❌ Another launch.sh is in flight against this repo's common gitdir (lock at $COMMON_SETUP_LOCK). Aborting." >&2
+    return 1
+  fi
+}
+
+release_launcher_setup_locks() {
+  [[ -n "$COMMON_SETUP_LOCK" ]] && release_lockdir "$COMMON_SETUP_LOCK"
+  [[ -n "$SETUP_LOCK" ]] && release_lockdir "$SETUP_LOCK"
+}
+
 # Keep-awake (macOS): per-worker caffeinate processes are tracked in
 # .ralph/lock/caffeinate-<N>.pid so --status, --stop, and --cleanup can
 # manage them explicitly. Defense-in-depth against PID-reuse and missed
@@ -609,6 +641,11 @@ cleanup_worktrees() {
 
 # --cleanup: stop scoped workers and remove clean loop worktrees.
 if [[ "${1:-}" == "--cleanup" ]]; then
+  if ! acquire_launcher_setup_locks; then
+    exit 1
+  fi
+  trap 'release_launcher_setup_locks' EXIT
+
   pids=$(scoped_ralph_processes | awk '{print $1}')
   if [[ -n "$pids" ]]; then
     for pid in $pids; do
@@ -621,8 +658,15 @@ if [[ "${1:-}" == "--cleanup" ]]; then
   if declare -F copilot_session_archive_completed >/dev/null 2>&1; then
     copilot_session_archive_completed
   fi
-  cleanup_worktrees
-  exit $?
+  cleanup_rc=0
+  cleanup_worktrees || cleanup_rc=$?
+  if declare -F cleanup_stale_prd_branches >/dev/null 2>&1; then
+    (
+      cd "$MAIN_REPO"
+      cleanup_stale_prd_branches
+    ) || cleanup_rc=1
+  fi
+  exit "$cleanup_rc"
 fi
 
 # Mutual exclusivity: --enqueue and --enqueue-prd cannot appear together.
@@ -890,26 +934,10 @@ fi
 #      *different* worktrees of the same repo. Both worktrees share refs,
 #      packed-refs, and `git worktree add`'s worktree registry, so
 #      uncoordinated setup phases can race.
-SETUP_LOCK="$MAIN_REPO/.ralph/launch.lock"
-if ! acquire_lockdir "$SETUP_LOCK"; then
-  echo "❌ Another launch.sh is in flight (lock at $SETUP_LOCK). Aborting." >&2
+if ! acquire_launcher_setup_locks; then
   exit 1
 fi
-COMMON_GIT_DIR="$(git -C "$MAIN_REPO" rev-parse --git-common-dir 2>/dev/null || echo "$MAIN_REPO/.git")"
-# rev-parse returns a relative path for a regular checkout, or a drive-letter
-# absolute path for a Git-for-Windows linked worktree.
-case "$COMMON_GIT_DIR" in
-  /*|[A-Za-z]:/*) ;;
-  *) COMMON_GIT_DIR="$MAIN_REPO/$COMMON_GIT_DIR" ;;
-esac
-COMMON_GIT_DIR="$(cd "$COMMON_GIT_DIR" 2>/dev/null && pwd -P || echo "$COMMON_GIT_DIR")"
-COMMON_SETUP_LOCK="$COMMON_GIT_DIR/ralph-launch.lock"
-if ! acquire_lockdir "$COMMON_SETUP_LOCK"; then
-  release_lockdir "$SETUP_LOCK"
-  echo "❌ Another launch.sh is in flight against this repo's common gitdir (lock at $COMMON_SETUP_LOCK). Aborting." >&2
-  exit 1
-fi
-trap 'release_lockdir "$COMMON_SETUP_LOCK"; release_lockdir "$SETUP_LOCK"' EXIT
+trap 'release_launcher_setup_locks' EXIT
 
 initialize_prd_run() {
   local run_id="${RALPH_RUN_ID:-}"
@@ -944,16 +972,26 @@ initialize_prd_run() {
     return 1
   fi
 
-  if ! can_start_prd "$prd_number" "$run_id"; then
-    return 1
-  fi
-
   local ownership_file="$MAIN_REPO/.ralph/runs/$run_id/ownership.json"
   local ownership_existed=0
   [[ -f "$ownership_file" ]] && ownership_existed=1
 
   local branch_name
   branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
+  if ! (
+    cd "$MAIN_REPO"
+    recover_stale_prd_branch \
+      "$run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch"
+  ); then
+    return 1
+  fi
+
+  # Recovery may clear a terminal prior run from state.json. Enforce the
+  # one-active-PRD guard against the resulting current state.
+  if ! can_start_prd "$prd_number" "$run_id"; then
+    return 1
+  fi
+
   if ! (
     cd "$MAIN_REPO"
     create_prd_branch \
