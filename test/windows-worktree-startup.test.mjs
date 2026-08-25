@@ -92,8 +92,13 @@ test("native Windows launch registers a worker from a linked worktree", {
       isWindows: true,
       resolveBash: resolveBashExe,
       confirmStarted: async () => {
-        const status = JSON.parse(readFileSync(statusPath, "utf8"));
-        return status.items?.["42"]?.status === "running";
+        try {
+          const status = JSON.parse(readFileSync(statusPath, "utf8"));
+          return status.items?.["42"]?.status === "running";
+        } catch (error) {
+          if (error instanceof SyntaxError) return false;
+          throw error;
+        }
       },
       startupTimeoutMs: 12000,
       startupPollMs: 25,
