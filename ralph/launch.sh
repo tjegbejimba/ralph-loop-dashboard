@@ -896,12 +896,12 @@ if ! acquire_lockdir "$SETUP_LOCK"; then
   exit 1
 fi
 COMMON_GIT_DIR="$(git -C "$MAIN_REPO" rev-parse --git-common-dir 2>/dev/null || echo "$MAIN_REPO/.git")"
-# rev-parse returns a path relative to MAIN_REPO when the repo is a
-# regular checkout; absolutize so the lock lives in the same place
-# regardless of which worktree invoked launch.
-if [[ "$COMMON_GIT_DIR" != /* ]]; then
-  COMMON_GIT_DIR="$MAIN_REPO/$COMMON_GIT_DIR"
-fi
+# rev-parse returns a relative path for a regular checkout, or a drive-letter
+# absolute path for a Git-for-Windows linked worktree.
+case "$COMMON_GIT_DIR" in
+  /*|[A-Za-z]:/*) ;;
+  *) COMMON_GIT_DIR="$MAIN_REPO/$COMMON_GIT_DIR" ;;
+esac
 COMMON_GIT_DIR="$(cd "$COMMON_GIT_DIR" 2>/dev/null && pwd -P || echo "$COMMON_GIT_DIR")"
 COMMON_SETUP_LOCK="$COMMON_GIT_DIR/ralph-launch.lock"
 if ! acquire_lockdir "$COMMON_SETUP_LOCK"; then

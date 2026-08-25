@@ -15,6 +15,12 @@ The login-shell path runs profile startup commands before `launch.sh`; with
 detached ignored stdio on native Windows, that path can remain alive without
 ever reaching worker registration.
 
+Linked worktrees add a second Windows path constraint. Git for Windows returns
+`git rev-parse --git-common-dir` as a drive-letter absolute path (`C:/...`).
+The launcher must treat both `/...` and `[A-Za-z]:/...` as absolute before
+placing its shared setup lock; prefixing the coordinator worktree path creates
+an invalid mixed path and prevents worker registration.
+
 The dashboard supports three plausible behaviours when a Windows user requests
 `parallelism > 1`: silently clamp to 1, clamp to 1 with a UI warning, or
 hard-error the Start. We picked **hard error**.
