@@ -16,10 +16,13 @@ detached ignored stdio on native Windows, that path can remain alive without
 ever reaching worker registration.
 
 Linked worktrees add a second Windows path constraint. Git for Windows returns
-`git rev-parse --git-common-dir` as a drive-letter absolute path (`C:/...`).
-The launcher must treat both `/...` and `[A-Za-z]:/...` as absolute before
-placing its shared setup lock; prefixing the coordinator worktree path creates
-an invalid mixed path and prevents worker registration.
+both `git rev-parse --git-common-dir` and `git rev-parse --git-path
+info/exclude` as drive-letter absolute paths (`C:/...`). The installer and
+launcher must treat both `/...` and `[A-Za-z]:/...` as absolute before placing
+the shared setup lock or updating the common exclude file. Prefixing the
+coordinator worktree path creates an invalid mixed path; a misplaced exclude
+leaves the worker's `.ralph` link unignored, so worker cleanliness preflight
+halts before registration.
 
 The dashboard supports three plausible behaviours when a Windows user requests
 `parallelism > 1`: silently clamp to 1, clamp to 1 with a UI warning, or
