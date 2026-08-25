@@ -6,7 +6,7 @@ This document describes Ralph's recovery and reset behavior for operators and ma
 2. **Stale worker reconciliation** — what happens when workers die unexpectedly
 3. **Terminal failure exclusion** — why exhausted failures don't auto-retry
 4. **Reset budget operation** — how operators can manually retry terminal failures
-5. **Zero-registration PRD recovery** — how pre-worker crashes retire ownership
+5. **PRD ownership recovery** — how published branches transfer between runs
 
 ---
 
@@ -38,8 +38,9 @@ A launcher can crash after creating PRD branch ownership but before a worker
 registers. Ralph treats this differently from a terminal run. Queue contents
 record intent, not progress, so they do not make a run active by themselves.
 
-`launch.sh --cleanup` and a replacement launch may retire that ownership only
-when all of the following are positively proven:
+Current launchers publish the owned integration branch before worker startup. A
+replacement same-PRD launch transfers that published ownership only when all of
+the following are positively proven:
 
 - `status.json` exists, is valid, and has an empty `items` object.
 - `state.json` exists, is valid, and has an empty `claims` object.
@@ -51,18 +52,51 @@ when all of the following are positively proven:
 - `git worktree list` succeeds and contains no other linked worktree. Ralph
   cannot safely distinguish an unregistered worker worktree from an unrelated
   one, so either blocks this exceptional recovery path.
-- The integration branch has no worktree, pull request, or remote ref.
-- The local branch still equals the ownership record's frozen base.
+- The integration branch has no worktree or pull request.
+- The local branch, when present, either equals the remote tip or is a verified
+  ancestor that can be compare-and-swap fast-forwarded after transfer.
+- The remote tip still equals the run's owned tip and descends from the
+  immutable initial base. Zero-registration recovery never adopts later remote
+  movement; terminal recovery accepts a later tip only when it exactly matches
+  a recorded `slice-integrated` commit and every recorded integrated commit is
+  in that tip's history.
 
 Missing or malformed evidence fails closed. Terminal runs retain their existing
-recovery path. A successful zero-registration retirement records
-`retirement_reason` as
-`abandoned before worker registration (zero-item guarded recovery)`, rechecks
-the ownership document under the state lock, and deletes the local ref with its
-expected old SHA before committing the retirement record. Before deleting the
-ref, Ralph durably writes `retirement_pending` with the reason and expected tip.
-If a later state or ownership write fails, the next cleanup can finish that
-specific staged deletion without treating an arbitrary missing branch as safe.
+transfer path, which may preserve delivered commits beyond the tip owned at
+startup when the complete run is terminal and the remote history remains
+linear. Transfer writes `transfer_pending` before creating the new run's
+ownership record, then clears the prior active-run marker and retires the prior
+record. The intended replacement run can finish this sequence idempotently
+after an interrupted write. If orchestration has already minted a later run ID,
+that run first completes the recorded handoff, then performs a separately
+guarded zero-registration transfer from the abandoned intermediate owner. This
+preserves the complete ownership audit chain without retargeting or deleting
+staged evidence.
+
+`launch.sh --cleanup` never deletes a remote PRD branch. For backwards
+compatibility, a replacement launch or cleanup may retire a branch created by
+an older installer that has no remote ref. That legacy local-only path still
+requires the branch to equal its frozen base and stages `retirement_pending`
+before deleting the local ref with an expected-old-object update. If a later
+state or ownership write fails, the next cleanup can finish that specific
+staged deletion without treating an arbitrary missing branch as safe.
+
+## Published PRD Ownership Transfer
+
+Every new ownership record freezes both `initial_base_sha` and `owned_tip_sha`.
+The first run records the fetched delivery head for both values and publishes
+that exact commit with an expected-empty remote lease. A replacement run
+preserves `initial_base_sha`, records the stable remote handoff commit as its
+new `owned_tip_sha`, and links back with `resumed_from_run_id`.
+
+Transfer fails closed when ownership is ambiguous, PRD or repository settings
+change, a live worker or claim remains, the branch is checked out, GitHub PR
+evidence exists or cannot be queried, local and remote tips disagree, history
+does not descend from the owned commits, terminal slice-delivery evidence does
+not account for the exact remote tip, or the remote tip changes during the
+handoff. Ralph never force-updates or deletes the published branch during this
+path; it only compare-and-swap fast-forwards a stale local ref after durable
+transfer evidence exists.
 
 Normal PRD launch writes the `setup-locks-acquired` startup phase before remote
 PRD initialization. This prevents a healthy but slow pre-registration launch

@@ -348,12 +348,15 @@ recorded session ID so completed sessions can be cleaned without matching by
 prompt text. Use `--cleanup` after a run to remove worker worktrees that Ralph
 created and archive recorded completed Copilot session state. Dirty worktrees,
 running sessions, failed sessions, and unrecorded/user sessions are left in
-place for inspection instead of being deleted. Cleanup also retires a stale
-local PRD integration branch only when its ownership record and complete queue
-prove the prior run terminal, no live worker or claim, worktree, pull request,
-or remote branch exists, and the branch still equals its frozen base. A fresh
-run applies the same gates before reinitializing that branch from current main;
-any unprovable condition stops recovery without adopting or deleting the branch.
+place for inspection instead of being deleted. PRD integration-branch creation
+returns only after publishing the uniquely owned branch to its configured
+remote. A fresh same-PRD run can transfer a terminal owner's published branch
+without deleting or rewriting its delivery history, but only after proving
+matching repository settings, linear owned history, no live worker or claim,
+no worktree or pull request, and a stable remote tip. Cleanup never deletes a
+published PRD branch. Legacy local-only branches can still be retired when all
+guards pass and the local ref equals its frozen base. Any unprovable condition
+stops recovery without adopting, resetting, or deleting the branch.
 
 ### Per-worktree loops
 
@@ -431,8 +434,8 @@ Key fields:
 - **`issue.titleRegex`, `issue.titleNumRegex`, `issue.issueSearch`** — Control title matching and GitHub issue discovery.
 - **`issue.numbers`** (array of integers) — Direct-numbers mode enqueue list, populated by `--enqueue`.
 - **`issue.order`** (`"queue"` or `"chronological"`) — Whether to consume issues in queue order or by issue number.
-- **`prd.integrationBranchTemplate`** — Owned PRD branch template. Supports `{feature-slug}` and `{prd_number}`; the resolved name is frozen in the durable run record before workers launch.
-- **`prd.remote`, `prd.deliveryBranch`** — Remote and delivery branch used to establish the PRD branch from the latest fetched delivery head.
+- **`prd.integrationBranchTemplate`** — Owned PRD branch template. Supports `{feature-slug}` and `{prd_number}`; the resolved name is frozen in the durable run record and published before workers launch.
+- **`prd.remote`, `prd.deliveryBranch`** — Remote and delivery branch used to establish and publish the PRD branch from the latest fetched delivery head.
 - **`validation.commands`** (array of `{name, command}` objects) — Pre-merge checks (lint, test, build).
 - **`worker.idleExitAfterPolls`** (optional integer) — Number of consecutive empty-queue polls before idling; env var `RALPH_IDLE_EXIT` takes precedence.
 

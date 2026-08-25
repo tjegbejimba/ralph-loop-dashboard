@@ -4,7 +4,7 @@
 # Covers:
 #   1. Default branch name resolution: ralph/prd/{feature-slug}-{prd_number}
 #   2. Branch name frozen at run creation (PRD title changes don't rename)
-#   3. Branch created from latest remote delivery branch
+#   3. Branch created from latest remote delivery branch and published before return
 #   4. Atomic recording of run identity, PRD identity, branch ownership, remote, delivery branch, initial base SHA
 #   5. Matching owned branch can be resumed safely
 #   6. Conflicting/unprovable ownership causes safe refusal without reset/overwrite/deletion/adoption
@@ -175,13 +175,16 @@ new_branch="ralph/prd/another-feature-201"
 
 remote_sha=$(git ls-remote origin main | awk '{print $1}')
 if create_prd_branch "$new_run_id" "201" "Another Feature" "origin" "main" ""; then
-  # Verify branch was created
+  # Verify branch was created and published before the seam returns
   if git rev-parse --verify "$new_branch" >/dev/null 2>&1; then
     branch_sha=$(git rev-parse "$new_branch")
-    if [[ "$branch_sha" == "$remote_sha" ]]; then
-      pass "PRD branch created from latest remote main"
+    published_sha=$(
+      git ls-remote --heads origin "refs/heads/$new_branch" | awk '{print $1}'
+    )
+    if [[ "$branch_sha" == "$remote_sha" && "$published_sha" == "$branch_sha" ]]; then
+      pass "PRD branch created from latest remote main and published"
     else
-      fail "PRD branch not at remote main SHA (expected $remote_sha, got $branch_sha)"
+      fail "PRD branch was not published at remote main SHA (expected $remote_sha, local $branch_sha, remote $published_sha)"
     fi
   else
     fail "PRD branch not created"
@@ -191,7 +194,6 @@ else
 fi
 
 # Test 8b: Resume an owned remote branch at its existing head, not newer main
-git push -q origin "$new_branch"
 owned_remote_sha=$(git rev-parse "$new_branch")
 recorded_base_sha=$(jq -r '.initial_base_sha' ".ralph/runs/$new_run_id/ownership.json")
 git branch -D "$new_branch" >/dev/null
@@ -212,6 +214,56 @@ if create_prd_branch "$new_run_id" "201" "Renamed Feature" "origin" "main" ""; t
   fi
 else
   fail "Owned remote branch should resume safely"
+fi
+
+# Test 8c: Repair the historical local-created/remote-missing startup state
+missing_remote_run_id="run-remote-missing"
+missing_remote_branch="ralph/prd/remote-missing-206"
+missing_remote_base=$(git rev-parse origin/main)
+create_prd_ownership_record \
+  "$missing_remote_run_id" \
+  "206" \
+  "$missing_remote_branch" \
+  "origin" \
+  "main" \
+  "$missing_remote_base"
+git branch "$missing_remote_branch" "$missing_remote_base"
+
+if create_prd_branch \
+  "$missing_remote_run_id" "206" "Remote Missing" "origin" "main" ""; then
+  repaired_remote_sha=$(
+    git ls-remote --heads origin "refs/heads/$missing_remote_branch" | awk '{print $1}'
+  )
+  if [[ "$repaired_remote_sha" == "$missing_remote_base" ]]; then
+    pass "Owned local branch with a missing remote ref is published on retry"
+  else
+    fail "Owned local branch retry did not publish the frozen base"
+  fi
+else
+  fail "Owned local branch with a missing remote ref should be repairable"
+fi
+
+# Test 8d: Unexpected remote movement fails closed
+remote_movement_run_id="run-remote-movement"
+remote_movement_branch="ralph/prd/remote-movement-207"
+if ! create_prd_branch \
+  "$remote_movement_run_id" "207" "Remote Movement" "origin" "main" ""; then
+  fail "Remote movement fixture should create and publish"
+fi
+remote_movement_local_sha=$(git rev-parse "$remote_movement_branch")
+tree=$(git rev-parse "${remote_movement_local_sha}^{tree}")
+unexpected_remote_sha=$(printf 'unexpected remote rewrite\n' | git commit-tree "$tree")
+git push -q --force origin \
+  "$unexpected_remote_sha:refs/heads/$remote_movement_branch"
+if ! create_prd_branch \
+  "$remote_movement_run_id" "207" "Remote Movement" "origin" "main" "" 2>/dev/null \
+  && [[ "$(git rev-parse "$remote_movement_branch")" == "$remote_movement_local_sha" ]] \
+  && [[ "$(
+    git ls-remote --heads origin "refs/heads/$remote_movement_branch" | awk '{print $1}'
+  )" == "$unexpected_remote_sha" ]]; then
+  pass "Unexpected remote movement is refused without rewriting either ref"
+else
+  fail "Unexpected remote movement should fail closed"
 fi
 
 # Test 9: Refuse to create branch that already exists without ownership
@@ -253,6 +305,34 @@ if ! create_prd_branch \
   pass "Invalid branch setup fails without partial ownership evidence"
 else
   fail "Invalid branch setup should not leave ownership evidence"
+fi
+
+# Test 9d: Local branch creation failure rolls back only fresh ownership
+branch_failure_run_id="run-branch-create-failure"
+branch_failure_branch="ralph/prd/branch-create-failure-208"
+set +e
+branch_failure_output=$(
+  git() {
+    if [[ "$1" == "branch" && "$2" == "$branch_failure_branch" ]]; then
+      return 1
+    fi
+    command git "$@"
+  }
+  create_prd_branch \
+    "$branch_failure_run_id" "208" "Branch Create Failure" "origin" "main" "" 2>&1
+)
+branch_failure_status=$?
+set -e
+if [[ "$branch_failure_status" -ne 0 ]] \
+  && [[ ! -e ".ralph/runs/$branch_failure_run_id/ownership.json" ]] \
+  && ! git show-ref --verify --quiet "refs/heads/$branch_failure_branch" \
+  && [[ -z "$(
+    git ls-remote --heads origin "refs/heads/$branch_failure_branch"
+  )" ]]; then
+  pass "Fresh ownership is rolled back when local branch creation fails"
+else
+  echo "$branch_failure_output"
+  fail "Local branch creation failure should not strand ref-less ownership"
 fi
 
 # ===========================================================================

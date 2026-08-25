@@ -160,7 +160,29 @@ jq -e \
 echo "PASS: --cleanup recovers an ownership-created zero-registration crash"
 
 echo ""
-echo "Test 2: --cleanup waits for the shared launcher setup lock"
+echo "Test 2c: --cleanup preserves published PRD ownership without failing"
+IFS='|' read -r repo origin bin prior_run branch base < <(create_fixture published-cleanup)
+git -C "$repo" push -q origin "$branch"
+cleanup_output=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$repo/.ralph/launch.sh" --cleanup 2>&1
+) || {
+  echo "$cleanup_output"
+  fail "published PRD cleanup should skip preserved ownership successfully"
+}
+assert_branch_exists "$repo" "$branch" "published cleanup"
+[[ "$(git -C "$repo" ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')" == "$base" ]] \
+  || fail "published cleanup should preserve the remote PRD branch"
+jq -e '.retired_at == null' "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
+  || fail "published cleanup should preserve active ownership for same-PRD recovery"
+grep -Fq "preserving it for same-PRD recovery" <<<"$cleanup_output" \
+  || fail "published cleanup should report its non-destructive skip"
+echo "PASS: --cleanup treats published PRD ownership as a safe skip"
+
+echo ""
+echo "Test 2d: --cleanup waits for the shared launcher setup lock"
 IFS='|' read -r repo origin bin prior_run branch base < <(create_fixture serialized)
 mkdir -p "$repo/.git/ralph-launch.lock"
 printf '%s\n' "$$" >"$repo/.git/ralph-launch.lock/owner"
@@ -188,13 +210,21 @@ fi
 echo "PASS: --cleanup serializes branch retirement with fresh launch setup"
 
 echo ""
-echo "Test 3: a fresh launch retires stale ownership and reinitializes from current main"
+echo "Test 3: a fresh launch transfers a published branch without deleting delivery history"
 IFS='|' read -r repo origin bin prior_run branch base < <(create_fixture relaunch)
+tree=$(git -C "$repo" rev-parse "${base}^{tree}")
+delivered_tip=$(
+  printf 'delivered PRD work\n' |
+    git -C "$repo" commit-tree "$tree" -p "$base"
+)
+git -C "$repo" push -q origin \
+  "$delivered_tip:refs/heads/$branch"
+printf '{"items":{"506":{"status":"slice-integrated","pid":null,"integrated_commit":"%s"}}}\n' \
+  "$delivered_tip" >"$repo/.ralph/runs/$prior_run/status.json"
 echo "advanced main" >>"$repo/README.md"
 git -C "$repo" add README.md
 git -C "$repo" commit -qm "advance main"
 git -C "$repo" push -q origin main
-current_base=$(git -C "$repo" rev-parse HEAD)
 new_run="20260825-014856-6852b6b1"
 new_run_dir="$repo/.ralph/runs/$new_run"
 mkdir -p "$new_run_dir"
@@ -214,9 +244,14 @@ printf '<!-- RALPH_PRD_REF: #505 -->\n' >"$repo/.ralph/RALPH.md"
 cat >"$repo/.ralph/ralph.sh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-test "\$(git -C "\$RALPH_MAIN_REPO" rev-parse "$branch")" = "$current_base"
+test "\$(git -C "\$RALPH_MAIN_REPO" rev-parse "$branch")" = "$delivered_tip"
+test "\$(git -C "\$RALPH_MAIN_REPO" ls-remote --heads origin "refs/heads/$branch" | awk '{print \$1}')" = "$delivered_tip"
 jq -e --arg run "\$RALPH_RUN_ID" \
-  '.run_id == \$run and .branch_name == "$branch" and .initial_base_sha == "$current_base"' \
+  '.run_id == \$run
+   and .branch_name == "$branch"
+   and .initial_base_sha == "$base"
+   and .owned_tip_sha == "$delivered_tip"
+   and .resumed_from_run_id == "$prior_run"' \
   "\$RALPH_MAIN_REPO/.ralph/runs/\$RALPH_RUN_ID/ownership.json" >/dev/null
 printf 'worker-started\n' >"\$RALPH_MAIN_REPO/.ralph/worker-started"
 EOF
@@ -236,10 +271,13 @@ launch_output=$(
 [[ -f "$repo/.ralph/worker-started" ]] \
   || fail "fresh launch should reach the worker after recovery"
 jq -e --arg run "$new_run" \
-  '.retired_by_run_id == $run' \
+  --arg tip "$delivered_tip" \
+  '.retired_by_run_id == $run
+   and .retirement_reason == "terminal PRD ownership transferred"
+   and .transferred_tip_sha == $tip' \
   "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
-  || fail "fresh launch should attribute retirement to the new run"
-echo "PASS: fresh launch safely reinitializes the stale PRD integration branch"
+  || fail "fresh launch should durably transfer prior ownership"
+echo "PASS: fresh launch safely transfers the published PRD integration branch"
 
 echo ""
 echo "Test 4: a branchless stale ownership record cannot be bypassed"
@@ -273,6 +311,97 @@ jq -e --arg run "$new_run" '.run_id == $run and .retired_at == null' \
   "$repo/.ralph/runs/$new_run/ownership.json" >/dev/null \
   || fail "branchless recovery should create one active ownership record"
 echo "PASS: branchless stale ownership is proven terminal before reinitialization"
+
+echo ""
+echo "Test 4b: a later run completes an interrupted ownership transfer without rewriting history"
+IFS='|' read -r repo origin bin prior_run branch base < <(create_fixture interrupted-transfer)
+tree=$(git -C "$repo" rev-parse "${base}^{tree}")
+delivered_tip=$(
+  printf 'delivered before interrupted transfer\n' |
+    git -C "$repo" commit-tree "$tree" -p "$base"
+)
+git -C "$repo" push -q origin \
+  "$delivered_tip:refs/heads/$branch"
+printf '{"items":{"506":{"status":"slice-integrated","pid":null,"integrated_commit":"%s"}}}\n' \
+  "$delivered_tip" >"$repo/.ralph/runs/$prior_run/status.json"
+staged_run="20260825-staged-transfer"
+successor_run="20260825-successor-transfer"
+for run_id in "$staged_run" "$successor_run"; do
+  mkdir -p "$repo/.ralph/runs/$run_id"
+  printf '[{"number":506,"title":"Leaf slice"}]\n' \
+    >"$repo/.ralph/runs/$run_id/queue.json"
+  printf '{"items":{}}\n' >"$repo/.ralph/runs/$run_id/status.json"
+done
+printf '{"claims":{},"active_prd":"505","active_run_id":"%s"}\n' "$prior_run" \
+  >"$repo/.ralph/state.json"
+mkdir -p "$repo/.ralph/launch.lock" "$repo/.git/ralph-launch.lock"
+printf '%s\n' "$$" >"$repo/.ralph/launch.lock/owner"
+printf '%s\n' "$$" >"$repo/.git/ralph-launch.lock/owner"
+LOG_DIR="$repo/.ralph/logs"
+REPO="test/example"
+GH="$bin/gh"
+cd "$repo"
+. "$repo/.ralph/lib/state.sh"
+. "$repo/.ralph/lib/status.sh"
+. "$repo/.ralph/lib/prd-branch.sh"
+scoped_ralph_processes() {
+  return 0
+}
+
+set +e
+interrupted_transfer_output=$(
+  state_mktemp() {
+    return 1
+  }
+  recover_stale_prd_branch \
+    "$staged_run" "505" "$branch" "origin" "main" 2>&1
+)
+interrupted_transfer_status=$?
+set -e
+[[ "$interrupted_transfer_status" -ne 0 ]] \
+  || fail "injected activation-state failure should interrupt ownership transfer"
+jq -e \
+  --arg run "$staged_run" \
+  '.retired_at == null and .transfer_pending.new_run_id == $run' \
+  "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
+  || fail "interrupted transfer should preserve staged prior ownership"
+jq -e \
+  --arg run "$staged_run" \
+  --arg prior "$prior_run" \
+  '.run_id == $run and .resumed_from_run_id == $prior and .retired_at == null' \
+  "$repo/.ralph/runs/$staged_run/ownership.json" >/dev/null \
+  || fail "interrupted transfer should preserve staged new ownership"
+
+recover_stale_prd_branch \
+  "$successor_run" "505" "$branch" "origin" "main" >/dev/null \
+  || fail "a later run should complete and succeed the interrupted transfer"
+jq -e \
+  --arg run "$staged_run" \
+  '.retired_by_run_id == $run
+   and .retirement_reason == "terminal PRD ownership transferred"' \
+  "$repo/.ralph/runs/$prior_run/ownership.json" >/dev/null \
+  || fail "later recovery should finalize the originally staged handoff"
+jq -e \
+  --arg run "$successor_run" \
+  '.retired_by_run_id == $run
+   and .retirement_reason == "zero-registration PRD ownership transferred"' \
+  "$repo/.ralph/runs/$staged_run/ownership.json" >/dev/null \
+  || fail "later recovery should preserve the audit chain through the staged run"
+jq -e \
+  --arg run "$successor_run" \
+  --arg prior "$staged_run" \
+  --arg tip "$delivered_tip" \
+  '.run_id == $run
+   and .resumed_from_run_id == $prior
+   and .owned_tip_sha == $tip
+   and .retired_at == null' \
+  "$repo/.ralph/runs/$successor_run/ownership.json" >/dev/null \
+  || fail "later recovery should leave one successor ownership record"
+[[ "$(git -C "$repo" ls-remote --heads origin "refs/heads/$branch" | awk '{print $1}')" == "$delivered_tip" ]] \
+  || fail "interrupted transfer recovery must preserve the published branch"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$base" ]] \
+  || fail "ownership recovery must not rewrite a lagging local ref before branch setup"
+echo "PASS: interrupted transfer is completed through a guarded ownership chain"
 
 echo ""
 echo "Test 5: every unsafe condition hard-stops retirement"
@@ -398,6 +527,42 @@ expect_guard "still has a pull request"
 reset_guard_fixture
 git -C "$repo" push -q origin "$branch"
 expect_guard "still exists on remote"
+
+reset_guard_fixture
+git -C "$repo" push -q origin "$branch"
+export GH_PR_MODE=exists
+set +e
+transfer_pr_output=$(
+  recover_stale_prd_branch \
+    "replacement-run" "505" "$branch" "origin" "main" 2>&1
+)
+transfer_pr_status=$?
+set -e
+[[ "$transfer_pr_status" -ne 0 ]] \
+  || fail "published ownership with PR evidence must not transfer"
+grep -Fq "still has a pull request" <<<"$transfer_pr_output" \
+  || fail "transfer refusal should diagnose conflicting PR evidence"
+assert_branch_exists "$repo" "$branch" "published PR evidence"
+
+reset_guard_fixture
+tree=$(git -C "$repo" rev-parse "${base}^{tree}")
+rewritten_remote_tip=$(
+  printf 'rewritten remote\n' | git -C "$repo" commit-tree "$tree"
+)
+git -C "$repo" push -q --force origin \
+  "$rewritten_remote_tip:refs/heads/$branch"
+set +e
+transfer_rewrite_output=$(
+  recover_stale_prd_branch \
+    "replacement-run" "505" "$branch" "origin" "main" 2>&1
+)
+transfer_rewrite_status=$?
+set -e
+[[ "$transfer_rewrite_status" -ne 0 ]] \
+  || fail "non-descendant remote movement must not transfer ownership"
+grep -Eq "does not descend|differs from remote" <<<"$transfer_rewrite_output" \
+  || fail "remote movement refusal should be diagnosed"
+assert_branch_exists "$repo" "$branch" "rewritten remote history"
 
 reset_guard_fixture
 tree=$(git -C "$repo" rev-parse "${base}^{tree}")
