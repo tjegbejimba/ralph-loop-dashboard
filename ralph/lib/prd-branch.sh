@@ -166,8 +166,8 @@ prd_run_is_terminal() {
   ' "$queue_file" >/dev/null 2>&1
 }
 
-# prd_run_has_live_worker RUN_ID
-# Returns 0 when a prior run status still references a live Ralph process.
+# prd_pid_is_live_ralph PID
+# Conservatively verifies a recorded Ralph PID across supported shells.
 prd_pid_is_live_ralph() {
   local pid="$1"
   if is_pid_alive_and_ralph "$pid"; then
@@ -185,6 +185,8 @@ prd_pid_is_live_ralph() {
   esac
 }
 
+# prd_run_has_live_worker RUN_ID
+# Returns 0 when a prior run status still references a live Ralph process.
 prd_run_has_live_worker() {
   local run_id="$1"
   local status_file="$STATE_DIR/runs/$run_id/status.json"
