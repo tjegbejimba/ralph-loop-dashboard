@@ -6,16 +6,24 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 const helper = resolve("ralph/lib/pr-merge.sh");
+const expectedSha = "0123456789abcdef0123456789abcdef01234567";
+const expectedBranch = "mu-13-something";
+const expectedAuthor = "trusted-user";
 
-function runHelper(fakeGhBody, invocation = "ralph_merge_ready_open_pr_for_issue 13 main") {
+function runHelper(
+  fakeGhBody,
+  invocation = `ralph_merge_ready_open_pr_for_issue 13 main ${expectedBranch} ${expectedSha} ${expectedAuthor}`,
+  fakeGitBody = 'echo "unexpected git call: $*" >&2; exit 2',
+) {
   const dir = mkdtempSync(join(tmpdir(), "ralph-pr-merge-"));
-  const bin = join(dir, "gh");
-  const log = join(dir, "gh.log");
+  const gh = join(dir, "gh");
+  const ghLog = join(dir, "gh.log");
+  const gitLog = join(dir, "git.log");
   writeFileSync(
-    bin,
+    gh,
     `#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\\n' "$*" >> ${JSON.stringify(log)}
+printf '%s\\n' "$*" >> ${JSON.stringify(ghLog)}
 ${fakeGhBody}
 `,
     { mode: 0o755 },
@@ -24,28 +32,32 @@ ${fakeGhBody}
     "bash",
     [
       "-c",
-      `. ${JSON.stringify(helper)}; REPO=owner/repo; ${invocation}`,
+      `git() {
+  printf '%s\\n' "$*" >> ${JSON.stringify(gitLog)}
+  ${fakeGitBody}
+}
+. ${JSON.stringify(helper)}; REPO=owner/repo; ${invocation}`,
     ],
     {
       env: { ...process.env, PATH: `${dir}:${process.env.PATH || ""}` },
       encoding: "utf8",
     },
   );
-  const calls = (() => {
+  const readLog = (path) => {
     try {
-      return readFileSync(log, "utf8");
+      return readFileSync(path, "utf8");
     } catch (e) {
       if (e.code === "ENOENT") return "";
       throw e;
     }
-  })();
-  return { result, calls };
+  };
+  return { result, calls: readLog(ghLog), gitCalls: readLog(gitLog) };
 }
 
 test("merge fallback squashes a linked open PR when checks are green", () => {
   const { result, calls } = runHelper(`
 if [[ "$1 $2" == "pr list" ]]; then
-  printf '23\\tfalse\\tmain\\tMERGEABLE\\n'
+  printf '23\\tfalse\\tmain\\tMERGEABLE\\t${expectedBranch}\\t${expectedSha}\\towner/repo\\t${expectedAuthor}\\t\\n'
 elif [[ "$1 $2" == "pr view" ]]; then
   printf '13\\n'
 elif [[ "$1 $2" == "pr checks" ]]; then
@@ -60,12 +72,13 @@ fi
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(calls, /pr merge 23 --repo owner\/repo --squash --delete-branch/);
+  assert.match(calls, new RegExp(`--match-head-commit ${expectedSha}`));
 });
 
 test("merge fallback does not merge when checks are still pending", () => {
   const { result, calls } = runHelper(`
 if [[ "$1 $2" == "pr list" ]]; then
-  printf '23\\tfalse\\tmain\\tMERGEABLE\\n'
+  printf '23\\tfalse\\tmain\\tMERGEABLE\\t${expectedBranch}\\t${expectedSha}\\towner/repo\\t${expectedAuthor}\\t\\n'
 elif [[ "$1 $2" == "pr view" ]]; then
   printf '13\\n'
 elif [[ "$1 $2" == "pr checks" ]]; then
@@ -83,10 +96,10 @@ fi
   assert.doesNotMatch(calls, /pr merge/);
 });
 
-test("merge fallback treats a PR with no checks as ready", () => {
+test("merge fallback rejects a PR with no checks", () => {
   const { result, calls } = runHelper(`
 if [[ "$1 $2" == "pr list" ]]; then
-  printf '23\\tfalse\\tmain\\tMERGEABLE\\n'
+  printf '23\\tfalse\\tmain\\tMERGEABLE\\t${expectedBranch}\\t${expectedSha}\\towner/repo\\t${expectedAuthor}\\t\\n'
 elif [[ "$1 $2" == "pr view" ]]; then
   printf '13\\n'
 elif [[ "$1 $2" == "pr checks" ]]; then
@@ -99,8 +112,8 @@ else
 fi
 `);
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(calls, /pr merge 23 --repo owner\/repo --squash --delete-branch/);
+  assert.equal(result.status, 1, result.stderr);
+  assert.doesNotMatch(calls, /pr merge/);
 });
 
 // -- Release-branch fallback --------------------------------------------------
@@ -109,8 +122,8 @@ test("release-branch fallback merges + closes when PR body has Closes #N and che
   const { result, calls } = runHelper(
     `
 if [[ "$1 $2" == "pr list" ]]; then
-  # gh pr list ... --json number,isDraft,baseRefName,mergeable,body --jq '...'
-  printf '42\\tfalse\\tmulti-user\\tMERGEABLE\\n'
+  # Emit the provenance fields selected by the helper's gh --jq expression.
+  printf '42\\tfalse\\tmulti-user\\tMERGEABLE\\t${expectedBranch}\\t${expectedSha}\\towner/repo\\t${expectedAuthor}\\tCloses #13\\n'
 elif [[ "$1 $2" == "pr checks" ]]; then
   printf '[{"bucket":"pass"}]\\n'
 elif [[ "$1 $2" == "pr merge" ]]; then
@@ -122,11 +135,12 @@ else
   exit 2
 fi
 `,
-    "ralph_merge_release_branch_pr_for_issue 13 multi-user",
+    `ralph_merge_release_branch_pr_for_issue 13 multi-user ${expectedBranch} ${expectedSha} ${expectedAuthor}`,
   );
 
   assert.equal(result.status, 0, result.stderr);
   assert.match(calls, /pr merge 42 --repo owner\/repo --squash --delete-branch/);
+  assert.match(calls, new RegExp(`--match-head-commit ${expectedSha}`));
   assert.match(calls, /issue close 13 --repo owner\/repo --reason completed/);
 });
 
@@ -134,7 +148,7 @@ test("release-branch fallback does not merge when checks are pending", () => {
   const { result, calls } = runHelper(
     `
 if [[ "$1 $2" == "pr list" ]]; then
-  printf '42\\tfalse\\tmulti-user\\tMERGEABLE\\n'
+  printf '42\\tfalse\\tmulti-user\\tMERGEABLE\\t${expectedBranch}\\t${expectedSha}\\towner/repo\\t${expectedAuthor}\\tCloses #13\\n'
 elif [[ "$1 $2" == "pr checks" ]]; then
   printf '[{"bucket":"pending"}]\\n'
   exit 8
@@ -147,7 +161,7 @@ else
   exit 2
 fi
 `,
-    "ralph_merge_release_branch_pr_for_issue 13 multi-user",
+    `ralph_merge_release_branch_pr_for_issue 13 multi-user ${expectedBranch} ${expectedSha} ${expectedAuthor}`,
   );
 
   assert.equal(result.status, 1, result.stderr);
@@ -161,7 +175,7 @@ test("release-branch fallback no-ops when release_branch is empty", () => {
 echo "should not be called: $*" >&2
 exit 99
 `,
-    'ralph_merge_release_branch_pr_for_issue 13 ""',
+    `ralph_merge_release_branch_pr_for_issue 13 "" ${expectedBranch} ${expectedSha} ${expectedAuthor}`,
   );
 
   assert.equal(result.status, 1, result.stderr);
@@ -170,22 +184,11 @@ exit 99
 
 // -- Branch-only fallback (no PR exists yet) ----------------------------------
 
-test("branch-only fallback opens a PR for a pushed `${prefix}${N}-…` branch", () => {
-  const { result, calls } = runHelper(
+test("branch-only fallback opens a PR for the approved pushed branch", () => {
+  const { result, calls, gitCalls } = runHelper(
     `
 case "$1 $2" in
-  "api repos/owner/repo/branches")
-    # Paginated branches listing — return one matching branch.
-    printf 'mu-13-something\\n'
-    ;;
-  "api repos/owner/repo/branches/mu-13-something")
-    if [[ "$*" == *committer.date* ]]; then
-      printf '2024-01-01T00:00:00Z\\n'
-    else
-      printf 'abc123\\n'
-    fi
-    ;;
-  "api repos/owner/repo/commits/abc123")
+  "api repos/owner/repo/commits/${expectedSha}")
     printf 'feat: do the thing\\n'
     ;;
   "pr create")
@@ -197,10 +200,12 @@ case "$1 $2" in
     ;;
 esac
 `,
-    "ralph_open_pr_for_pushed_branch 13 multi-user mu-",
+    `ralph_open_pr_for_pushed_branch 13 multi-user mu- ${expectedBranch} ${expectedSha}`,
+    `printf '${expectedSha}\\trefs/heads/${expectedBranch}\\n'`,
   );
 
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(gitCalls.trim(), `ls-remote --heads origin refs/heads/${expectedBranch}`);
   assert.match(calls, /pr create --repo owner\/repo --base multi-user --head mu-13-something/);
   assert.match(calls, /--title feat: do the thing/);
 });
@@ -211,72 +216,38 @@ test("branch-only fallback no-ops when prefix is empty", () => {
 echo "should not be called: $*" >&2
 exit 99
 `,
-    'ralph_open_pr_for_pushed_branch 13 multi-user ""',
+    `ralph_open_pr_for_pushed_branch 13 multi-user "" ${expectedBranch} ${expectedSha}`,
   );
 
   assert.equal(result.status, 1, result.stderr);
   assert.equal(calls.trim(), "", "gh must not be invoked when branch_prefix is empty");
 });
 
-test("branch-only fallback no-ops when no matching branch exists", () => {
+test("branch-only fallback no-ops when the approved branch is not pushed", () => {
+  const { result, calls, gitCalls } = runHelper(
+    `
+echo "unexpected gh call: $*" >&2
+exit 2
+`,
+    `ralph_open_pr_for_pushed_branch 13 multi-user mu- ${expectedBranch} ${expectedSha}`,
+    "printf ''",
+  );
+
+  assert.equal(result.status, 1, result.stderr);
+  assert.equal(gitCalls.trim(), `ls-remote --heads origin refs/heads/${expectedBranch}`);
+  assert.doesNotMatch(calls, /pr create/);
+});
+
+test("branch-only fallback rejects a pushed branch at an unapproved SHA", () => {
   const { result, calls } = runHelper(
     `
-case "$1 $2" in
-  "api repos/owner/repo/branches")
-    # No branches match the prefix — return empty.
-    printf ''
-    ;;
-  *)
-    echo "unexpected gh call: $*" >&2
-    exit 2
-    ;;
-esac
+echo "unexpected gh call: $*" >&2
+exit 2
 `,
-    "ralph_open_pr_for_pushed_branch 13 multi-user mu-",
+    `ralph_open_pr_for_pushed_branch 13 multi-user mu- ${expectedBranch} ${expectedSha}`,
+    "printf '1111111111111111111111111111111111111111\\trefs/heads/mu-13-something\\n'",
   );
 
   assert.equal(result.status, 1, result.stderr);
   assert.doesNotMatch(calls, /pr create/);
-});
-
-test("branch-only fallback picks the most recently committed matching branch", () => {
-  const { result, calls } = runHelper(
-    `
-case "$1 $2" in
-  "api repos/owner/repo/branches")
-    # Two matching branches; stale one sorts first (mimics API/alphabetical order).
-    printf 'mu-13-old\\nmu-13-new\\n'
-    ;;
-  "api repos/owner/repo/branches/mu-13-old")
-    if [[ "$*" == *committer.date* ]]; then
-      printf '2024-01-01T00:00:00Z\\n'
-    else
-      printf 'oldsha\\n'
-    fi
-    ;;
-  "api repos/owner/repo/branches/mu-13-new")
-    if [[ "$*" == *committer.date* ]]; then
-      printf '2024-06-01T00:00:00Z\\n'
-    else
-      printf 'newsha\\n'
-    fi
-    ;;
-  "api repos/owner/repo/commits/newsha")
-    printf 'feat: latest work\\n'
-    ;;
-  "pr create")
-    exit 0
-    ;;
-  *)
-    echo "unexpected gh call: $*" >&2
-    exit 2
-    ;;
-esac
-`,
-    "ralph_open_pr_for_pushed_branch 13 multi-user mu-",
-  );
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(calls, /pr create --repo owner\/repo --base multi-user --head mu-13-new/);
-  assert.doesNotMatch(calls, /--head mu-13-old/);
 });
