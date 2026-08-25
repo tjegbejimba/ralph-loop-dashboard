@@ -224,6 +224,151 @@ prd_state_has_live_claim() {
   return 1
 }
 
+# prd_launcher_setup_is_exclusive
+# Proves that this process owns both launcher setup locks and that no separate
+# controller-owned launcher pidfile belongs to another process.
+prd_launcher_pid_is_current() {
+  local launcher_pid="$1"
+  [[ "$launcher_pid" == "$$" ]] && return 0
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      local current_winpid
+      current_winpid=$(ps -p "$$" -l 2>/dev/null | awk '
+        NR > 1 && $1 ~ /^[0-9]+$/ && $4 ~ /^[0-9]+$/ { print $4; exit }
+      ') || return 1
+      [[ -n "$current_winpid" && "$launcher_pid" == "$current_winpid" ]]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+prd_launcher_setup_is_exclusive() {
+  local repo_root common_git_dir expected_token owner token lockdir
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  common_git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common_git_dir" in
+    /*|[A-Za-z]:/*) ;;
+    *) common_git_dir="$repo_root/$common_git_dir" ;;
+  esac
+  common_git_dir=$(cd "$common_git_dir" 2>/dev/null && pwd -P) || return 1
+  expected_token="${RALPH_LAUNCH_TOKEN:-}"
+
+  for lockdir in "$STATE_DIR/launch.lock" "$common_git_dir/ralph-launch.lock"; do
+    [[ -d "$lockdir" && -f "$lockdir/owner" ]] || return 1
+    owner=$(cat "$lockdir/owner" 2>/dev/null) || return 1
+    [[ "$owner" =~ ^[1-9][0-9]*$ && "$owner" == "$$" ]] || return 1
+
+    if [[ -n "$expected_token" ]]; then
+      [[ -f "$lockdir/token" ]] || return 1
+      token=$(cat "$lockdir/token" 2>/dev/null) || return 1
+      [[ "$token" == "$expected_token" ]] || return 1
+    elif [[ -e "$lockdir/token" ]]; then
+      return 1
+    fi
+  done
+
+  local launcher_pid_file="$STATE_DIR/launcher.pid"
+  if [[ -e "$launcher_pid_file" ]]; then
+    local launcher_pid
+    [[ -f "$launcher_pid_file" ]] || return 1
+    launcher_pid=$(cat "$launcher_pid_file" 2>/dev/null) || return 1
+    [[ "$launcher_pid" =~ ^[1-9][0-9]*$ ]] || return 1
+    prd_launcher_pid_is_current "$launcher_pid" || return 1
+  fi
+}
+
+# prd_run_has_worker_worktree
+# Returns 0 when any linked worktree exists, 1 when none exists, and 2 when
+# worktree evidence cannot be inspected. Zero-registration recovery cannot
+# safely distinguish an unregistered worker worktree from an unrelated one.
+prd_run_has_worker_worktree() {
+  local repo_root worktrees worktree_path branch_ref
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 2
+  repo_root=$(cd "$repo_root" 2>/dev/null && pwd -P) || return 2
+  worktrees=$(git worktree list --porcelain 2>/dev/null) || return 2
+
+  while IFS=$'\t' read -r worktree_path branch_ref; do
+    [[ -n "$worktree_path" ]] || continue
+    worktree_path=$(cd "$worktree_path" 2>/dev/null && pwd -P) || return 2
+    [[ "$worktree_path" != "$repo_root" ]] || continue
+    return 0
+  done < <(
+    printf '%s\n' "$worktrees" | awk '
+      $1 == "worktree" {
+        if (path != "") print path "\t" branch
+        path=substr($0, 10)
+        branch=""
+        next
+      }
+      $1 == "branch" { branch=$2 }
+      END { if (path != "") print path "\t" branch }
+    '
+  )
+  return 1
+}
+
+# prd_zero_registration_retirement_reason RUN_ID
+# Prints the explicit retirement reason only after proving the run crashed
+# before any worker, claim, session, worktree, or separate launcher registered.
+prd_zero_registration_retirement_reason() {
+  local run_id="$1"
+  local run_dir="$STATE_DIR/runs/$run_id"
+  local status_file="$run_dir/status.json"
+  local session_ledger="$run_dir/copilot-sessions.jsonl"
+
+  if [[ ! -f "$status_file" ]] || ! jq -e '
+    type == "object"
+    and (.items | type == "object")
+    and (.items | length == 0)
+  ' "$status_file" >/dev/null 2>&1; then
+    echo "ERROR: Run '$run_id' has worker registration evidence or invalid status evidence" >&2
+    return 1
+  fi
+  if [[ ! -f "$STATE_FILE" ]] || ! jq -e '
+    type == "object"
+    and (.claims | type == "object")
+    and (.claims | length == 0)
+  ' "$STATE_FILE" >/dev/null 2>&1; then
+    echo "ERROR: Run '$run_id' lacks explicit empty claim evidence" >&2
+    return 1
+  fi
+  if [[ -e "$session_ledger" ]]; then
+    echo "ERROR: Run '$run_id' has Copilot session registration evidence" >&2
+    return 1
+  fi
+  if ! prd_launcher_setup_is_exclusive; then
+    echo "ERROR: Run '$run_id' lacks exclusive launcher shutdown evidence" >&2
+    return 1
+  fi
+  if ! declare -F scoped_ralph_processes >/dev/null 2>&1; then
+    echo "ERROR: Run '$run_id' cannot inspect Ralph process evidence" >&2
+    return 1
+  fi
+  local live_processes
+  live_processes=$(scoped_ralph_processes strict) || {
+    echo "ERROR: Run '$run_id' could not inspect Ralph process evidence" >&2
+    return 1
+  }
+  if [[ -n "$live_processes" ]]; then
+    echo "ERROR: Run '$run_id' still has a live Ralph process" >&2
+    return 1
+  fi
+
+  local worktree_rc=0
+  prd_run_has_worker_worktree || worktree_rc=$?
+  if [[ "$worktree_rc" -eq 0 ]]; then
+    echo "ERROR: Run '$run_id' still has a Ralph worker worktree" >&2
+    return 1
+  elif [[ "$worktree_rc" -ne 1 ]]; then
+    echo "ERROR: Run '$run_id' could not inspect Ralph worker worktrees" >&2
+    return 1
+  fi
+
+  printf '%s\n' "abandoned before worker registration (zero-item guarded recovery)"
+}
+
 # prd_branch_worktree BRANCH_NAME
 # Prints the worktree path using BRANCH_NAME, if any.
 prd_branch_worktree() {
@@ -251,6 +396,16 @@ prd_validate_ownership_records() {
       and (.[0].remote | type == "string" and length > 0)
       and (.[0].delivery_branch | type == "string" and length > 0)
       and (.[0].initial_base_sha | type == "string" and length > 0)
+      and (.[0].retirement_pending == null or (
+        (.[0].retirement_pending | type == "object")
+        and .[0].retirement_pending.reason
+          == "abandoned before worker registration (zero-item guarded recovery)"
+        and (.[0].retirement_pending.retired_by_run_id
+          | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+        and (.[0].retirement_pending.expected_branch_tip
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and (.[0].retirement_pending.recorded_at | type == "string" and length > 0)
+      ))
       and (.[0].retired_at == null or (.[0].retired_at | type == "string"))
     ' "$ownership_file" >/dev/null 2>&1; then
       shopt -u nullglob
@@ -303,17 +458,30 @@ retire_owned_prd_branch() {
     and (.remote | type == "string" and length > 0)
     and (.delivery_branch | type == "string" and length > 0)
     and (.initial_base_sha | type == "string" and length > 0)
+    and (.retirement_pending == null or (
+      (.retirement_pending | type == "object")
+      and .retirement_pending.reason
+        == "abandoned before worker registration (zero-item guarded recovery)"
+      and (.retirement_pending.retired_by_run_id
+        | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+      and (.retirement_pending.expected_branch_tip
+        | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+      and (.retirement_pending.recorded_at | type == "string" and length > 0)
+    ))
     and .retired_at == null' \
     "$ownership_file" >/dev/null 2>&1; then
     echo "ERROR: Ownership evidence for run '$owner_run_id' is invalid or already retired" >&2
     return 1
   fi
 
+  local ownership_expected
+  ownership_expected=$(jq -cS . "$ownership_file") || return 1
+
   local prd_number branch_name remote frozen_base
-  prd_number=$(jq -r '.prd_number' "$ownership_file")
-  branch_name=$(jq -r '.branch_name' "$ownership_file")
-  remote=$(jq -r '.remote' "$ownership_file")
-  frozen_base=$(jq -r '.initial_base_sha' "$ownership_file")
+  prd_number=$(printf '%s\n' "$ownership_expected" | jq -r '.prd_number')
+  branch_name=$(printf '%s\n' "$ownership_expected" | jq -r '.branch_name')
+  remote=$(printf '%s\n' "$ownership_expected" | jq -r '.remote')
+  frozen_base=$(printf '%s\n' "$ownership_expected" | jq -r '.initial_base_sha')
 
   if ! [[ "$prd_number" =~ ^[1-9][0-9]*$ \
     && "$remote" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ \
@@ -332,8 +500,22 @@ retire_owned_prd_branch() {
     return 1
   fi
 
-  if ! prd_run_is_terminal "$owner_run_id"; then
-    echo "ERROR: Run '$owner_run_id' is not terminal; refusing to retire '$branch_name'" >&2
+  local retirement_reason pending_reason pending_retired_by pending_expected_tip
+  pending_reason=$(printf '%s\n' "$ownership_expected" | jq -r '.retirement_pending.reason // empty')
+  pending_retired_by=$(printf '%s\n' "$ownership_expected" | jq -r '.retirement_pending.retired_by_run_id // empty')
+  pending_expected_tip=$(printf '%s\n' "$ownership_expected" | jq -r '.retirement_pending.expected_branch_tip // empty')
+  if [[ -n "$pending_reason" ]]; then
+    if ! retirement_reason=$(prd_zero_registration_retirement_reason "$owner_run_id") \
+      || [[ "$retirement_reason" != "$pending_reason" \
+        || "$pending_expected_tip" != "$frozen_base" ]]; then
+      echo "ERROR: Pending retirement evidence for run '$owner_run_id' is no longer safe" >&2
+      return 1
+    fi
+    retired_by_run_id="$pending_retired_by"
+  elif prd_run_is_terminal "$owner_run_id"; then
+    retirement_reason="terminal stale PRD integration branch"
+  elif ! retirement_reason=$(prd_zero_registration_retirement_reason "$owner_run_id"); then
+    echo "ERROR: Run '$owner_run_id' is not terminal and does not qualify for guarded abandonment; refusing to retire '$branch_name'" >&2
     return 1
   fi
   if prd_run_has_live_worker "$owner_run_id"; then
@@ -394,15 +576,33 @@ retire_owned_prd_branch() {
     echo "ERROR: Branch '$branch_name' contains delivery beyond frozen base '$frozen_base'; refusing retirement" >&2
     return 1
   fi
+  if [[ "$retirement_reason" != "terminal stale PRD integration branch" \
+    && "$branch_present" -eq 0 && -z "$pending_reason" ]]; then
+    echo "ERROR: Guarded abandonment requires local branch '$branch_name' at its frozen base" >&2
+    return 1
+  fi
 
   # Recheck state under the worker state lock, then commit ownership, ref, and
   # active-run retirement without exposing a partially-cleared active guard.
   state_lock || return 1
-  if ! prd_run_is_terminal "$owner_run_id" \
+  local rechecked_reason=""
+  if [[ "$retirement_reason" == "terminal stale PRD integration branch" ]]; then
+    prd_run_is_terminal "$owner_run_id" && rechecked_reason="$retirement_reason"
+  else
+    rechecked_reason=$(prd_zero_registration_retirement_reason "$owner_run_id") || true
+  fi
+  if [[ "$rechecked_reason" != "$retirement_reason" ]] \
     || prd_run_has_live_worker "$owner_run_id" \
     || prd_state_has_live_claim; then
     state_unlock
     echo "ERROR: Run '$owner_run_id' became active during retirement; refusing '$branch_name'" >&2
+    return 1
+  fi
+  local ownership_current
+  ownership_current=$(jq -cS . "$ownership_file" 2>/dev/null) || true
+  if [[ "$ownership_current" != "$ownership_expected" ]]; then
+    state_unlock
+    echo "ERROR: Ownership evidence for run '$owner_run_id' changed during retirement" >&2
     return 1
   fi
 
@@ -424,8 +624,40 @@ retire_owned_prd_branch() {
     fi
   fi
 
-  local timestamp tmp state_tmp=""
+  local timestamp tmp state_tmp="" pending_tmp="" partial_failure_state
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  if [[ "$retirement_reason" == "terminal stale PRD integration branch" ]]; then
+    partial_failure_state="branchless ownership remains recoverable"
+  else
+    partial_failure_state="pending ownership remains recoverable"
+  fi
+  if [[ "$retirement_reason" != "terminal stale PRD integration branch" \
+    && -z "$pending_reason" ]]; then
+    pending_tmp=$(mktemp "$(dirname "$ownership_file")/.ownership-pending.XXXXXX") || {
+      state_unlock
+      return 1
+    }
+    if ! jq \
+      --arg reason "$retirement_reason" \
+      --arg retired_by_run_id "$retired_by_run_id" \
+      --arg expected_branch_tip "$branch_tip" \
+      --arg recorded_at "$timestamp" \
+      '.retirement_pending = {
+        reason: $reason,
+        retired_by_run_id: $retired_by_run_id,
+        expected_branch_tip: $expected_branch_tip,
+        recorded_at: $recorded_at
+      }' "$ownership_file" >"$pending_tmp" \
+      || ! mv "$pending_tmp" "$ownership_file"; then
+      rm -f "$pending_tmp"
+      state_unlock
+      echo "ERROR: Failed to durably stage guarded branch retirement" >&2
+      return 1
+    fi
+    pending_reason="$retirement_reason"
+    pending_expected_tip="$branch_tip"
+  fi
+
   tmp=$(mktemp "$(dirname "$ownership_file")/.ownership-retired.XXXXXX") || {
     state_unlock
     return 1
@@ -433,9 +665,11 @@ retire_owned_prd_branch() {
   if ! jq \
     --arg retired_at "$timestamp" \
     --arg retired_by_run_id "$retired_by_run_id" \
+    --arg retirement_reason "$retirement_reason" \
     '.retired_at = $retired_at
     | .retired_by_run_id = $retired_by_run_id
-    | .retirement_reason = "terminal stale PRD integration branch"' \
+    | .retirement_reason = $retirement_reason
+    | del(.retirement_pending)' \
     "$ownership_file" >"$tmp"; then
     rm -f "$tmp"
     state_unlock
@@ -458,7 +692,7 @@ retire_owned_prd_branch() {
       rm -f "$state_tmp"
       rm -f "$tmp"
       state_unlock
-      echo "ERROR: Failed to clear terminal PRD activation; branchless ownership remains recoverable" >&2
+      echo "ERROR: Failed to clear PRD activation; $partial_failure_state" >&2
       return 1
     fi
   fi
@@ -466,12 +700,12 @@ retire_owned_prd_branch() {
   if ! mv "$tmp" "$ownership_file"; then
     rm -f "$tmp"
     state_unlock
-    echo "ERROR: Failed to record branch retirement; branchless ownership remains recoverable" >&2
+    echo "ERROR: Failed to record branch retirement; $partial_failure_state" >&2
     return 1
   fi
 
   state_unlock
-  echo "Retired terminal stale PRD integration branch '$branch_name' from run '$owner_run_id'."
+  echo "Retired PRD integration branch '$branch_name' from run '$owner_run_id': $retirement_reason."
 }
 
 # recover_stale_prd_branch NEW_RUN_ID PRD_NUMBER BRANCH_NAME REMOTE DELIVERY_BRANCH

@@ -6,6 +6,7 @@ This document describes Ralph's recovery and reset behavior for operators and ma
 2. **Stale worker reconciliation** — what happens when workers die unexpectedly
 3. **Terminal failure exclusion** — why exhausted failures don't auto-retry
 4. **Reset budget operation** — how operators can manually retry terminal failures
+5. **Zero-registration PRD recovery** — how pre-worker crashes retire ownership
 
 ---
 
@@ -28,6 +29,45 @@ Ralph's recovery ledger was introduced in PRD #172 (Slices #173-#178). Before th
 - After upgrading to the recovery-ledger feature, existing runs continue normally.
 - Old failed items will NOT auto-retry unless you explicitly reset them (see "Reset Budget Operation" below).
 - Stale `ralph:running` labels from pre-recovery versions are reconciled (see next section).
+
+---
+
+## Zero-Registration PRD Recovery
+
+A launcher can crash after creating PRD branch ownership but before a worker
+registers. Ralph treats this differently from a terminal run. Queue contents
+record intent, not progress, so they do not make a run active by themselves.
+
+`launch.sh --cleanup` and a replacement launch may retire that ownership only
+when all of the following are positively proven:
+
+- `status.json` exists, is valid, and has an empty `items` object.
+- `state.json` exists, is valid, and has an empty `claims` object.
+- The run has no Copilot session ledger.
+- The current launcher owns both setup locks, including matching launch tokens
+  when controller-owned.
+- Any launcher pidfile resolves to the current Bash PID (or its native Windows
+  PID), and strict process inspection succeeds with no Ralph worker process.
+- `git worktree list` succeeds and contains no other linked worktree. Ralph
+  cannot safely distinguish an unregistered worker worktree from an unrelated
+  one, so either blocks this exceptional recovery path.
+- The integration branch has no worktree, pull request, or remote ref.
+- The local branch still equals the ownership record's frozen base.
+
+Missing or malformed evidence fails closed. Terminal runs retain their existing
+recovery path. A successful zero-registration retirement records
+`retirement_reason` as
+`abandoned before worker registration (zero-item guarded recovery)`, rechecks
+the ownership document under the state lock, and deletes the local ref with its
+expected old SHA before committing the retirement record. Before deleting the
+ref, Ralph durably writes `retirement_pending` with the reason and expected tip.
+If a later state or ownership write fails, the next cleanup can finish that
+specific staged deletion without treating an arbitrary missing branch as safe.
+
+Normal PRD launch writes the `setup-locks-acquired` startup phase before remote
+PRD initialization. This prevents a healthy but slow pre-registration launch
+from being killed solely because ownership setup has not yet produced a worker
+status item.
 
 ---
 
