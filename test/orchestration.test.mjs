@@ -2,9 +2,20 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { orchestrateRun, resolveOrchestrateRepoRoot } from "../extension/lib/loop-launch-controller.mjs";
 
 const queue = [{ number: 42, title: "Slice 42: Test" }];
@@ -15,6 +26,77 @@ function makeRalphRepo(prefix = "ralph-orchestrate-target-") {
   mkdirSync(join(dir, ".ralph"), { recursive: true });
   return dir;
 }
+
+test("orchestrateRun reaches safe fixture registration through the real Windows launcher", {
+  skip: process.platform !== "win32" ? "requires native Windows" : false,
+}, async () => {
+  const testDir = fileURLToPath(new URL(".", import.meta.url));
+  const sourceRoot = join(testDir, "..");
+  const root = mkdtempSync(join(tmpdir(), "ralph-gated-windows-e2e-"));
+  const repoRoot = join(root, "repo");
+  const remoteRoot = join(root, "origin.git");
+  try {
+    mkdirSync(repoRoot, { recursive: true });
+    execFileSync("git", ["init", "--quiet", "--bare", remoteRoot]);
+    execFileSync("git", ["init", "--quiet", repoRoot]);
+    execFileSync("git", ["-C", repoRoot, "checkout", "-q", "-b", "main"]);
+    execFileSync("git", ["-C", repoRoot, "config", "user.email", "fixture@example.invalid"]);
+    execFileSync("git", ["-C", repoRoot, "config", "user.name", "Ralph Fixture"]);
+    writeFileSync(join(repoRoot, "README.md"), "fixture\n");
+    execFileSync("git", ["-C", repoRoot, "add", "README.md"]);
+    execFileSync("git", ["-C", repoRoot, "commit", "-q", "-m", "fixture"]);
+    execFileSync("git", ["-C", repoRoot, "remote", "add", "origin", remoteRoot]);
+    execFileSync("git", ["-C", repoRoot, "push", "-q", "-u", "origin", "main"]);
+    const baseCommit = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+    }).trim();
+
+    const installedRalph = join(repoRoot, ".ralph");
+    mkdirSync(join(installedRalph, "lib"), { recursive: true });
+    copyFileSync(join(sourceRoot, "ralph", "launch.sh"), join(installedRalph, "launch.sh"));
+    copyFileSync(join(sourceRoot, "ralph", "lib", "state.sh"), join(installedRalph, "lib", "state.sh"));
+    writeFileSync(
+      join(installedRalph, "ralph.sh"),
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'run_dir="$(cygpath -u "$RALPH_RUN_DIR")"',
+        'printf \'{"items":{"42":{"status":"running","workerId":1,"pid":%s}}}\\n\' "$$" > "$run_dir/status.json"',
+        'printf "%s\\n" fixture-worker > "$run_dir/fixture-worker-started"',
+        "",
+      ].join("\n"),
+    );
+    chmodSync(join(installedRalph, "launch.sh"), 0o755);
+    chmodSync(join(installedRalph, "ralph.sh"), 0o755);
+
+    const result = await orchestrateRun({
+      repoRoot,
+      defaultRepoRoot: repoRoot,
+      queue,
+      runOptions: { runMode: "until-empty", parallelism: 1, model: "gpt-5.6-sol" },
+      userConfig: { allowAgentLaunch: true },
+      verify: false,
+      getLoopProcess: async () => [],
+      runPreflight: async () => ({
+        passed: true,
+        checks: [{ id: "fixture", status: "pass", blocking: true }],
+        base: { remote: "origin", branch: "main", ref: "origin/main", commit: baseCommit },
+      }),
+      startupTimeoutMs: 5000,
+      startupPollMs: 25,
+    });
+
+    assert.equal(result.ok, true, result.error);
+    assert.equal(existsSync(join(result.runDir, "fixture-worker-started")), true);
+    const startup = JSON.parse(readFileSync(join(result.runDir, "startup.json"), "utf-8"));
+    assert.equal(startup.phase, "worker-launching");
+    assert.equal(existsSync(join(repoRoot, ".ralph", "launch.lock")), false);
+    assert.equal(existsSync(join(repoRoot, ".git", "ralph-launch.lock")), false);
+    assert.equal(existsSync(join(result.runDir, "launcher.log")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
 
 test("orchestrateRun refuses agent launch unless allowAgentLaunch is enabled", async () => {
   let preflightRan = false;

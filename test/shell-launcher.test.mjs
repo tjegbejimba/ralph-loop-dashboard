@@ -2,11 +2,20 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { launchRun } from "../extension/lib/shell-launcher.mjs";
-import { resolveBashExe, toBashPath } from "../extension/lib/platform-shim.mjs";
+import { isAlive, resolveBashExe, toBashPath } from "../extension/lib/platform-shim.mjs";
 
 async function waitForFile(path, { timeoutMs = 2000 } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -251,6 +260,31 @@ test("launchRun reports error when script not found", async () => {
   }
 });
 
+test("launchRun rejects an installed launcher without the startup protocol", async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-stale-launcher-"));
+  try {
+    const runId = "20260825-120000-stale-launcher";
+    const runDir = join(tmpRepo, ".ralph", "runs", runId);
+    const mockScript = join(tmpRepo, ".ralph", "launch.sh");
+    mkdirSync(join(tmpRepo, ".ralph"), { recursive: true });
+    writeFileSync(mockScript, "#!/usr/bin/env bash\nexit 0\n", "utf-8");
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: tmpRepo,
+      runOptions: { runMode: "until-empty", parallelism: 1, model: "fixture-model" },
+      confirmStarted: async () => false,
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.error, /does not support the controller startup protocol/);
+    assert.match(result.error, /Refresh.*Ralph scripts/);
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
 test("launchRun reports immediate launcher failure instead of spawn success", async () => {
   const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-"));
   try {
@@ -276,7 +310,9 @@ test("launchRun reports immediate launcher failure instead of spawn success", as
   }
 });
 
-test("launchRun terminates POSIX launcher when startup confirmation fails", async () => {
+test("launchRun terminates POSIX launcher when startup confirmation fails", {
+  skip: process.platform === "win32" ? "requires POSIX signal semantics" : false,
+}, async () => {
   const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-"));
   try {
     const runId = "20260504-120000-timeout";
@@ -303,6 +339,162 @@ test("launchRun terminates POSIX launcher when startup confirmation fails", asyn
     assert.equal(result.success, false);
     assert.match(result.error, /Timed out waiting/);
     assert.deepEqual(killed, [{ pid: result.pid, signal: "SIGTERM" }]);
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("launchRun treats advancing setup phases as startup progress", {
+  skip: process.platform !== "win32" ? "requires native Windows timing" : false,
+}, async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-startup-progress-"));
+  try {
+    const runId = "20260825-120000-progress";
+    const runDir = join(tmpRepo, ".ralph", "runs", runId);
+    const startupPath = join(runDir, "startup.json");
+    const mockScript = join(tmpRepo, "launch-progress.sh");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      mockScript,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'exec >> "$RALPH_LAUNCH_LOG" 2>&1',
+        `printf '%s\\n' '{"sequence":1,"phase":"prd-ready"}' > '${toBashPath(startupPath)}'`,
+        "sleep 0.4",
+        `printf '%s\\n' '{"sequence":2,"phase":"worktree-ready"}' > '${toBashPath(startupPath)}'`,
+        "sleep 0.4",
+        `printf '%s\\n' '{"sequence":3,"phase":"worker-started"}' > '${toBashPath(startupPath)}'`,
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: tmpRepo,
+      runOptions: { runMode: "until-empty", parallelism: 1, model: "fixture-model" },
+      shellScript: mockScript,
+      isWindows: process.platform === "win32",
+      resolveBash: resolveTestBash,
+      confirmStarted: async () => {
+        if (!existsSync(startupPath)) return false;
+        const { readFileSync } = await import("node:fs");
+        return readFileSync(startupPath, "utf-8").includes('"sequence":3');
+      },
+      getStartupProgress: async () => {
+        if (!existsSync(startupPath)) return null;
+        const { readFileSync } = await import("node:fs");
+        return readFileSync(startupPath, "utf-8");
+      },
+      startupTimeoutMs: 650,
+      startupPollMs: 10,
+    });
+    assert.equal(result.success, true, result.error);
+    assert.equal(result.success, true, result.error);
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("launchRun enforces a hard cap despite continuous startup progress", async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-startup-hard-cap-"));
+  try {
+    const runId = "20260825-120000-hard-cap";
+    const runDir = join(tmpRepo, ".ralph", "runs", runId);
+    const mockScript = join(tmpRepo, "launch-progress-forever.sh");
+    writeFileSync(mockScript, "#!/usr/bin/env bash\nsleep 5\n", "utf-8");
+    let sequence = 0;
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: tmpRepo,
+      runOptions: { runMode: "until-empty", parallelism: 1, model: "fixture-model" },
+      shellScript: mockScript,
+      isWindows: process.platform === "win32",
+      resolveBash: resolveTestBash,
+      confirmStarted: async () => false,
+      getStartupProgress: async () => String(++sequence),
+      startupTimeoutMs: 100,
+      startupMaxTimeoutMs: 250,
+      startupPollMs: 10,
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.error, /hard startup limit/i);
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("launchRun surfaces diagnostics and removes token-owned setup locks after a Windows timeout", {
+  skip: process.platform !== "win32" ? "requires native Windows" : false,
+}, async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-windows-timeout-cleanup-"));
+  try {
+    execFileSync("git", ["init", "--quiet", tmpRepo]);
+    const runId = "20260825-120000-timeout-cleanup";
+    const runDir = join(tmpRepo, ".ralph", "runs", runId);
+    const setupLock = join(tmpRepo, ".ralph", "launch.lock");
+    const commonLock = join(tmpRepo, ".git", "ralph-launch.lock");
+    const ownershipPath = join(runDir, "ownership.json");
+    const childPidPath = join(runDir, "child.pid");
+    const childScript = join(runDir, "child.ps1");
+    const mockScript = join(tmpRepo, ".ralph", "launch.sh");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      childScript,
+      [
+        `[IO.File]::WriteAllText('${childPidPath.replaceAll("'", "''")}', [string]$PID)`,
+        "Start-Sleep -Seconds 10",
+        "",
+      ].join("\n"),
+    );
+    writeFileSync(
+      mockScript,
+      [
+        "#!/usr/bin/env bash",
+        "# RALPH_LAUNCH_PROTOCOL: 1",
+        "set -euo pipefail",
+        'exec >> "$RALPH_LAUNCH_LOG" 2>&1',
+        `setup_lock='${toBashPath(setupLock)}'`,
+        `common_lock='${toBashPath(commonLock)}'`,
+        `run_dir='${toBashPath(runDir)}'`,
+        'mkdir -p "$setup_lock" "$common_lock" "$run_dir"',
+        'printf "%s\\n" "${RALPH_LAUNCH_TOKEN:-missing}" > "$setup_lock/token"',
+        'printf "%s\\n" "${RALPH_LAUNCH_TOKEN:-missing}" > "$common_lock/token"',
+        'trap \'rm -rf "$common_lock" "$setup_lock"\' EXIT',
+        'printf "%s\\n" \'{"run_id":"fixture"}\' > "$run_dir/ownership.json"',
+        'echo "[fixture-post-ownership] waiting before worker registration" >&2',
+        `powershell.exe -NoLogo -NoProfile -File "$(cygpath -w '${toBashPath(childScript)}')" &`,
+        "sleep 5",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: tmpRepo,
+      runOptions: { runMode: "until-empty", parallelism: 1, model: "fixture-model" },
+      isWindows: true,
+      resolveBash: resolveTestBash,
+      confirmStarted: async () => false,
+      startupTimeoutMs: 1500,
+      startupPollMs: 10,
+    });
+
+    assert.equal(result.success, false);
+    assert.equal(existsSync(ownershipPath), true, "fixture must reach post-ownership setup");
+    assert.match(result.error, /\[fixture-post-ownership\]/);
+    assert.equal(existsSync(setupLock), false, "per-repo setup lock must be released");
+    assert.equal(existsSync(commonLock), false, "common-gitdir setup lock must be released");
+    assert.equal(await waitForFile(childPidPath), true, "fixture descendant must start");
+    const childPid = Number(readFileSync(childPidPath, "utf-8").trim());
+    assert.equal(isAlive(childPid), false, "Windows timeout must terminate launcher descendants");
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
@@ -335,12 +527,43 @@ test("launchRun writes Windows launcher pidfile for status and stop tracking", a
     });
 
     assert.equal(result.success, true, result.error);
-    const { readFileSync, existsSync } = await import("node:fs");
     const pidfile = join(tmpRepo, ".ralph", "launcher.pid");
     assert.equal(existsSync(pidfile), true);
     assert.equal(Number(readFileSync(pidfile, "utf-8")) > 0, true);
     assert.equal(await waitForFile(argsOut), true, "Windows launcher should receive args");
     assert.equal(readFileSync(argsOut, "utf-8").trim(), "--foreground");
+  } finally {
+    rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+test("launchRun does not replace a live Windows launcher pidfile", async () => {
+  const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-live-launcher-"));
+  try {
+    const runId = "20260825-120000-live-launcher";
+    const runDir = join(tmpRepo, ".ralph", "runs", runId);
+    const mockScript = join(tmpRepo, ".ralph", "launch.sh");
+    const markerPath = join(tmpRepo, "unexpected-launch");
+    mkdirSync(join(tmpRepo, ".ralph"), { recursive: true });
+    writeFileSync(mockScript, `#!/usr/bin/env bash\ntouch '${toBashPath(markerPath)}'\n`, "utf-8");
+    writeFileSync(join(tmpRepo, ".ralph", "launcher.pid"), String(process.pid), "utf-8");
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: tmpRepo,
+      runOptions: { runMode: "until-empty", parallelism: 1, model: "fixture-model" },
+      isWindows: true,
+      resolveBash: resolveTestBash,
+    });
+
+    assert.equal(result.success, false);
+    assert.match(result.error, new RegExp(`already running with PID ${process.pid}`));
+    assert.equal(existsSync(markerPath), false);
+    assert.equal(
+      readFileSync(join(tmpRepo, ".ralph", "launcher.pid"), "utf-8"),
+      String(process.pid),
+    );
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
   }
@@ -364,6 +587,7 @@ test("launchRun starts the repo-local launcher and confirms worker registration 
       mockScript,
       [
         "#!/usr/bin/env bash",
+        "# RALPH_LAUNCH_PROTOCOL: 1",
         "set -euo pipefail",
         `printf '%s\\n' '{"worker":{"pid":12345}}' > '${toBashPath(statePath)}'`,
         "sleep 2",
@@ -454,7 +678,11 @@ test("launchRun terminates Windows foreground worker when startup confirmation f
     const mockScript = join(tmpRepo, ".ralph", "launch.sh");
     let killed = null;
     mkdirSync(join(tmpRepo, ".ralph"), { recursive: true });
-    writeFileSync(mockScript, "#!/usr/bin/env bash\nsleep 5\n", "utf-8");
+    writeFileSync(
+      mockScript,
+      "#!/usr/bin/env bash\n# RALPH_LAUNCH_PROTOCOL: 1\nsleep 5\n",
+      "utf-8",
+    );
     chmodSync(mockScript, 0o755);
 
     const result = await launchRun({
