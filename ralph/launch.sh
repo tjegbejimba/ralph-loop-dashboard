@@ -1041,10 +1041,6 @@ initialize_prd_run() {
     return 1
   fi
 
-  local ownership_file="$MAIN_REPO/.ralph/runs/$run_id/ownership.json"
-  local ownership_existed=0
-  [[ -f "$ownership_file" ]] && ownership_existed=1
-
   local branch_name
   branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
   if ! (
@@ -1070,11 +1066,7 @@ initialize_prd_run() {
   fi
 
   if ! activate_prd_run "$run_id" "$prd_number"; then
-    echo "❌ Failed to activate PRD #$prd_number for run '$run_id'; rolling back new branch setup." >&2
-    if [[ "$ownership_existed" -eq 0 ]]; then
-      git -C "$MAIN_REPO" branch -D "$branch_name" >/dev/null 2>&1 || true
-      rm -f "$ownership_file"
-    fi
+    echo "❌ Failed to activate PRD #$prd_number for run '$run_id'; published ownership was preserved for guarded recovery." >&2
     return 1
   fi
 

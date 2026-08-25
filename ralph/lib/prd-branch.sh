@@ -44,7 +44,7 @@ resolve_prd_branch_name() {
   echo "$result"
 }
 
-# create_prd_ownership_record RUN_ID PRD_NUMBER BRANCH_NAME REMOTE DELIVERY_BRANCH BASE_SHA
+# create_prd_ownership_record RUN_ID PRD_NUMBER BRANCH_NAME REMOTE DELIVERY_BRANCH BASE_SHA [OWNED_TIP_SHA] [RESUMED_FROM_RUN_ID]
 # Creates a durable ownership record for a PRD integration branch.
 # Record is stored at .ralph/runs/$RUN_ID/ownership.json
 #
@@ -55,6 +55,8 @@ resolve_prd_branch_name() {
 #   REMOTE          — Git remote name (e.g., "origin")
 #   DELIVERY_BRANCH — target branch for final delivery (e.g., "main")
 #   BASE_SHA        — initial base commit SHA
+#   OWNED_TIP_SHA   — branch tip at ownership acquisition (defaults to BASE_SHA)
+#   RESUMED_FROM_RUN_ID — prior run that transferred ownership, when applicable
 #
 # Returns: 0 on success, 1 on failure
 create_prd_ownership_record() {
@@ -64,6 +66,8 @@ create_prd_ownership_record() {
   local remote="$4"
   local delivery_branch="$5"
   local base_sha="$6"
+  local owned_tip_sha="${7:-$base_sha}"
+  local resumed_from_run_id="${8:-}"
 
   if ! [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     echo "ERROR: Invalid run ID '$run_id'" >&2
@@ -71,6 +75,16 @@ create_prd_ownership_record() {
   fi
   if ! [[ "$prd_number" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: Invalid PRD number '$prd_number'" >&2
+    return 1
+  fi
+  if ! [[ "$base_sha" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ \
+    && "$owned_tip_sha" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]]; then
+    echo "ERROR: Invalid PRD ownership commit identity" >&2
+    return 1
+  fi
+  if [[ -n "$resumed_from_run_id" \
+    && ! "$resumed_from_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    echo "ERROR: Invalid prior run ID '$resumed_from_run_id'" >&2
     return 1
   fi
 
@@ -90,6 +104,8 @@ create_prd_ownership_record() {
     --arg remote "$remote" \
     --arg delivery_branch "$delivery_branch" \
     --arg initial_base_sha "$base_sha" \
+    --arg owned_tip_sha "$owned_tip_sha" \
+    --arg resumed_from_run_id "$resumed_from_run_id" \
     --arg created_at "$timestamp" \
     '{
       run_id: $run_id,
@@ -98,8 +114,13 @@ create_prd_ownership_record() {
       remote: $remote,
       delivery_branch: $delivery_branch,
       initial_base_sha: $initial_base_sha,
+      owned_tip_sha: $owned_tip_sha,
       created_at: $created_at
-    }' > "$tmp"; then
+    }
+    | if $resumed_from_run_id != ""
+      then .resumed_from_run_id = $resumed_from_run_id
+      else .
+      end' > "$tmp"; then
     rm -f "$tmp"
     return 1
   fi
@@ -133,6 +154,116 @@ verify_prd_ownership() {
     "$ownership_file" >/dev/null 2>&1
 }
 
+# prd_transferred_ownership_is_proven RUN_ID BRANCH_NAME OWNED_TIP
+# Proves that a run acquired this exact tip through a completed predecessor
+# transfer. This permits a lagging local ref to remain untouched until the
+# normal branch-setup seam compare-and-swap fast-forwards it.
+prd_transferred_ownership_is_proven() {
+  local run_id="$1"
+  local branch_name="$2"
+  local owned_tip="$3"
+  local ownership_file="$STATE_DIR/runs/$run_id/ownership.json"
+  local resumed_from_run_id remote delivery_branch prior_ownership_file
+
+  if ! [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ \
+    && "$owned_tip" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]] \
+    || [[ ! -f "$ownership_file" ]]; then
+    return 1
+  fi
+  resumed_from_run_id=$(jq -r '.resumed_from_run_id // empty' "$ownership_file") \
+    || return 1
+  remote=$(jq -r '.remote // empty' "$ownership_file") || return 1
+  delivery_branch=$(jq -r '.delivery_branch // empty' "$ownership_file") || return 1
+  if ! [[ "$resumed_from_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    return 1
+  fi
+  prior_ownership_file="$STATE_DIR/runs/$resumed_from_run_id/ownership.json"
+  [[ -f "$prior_ownership_file" ]] || return 1
+
+  jq -e \
+    --arg run_id "$run_id" \
+    --arg branch_name "$branch_name" \
+    --arg remote "$remote" \
+    --arg delivery_branch "$delivery_branch" \
+    --arg owned_tip "$owned_tip" \
+    '.retired_by_run_id == $run_id
+    and (.retirement_reason
+      | . == "terminal PRD ownership transferred"
+        or . == "zero-registration PRD ownership transferred")
+    and .transferred_tip_sha == $owned_tip
+    and .branch_name == $branch_name
+    and .remote == $remote
+    and .delivery_branch == $delivery_branch
+    and .retired_at != null' \
+    "$prior_ownership_file" >/dev/null 2>&1
+}
+
+# prd_remote_branch_tip REMOTE BRANCH_NAME
+# Prints the exact remote branch tip. Returns 2 when the ref is absent and 1
+# when remote evidence cannot be inspected unambiguously.
+prd_remote_branch_tip() {
+  local remote="$1"
+  local branch_name="$2"
+  local output
+  if ! output=$(git ls-remote --heads "$remote" "refs/heads/$branch_name"); then
+    return 1
+  fi
+  if [[ -z "$output" ]]; then
+    return 2
+  fi
+
+  local count tip ref
+  count=$(printf '%s\n' "$output" | awk 'NF { count++ } END { print count + 0 }')
+  [[ "$count" -eq 1 ]] || return 1
+  read -r tip ref <<<"$output"
+  [[ "$ref" == "refs/heads/$branch_name" \
+    && "$tip" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]] || return 1
+  printf '%s\n' "$tip"
+}
+
+# prd_publish_owned_branch REMOTE BRANCH_NAME EXPECTED_TIP
+# Publishes only when the remote ref is absent, guarded by an expected-empty
+# lease, then proves the resulting remote tip.
+prd_publish_owned_branch() {
+  local remote="$1"
+  local branch_name="$2"
+  local expected_tip="$3"
+  local local_tip remote_tip remote_rc=0
+
+  local_tip=$(git rev-parse "refs/heads/$branch_name") || return 1
+  if [[ "$local_tip" != "$expected_tip" ]]; then
+    echo "ERROR: Owned branch '$branch_name' moved from expected tip '$expected_tip'" >&2
+    return 1
+  fi
+
+  remote_tip=$(prd_remote_branch_tip "$remote" "$branch_name") || remote_rc=$?
+  if [[ "$remote_rc" -eq 0 ]]; then
+    if [[ "$remote_tip" != "$expected_tip" ]]; then
+      echo "ERROR: Remote branch '$remote/$branch_name' moved to unexpected tip '$remote_tip'" >&2
+      return 1
+    fi
+    return 0
+  elif [[ "$remote_rc" -ne 2 ]]; then
+    echo "ERROR: Failed to verify whether remote branch '$remote/$branch_name' exists" >&2
+    return 1
+  fi
+
+  if ! git push --atomic \
+    --force-with-lease="refs/heads/$branch_name:" \
+    "$remote" \
+    "refs/heads/$branch_name:refs/heads/$branch_name" >/dev/null 2>&1; then
+    echo "ERROR: Failed to publish owned branch '$remote/$branch_name'" >&2
+    return 1
+  fi
+
+  remote_rc=0
+  remote_tip=$(prd_remote_branch_tip "$remote" "$branch_name") || remote_rc=$?
+  if [[ "$remote_rc" -ne 0 || "$remote_tip" != "$expected_tip" ]]; then
+    echo "ERROR: Could not prove published branch '$remote/$branch_name' at '$expected_tip'" >&2
+    return 1
+  fi
+}
+
 # prd_run_is_terminal RUN_ID
 # Proves that every queued item in a prior run has a terminal status.
 prd_run_is_terminal() {
@@ -164,6 +295,42 @@ prd_run_is_terminal() {
         | index($item_status)) != null
     )
   ' "$queue_file" >/dev/null 2>&1
+}
+
+# prd_terminal_remote_tip_is_proven RUN_ID REMOTE_TIP
+# Proves that terminal slice-integration evidence accounts for the exact remote
+# tip. A descendant commit not recorded as an integrated slice is ambiguous.
+prd_terminal_remote_tip_is_proven() {
+  local run_id="$1"
+  local remote_tip="$2"
+  local status_file="$STATE_DIR/runs/$run_id/status.json"
+  local commits commit
+
+  [[ -f "$status_file" ]] || return 1
+  if ! jq -e --arg remote_tip "$remote_tip" '
+    type == "object"
+    and (.items | type == "object")
+    and (([.items[] | select(.status == "slice-integrated")]) as $integrated
+      | ($integrated | length) > 0
+        and all($integrated[];
+          (.integrated_commit
+            | type == "string"
+              and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$")))
+        and any($integrated[]; .integrated_commit == $remote_tip))
+  ' "$status_file" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  commits=$(jq -r '
+    .items[]
+    | select(.status == "slice-integrated")
+    | .integrated_commit
+  ' "$status_file") || return 1
+  while IFS= read -r commit; do
+    [[ -n "$commit" ]] || continue
+    git cat-file -e "${commit}^{commit}" 2>/dev/null || return 1
+    git merge-base --is-ancestor "$commit" "$remote_tip" || return 1
+  done <<<"$commits"
 }
 
 # prd_pid_is_live_ralph PID
@@ -396,6 +563,24 @@ prd_validate_ownership_records() {
       and (.[0].remote | type == "string" and length > 0)
       and (.[0].delivery_branch | type == "string" and length > 0)
       and (.[0].initial_base_sha | type == "string" and length > 0)
+      and (.[0].owned_tip_sha == null
+        or (.[0].owned_tip_sha
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$")))
+      and (.[0].resumed_from_run_id == null
+        or (.[0].resumed_from_run_id
+          | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$")))
+      and (.[0].transfer_pending == null or (
+        (.[0].transfer_pending | type == "object")
+        and (.[0].transfer_pending.new_run_id
+          | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]*$"))
+        and (.[0].transfer_pending.expected_remote_tip
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and (.[0].transfer_pending.reason
+          | . == "terminal PRD ownership transferred"
+            or . == "zero-registration PRD ownership transferred")
+        and (.[0].transfer_pending.recorded_at
+          | type == "string" and length > 0)
+      ))
       and (.[0].retirement_pending == null or (
         (.[0].retirement_pending | type == "object")
         and .[0].retirement_pending.reason
@@ -406,6 +591,9 @@ prd_validate_ownership_records() {
           | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
         and (.[0].retirement_pending.recorded_at | type == "string" and length > 0)
       ))
+      and (.[0].transferred_tip_sha == null
+        or (.[0].transferred_tip_sha
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$")))
       and (.[0].retired_at == null or (.[0].retired_at | type == "string"))
     ' "$ownership_file" >/dev/null 2>&1; then
       shopt -u nullglob
@@ -458,6 +646,7 @@ retire_owned_prd_branch() {
     and (.remote | type == "string" and length > 0)
     and (.delivery_branch | type == "string" and length > 0)
     and (.initial_base_sha | type == "string" and length > 0)
+    and .transfer_pending == null
     and (.retirement_pending == null or (
       (.retirement_pending | type == "object")
       and .retirement_pending.reason
@@ -708,6 +897,345 @@ retire_owned_prd_branch() {
   echo "Retired PRD integration branch '$branch_name' from run '$owner_run_id': $retirement_reason."
 }
 
+# transfer_owned_prd_branch OWNER_RUN_ID NEW_RUN_ID
+# Transfers a published same-PRD branch without deleting or rewriting either ref.
+# The prior record stages transfer intent before the new record is created, so an
+# interrupted transfer can be completed idempotently by the intended new run.
+transfer_owned_prd_branch() {
+  local owner_run_id="$1"
+  local new_run_id="$2"
+  local ownership_file="$STATE_DIR/runs/$owner_run_id/ownership.json"
+  local new_ownership_file="$STATE_DIR/runs/$new_run_id/ownership.json"
+
+  if ! [[ "$owner_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ \
+    && "$new_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ \
+    && "$owner_run_id" != "$new_run_id" ]]; then
+    echo "ERROR: Invalid run identity for PRD branch ownership transfer" >&2
+    return 1
+  fi
+  prd_validate_ownership_records || return 1
+  [[ -f "$ownership_file" ]] || {
+    echo "ERROR: Missing ownership evidence for run '$owner_run_id'" >&2
+    return 1
+  }
+
+  local ownership_expected
+  ownership_expected=$(jq -cS . "$ownership_file") || return 1
+  if ! printf '%s\n' "$ownership_expected" | jq -e \
+    --arg run_id "$owner_run_id" \
+    '.run_id == $run_id
+     and (.prd_number | type == "string" and test("^[1-9][0-9]*$"))
+     and (.branch_name | type == "string" and length > 0)
+     and (.remote | type == "string" and length > 0)
+     and (.delivery_branch | type == "string" and length > 0)
+     and (.initial_base_sha
+       | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+     and .retirement_pending == null
+     and .retired_at == null' >/dev/null 2>&1; then
+    echo "ERROR: Ownership evidence for run '$owner_run_id' cannot be transferred" >&2
+    return 1
+  fi
+
+  local prd_number branch_name remote delivery_branch frozen_base owned_tip
+  prd_number=$(printf '%s\n' "$ownership_expected" | jq -r '.prd_number')
+  branch_name=$(printf '%s\n' "$ownership_expected" | jq -r '.branch_name')
+  remote=$(printf '%s\n' "$ownership_expected" | jq -r '.remote')
+  delivery_branch=$(printf '%s\n' "$ownership_expected" | jq -r '.delivery_branch')
+  frozen_base=$(printf '%s\n' "$ownership_expected" | jq -r '.initial_base_sha')
+  owned_tip=$(printf '%s\n' "$ownership_expected" | jq -r '.owned_tip_sha // .initial_base_sha')
+
+  if ! [[ "$remote" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+    || ! git check-ref-format --branch "$branch_name" >/dev/null 2>&1; then
+    echo "ERROR: Ownership evidence for run '$owner_run_id' contains invalid identifiers" >&2
+    return 1
+  fi
+
+  local owner_files=() owner_file
+  while IFS= read -r owner_file; do
+    [[ -n "$owner_file" ]] && owner_files+=("$owner_file")
+  done < <(prd_active_ownership_files "$branch_name")
+  if [[ ${#owner_files[@]} -lt 1 || ${#owner_files[@]} -gt 2 ]]; then
+    echo "ERROR: Branch '$branch_name' has ambiguous ownership during transfer" >&2
+    return 1
+  fi
+  local saw_prior=0
+  for owner_file in "${owner_files[@]}"; do
+    if [[ "$owner_file" == "$ownership_file" ]]; then
+      saw_prior=1
+    elif [[ "$owner_file" != "$new_ownership_file" ]]; then
+      echo "ERROR: Branch '$branch_name' has conflicting ownership during transfer" >&2
+      return 1
+    fi
+  done
+  [[ "$saw_prior" -eq 1 ]] || {
+    echo "ERROR: Prior ownership for '$branch_name' disappeared during transfer" >&2
+    return 1
+  }
+
+  local transfer_reason status_expected=""
+  if prd_run_is_terminal "$owner_run_id"; then
+    transfer_reason="terminal PRD ownership transferred"
+    status_expected=$(jq -cS . "$STATE_DIR/runs/$owner_run_id/status.json") || return 1
+  elif transfer_reason=$(prd_zero_registration_retirement_reason "$owner_run_id"); then
+    transfer_reason="zero-registration PRD ownership transferred"
+  else
+    echo "ERROR: Run '$owner_run_id' is not terminal and cannot transfer '$branch_name'" >&2
+    return 1
+  fi
+  if prd_run_has_live_worker "$owner_run_id"; then
+    echo "ERROR: Run '$owner_run_id' still has a live worker; refusing transfer" >&2
+    return 1
+  fi
+  if prd_state_has_live_claim; then
+    echo "ERROR: Repository still has a live claim; refusing transfer" >&2
+    return 1
+  fi
+
+  local worktree_path worktree_rc=0
+  worktree_path=$(prd_branch_worktree "$branch_name") || worktree_rc=$?
+  if [[ "$worktree_rc" -ne 0 ]]; then
+    echo "ERROR: Could not inspect worktrees for '$branch_name'" >&2
+    return 1
+  fi
+  if [[ -n "$worktree_path" ]]; then
+    echo "ERROR: Branch '$branch_name' is checked out by a worktree at '$worktree_path'" >&2
+    return 1
+  fi
+
+  local pr_json
+  if ! pr_json=$("$GH" pr list --repo "$REPO" --state all --head "$branch_name" --json number); then
+    echo "ERROR: Ralph could not verify pull requests for '$branch_name'" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$pr_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    echo "ERROR: Ralph could not verify pull requests for '$branch_name': invalid response" >&2
+    return 1
+  fi
+  if [[ "$(printf '%s\n' "$pr_json" | jq 'length')" -ne 0 ]]; then
+    echo "ERROR: Branch '$branch_name' still has a pull request; refusing transfer" >&2
+    return 1
+  fi
+
+  local remote_tip remote_rc=0 fetched_tip
+  remote_tip=$(prd_remote_branch_tip "$remote" "$branch_name") || remote_rc=$?
+  if [[ "$remote_rc" -ne 0 ]]; then
+    echo "ERROR: Published branch '$remote/$branch_name' is unavailable for ownership transfer" >&2
+    return 1
+  fi
+  if ! git fetch "$remote" \
+    "refs/heads/$branch_name:refs/remotes/$remote/$branch_name" >/dev/null 2>&1; then
+    echo "ERROR: Failed to fetch published branch '$remote/$branch_name'" >&2
+    return 1
+  fi
+  fetched_tip=$(git rev-parse "refs/remotes/$remote/$branch_name") || return 1
+  if [[ "$fetched_tip" != "$remote_tip" ]]; then
+    echo "ERROR: Remote branch '$remote/$branch_name' moved while transfer evidence was fetched" >&2
+    return 1
+  fi
+  if ! git cat-file -e "${frozen_base}^{commit}" 2>/dev/null \
+    || ! git cat-file -e "${owned_tip}^{commit}" 2>/dev/null \
+    || ! git merge-base --is-ancestor "$frozen_base" "$remote_tip" \
+    || ! git merge-base --is-ancestor "$owned_tip" "$remote_tip"; then
+    echo "ERROR: Remote branch '$remote/$branch_name' does not descend from owned history" >&2
+    return 1
+  fi
+  if [[ "$remote_tip" != "$owned_tip" ]]; then
+    if [[ "$transfer_reason" == "zero-registration PRD ownership transferred" ]]; then
+      echo "ERROR: Zero-registration branch '$remote/$branch_name' moved beyond its owned tip" >&2
+      return 1
+    fi
+    if ! prd_terminal_remote_tip_is_proven "$owner_run_id" "$remote_tip"; then
+      echo "ERROR: Remote branch '$remote/$branch_name' lacks exact terminal slice-delivery evidence" >&2
+      return 1
+    fi
+  fi
+  if git show-ref --verify --quiet "refs/heads/$branch_name"; then
+    local local_tip
+    local_tip=$(git rev-parse "refs/heads/$branch_name") || return 1
+    if [[ "$local_tip" != "$remote_tip" ]]; then
+      local local_lag_is_proven=0
+      if [[ "$transfer_reason" == "terminal PRD ownership transferred" ]] \
+        && git merge-base --is-ancestor "$owned_tip" "$local_tip" \
+        && git merge-base --is-ancestor "$local_tip" "$remote_tip"; then
+        local_lag_is_proven=1
+      elif [[ "$transfer_reason" == "zero-registration PRD ownership transferred" ]] \
+        && prd_transferred_ownership_is_proven \
+          "$owner_run_id" "$branch_name" "$owned_tip" \
+        && git merge-base --is-ancestor "$local_tip" "$owned_tip"; then
+        local_lag_is_proven=1
+      fi
+      if [[ "$local_lag_is_proven" -ne 1 ]]; then
+        echo "ERROR: Local branch '$branch_name' differs from remote tip '$remote_tip' without proven delivery history; refusing transfer" >&2
+        return 1
+      fi
+    fi
+  fi
+
+  local pending_new pending_tip pending_reason
+  pending_new=$(printf '%s\n' "$ownership_expected" | jq -r '.transfer_pending.new_run_id // empty')
+  pending_tip=$(printf '%s\n' "$ownership_expected" | jq -r '.transfer_pending.expected_remote_tip // empty')
+  pending_reason=$(printf '%s\n' "$ownership_expected" | jq -r '.transfer_pending.reason // empty')
+  if [[ -n "$pending_new" \
+    && ("$pending_new" != "$new_run_id" \
+      || "$pending_tip" != "$remote_tip" \
+      || "$pending_reason" != "$transfer_reason") ]]; then
+    echo "ERROR: Ownership transfer for '$branch_name' is already pending with different evidence" >&2
+    return 1
+  fi
+
+  state_lock || return 1
+
+  local rechecked_reason
+  if prd_run_is_terminal "$owner_run_id"; then
+    rechecked_reason="terminal PRD ownership transferred"
+  elif prd_zero_registration_retirement_reason "$owner_run_id" >/dev/null; then
+    rechecked_reason="zero-registration PRD ownership transferred"
+  else
+    rechecked_reason=""
+  fi
+  if [[ "$rechecked_reason" != "$transfer_reason" ]] \
+    || prd_run_has_live_worker "$owner_run_id" \
+    || prd_state_has_live_claim; then
+    state_unlock
+    echo "ERROR: Run '$owner_run_id' became active during ownership transfer" >&2
+    return 1
+  fi
+  if [[ -n "$status_expected" \
+    && "$(jq -cS . "$STATE_DIR/runs/$owner_run_id/status.json" 2>/dev/null)" != "$status_expected" ]]; then
+    state_unlock
+    echo "ERROR: Terminal delivery evidence for run '$owner_run_id' changed during transfer" >&2
+    return 1
+  fi
+
+  local ownership_current rechecked_remote_tip rechecked_remote_rc=0
+  ownership_current=$(jq -cS . "$ownership_file" 2>/dev/null) || true
+  if [[ "$ownership_current" != "$ownership_expected" ]]; then
+    state_unlock
+    echo "ERROR: Ownership evidence for run '$owner_run_id' changed during transfer" >&2
+    return 1
+  fi
+  rechecked_remote_tip=$(prd_remote_branch_tip "$remote" "$branch_name") \
+    || rechecked_remote_rc=$?
+  if [[ "$rechecked_remote_rc" -ne 0 || "$rechecked_remote_tip" != "$remote_tip" ]]; then
+    state_unlock
+    echo "ERROR: Remote branch '$remote/$branch_name' moved during ownership transfer" >&2
+    return 1
+  fi
+
+  local active_run="" active_prd=""
+  if [[ -f "$STATE_FILE" ]]; then
+    active_run=$(jq -r '.active_run_id // empty' "$STATE_FILE" 2>/dev/null) || {
+      state_unlock
+      return 1
+    }
+    active_prd=$(jq -r '.active_prd // empty' "$STATE_FILE" 2>/dev/null) || {
+      state_unlock
+      return 1
+    }
+    if [[ -n "$active_run" \
+      && ("$active_run" != "$owner_run_id" || "$active_prd" != "$prd_number") ]]; then
+      state_unlock
+      echo "ERROR: Repository records a different active PRD run '$active_run'; refusing ownership transfer" >&2
+      return 1
+    fi
+  fi
+
+  local timestamp pending_tmp retired_tmp state_tmp=""
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  if [[ -z "$pending_new" ]]; then
+    pending_tmp=$(mktemp "$(dirname "$ownership_file")/.ownership-transfer.XXXXXX") || {
+      state_unlock
+      return 1
+    }
+    if ! jq \
+      --arg new_run_id "$new_run_id" \
+      --arg expected_remote_tip "$remote_tip" \
+      --arg reason "$transfer_reason" \
+      --arg recorded_at "$timestamp" \
+      '.transfer_pending = {
+        new_run_id: $new_run_id,
+        expected_remote_tip: $expected_remote_tip,
+        reason: $reason,
+        recorded_at: $recorded_at
+      }' "$ownership_file" >"$pending_tmp" \
+      || ! mv "$pending_tmp" "$ownership_file"; then
+      rm -f "$pending_tmp"
+      state_unlock
+      echo "ERROR: Failed to stage PRD ownership transfer" >&2
+      return 1
+    fi
+  fi
+
+  if [[ -f "$new_ownership_file" ]]; then
+    if ! jq -e \
+      --arg run_id "$new_run_id" \
+      --arg prd_number "$prd_number" \
+      --arg branch_name "$branch_name" \
+      --arg remote "$remote" \
+      --arg delivery_branch "$delivery_branch" \
+      --arg initial_base_sha "$frozen_base" \
+      --arg owned_tip_sha "$remote_tip" \
+      --arg resumed_from_run_id "$owner_run_id" \
+      '.run_id == $run_id
+       and .prd_number == $prd_number
+       and .branch_name == $branch_name
+       and .remote == $remote
+       and .delivery_branch == $delivery_branch
+       and .initial_base_sha == $initial_base_sha
+       and .owned_tip_sha == $owned_tip_sha
+       and .resumed_from_run_id == $resumed_from_run_id
+       and .retired_at == null' \
+      "$new_ownership_file" >/dev/null 2>&1; then
+      state_unlock
+      echo "ERROR: New run '$new_run_id' has conflicting ownership evidence" >&2
+      return 1
+    fi
+  elif ! create_prd_ownership_record \
+    "$new_run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch" \
+    "$frozen_base" "$remote_tip" "$owner_run_id"; then
+    state_unlock
+    echo "ERROR: Failed to create transferred ownership for run '$new_run_id'" >&2
+    return 1
+  fi
+
+  if [[ "$active_run" == "$owner_run_id" ]]; then
+    state_tmp=$(state_mktemp) || true
+    if [[ -z "$state_tmp" ]] \
+      || ! jq 'del(.active_prd, .active_run_id)' "$STATE_FILE" >"$state_tmp" \
+      || ! mv "$state_tmp" "$STATE_FILE"; then
+      rm -f "$state_tmp"
+      state_unlock
+      echo "ERROR: Failed to clear prior PRD activation; ownership transfer remains pending" >&2
+      return 1
+    fi
+  fi
+
+  retired_tmp=$(mktemp "$(dirname "$ownership_file")/.ownership-transferred.XXXXXX") || {
+    state_unlock
+    return 1
+  }
+  if ! jq \
+    --arg retired_at "$timestamp" \
+    --arg retired_by_run_id "$new_run_id" \
+    --arg retirement_reason "$transfer_reason" \
+    --arg transferred_tip_sha "$remote_tip" \
+    '.retired_at = $retired_at
+     | .retired_by_run_id = $retired_by_run_id
+     | .retirement_reason = $retirement_reason
+     | .transferred_tip_sha = $transferred_tip_sha
+     | del(.transfer_pending)' \
+    "$ownership_file" >"$retired_tmp" \
+    || ! mv "$retired_tmp" "$ownership_file"; then
+    rm -f "$retired_tmp"
+    state_unlock
+    echo "ERROR: Failed to finalize PRD ownership transfer; staged evidence was preserved" >&2
+    return 1
+  fi
+
+  state_unlock
+  echo "Transferred PRD integration branch '$branch_name' from run '$owner_run_id' to '$new_run_id' at '$remote_tip'."
+}
+
 # recover_stale_prd_branch NEW_RUN_ID PRD_NUMBER BRANCH_NAME REMOTE DELIVERY_BRANCH
 # Recovers only a same-PRD, same-repository branch owned by one terminal run.
 recover_stale_prd_branch() {
@@ -716,6 +1244,15 @@ recover_stale_prd_branch() {
   local branch_name="$3"
   local remote="$4"
   local delivery_branch="$5"
+
+  if ! [[ "$new_run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ \
+    && "$prd_number" =~ ^[1-9][0-9]*$ \
+    && "$remote" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+    || ! git check-ref-format --branch "$branch_name" >/dev/null 2>&1 \
+    || ! git check-ref-format --branch "$delivery_branch" >/dev/null 2>&1; then
+    echo "ERROR: Invalid PRD recovery identifiers or repository settings" >&2
+    return 1
+  fi
 
   prd_validate_ownership_records || return 1
 
@@ -728,7 +1265,78 @@ recover_stale_prd_branch() {
       echo "ERROR: Existing branch '$branch_name' has unprovable ownership" >&2
       return 1
     fi
+    local unowned_remote_rc=0
+    prd_remote_branch_tip "$remote" "$branch_name" >/dev/null \
+      || unowned_remote_rc=$?
+    if [[ "$unowned_remote_rc" -eq 0 ]]; then
+      echo "ERROR: Existing remote branch '$remote/$branch_name' has unprovable ownership" >&2
+      return 1
+    elif [[ "$unowned_remote_rc" -ne 2 ]]; then
+      echo "ERROR: Could not verify remote ownership for '$remote/$branch_name'" >&2
+      return 1
+    fi
     return 0
+  fi
+
+  if [[ ${#owner_files[@]} -eq 2 ]]; then
+    local pending_owner_file="" pending_target_file="" candidate_file
+    local pending_owner_run_id="" pending_target_run_id=""
+    for candidate_file in "${owner_files[@]}"; do
+      if jq -e \
+        --arg branch_name "$branch_name" \
+        '.branch_name == $branch_name
+         and (.transfer_pending.new_run_id
+           | type == "string" and length > 0)
+         and .retired_at == null' \
+        "$candidate_file" >/dev/null 2>&1; then
+        pending_owner_file="$candidate_file"
+      fi
+    done
+    if [[ -n "$pending_owner_file" ]]; then
+      pending_owner_run_id=$(jq -r '.run_id' "$pending_owner_file")
+      pending_target_run_id=$(jq -r '.transfer_pending.new_run_id' "$pending_owner_file")
+      for candidate_file in "${owner_files[@]}"; do
+        if [[ "$candidate_file" != "$pending_owner_file" ]] \
+          && jq -e \
+            --arg run_id "$pending_target_run_id" \
+            --arg prior_run_id "$pending_owner_run_id" \
+            --arg branch_name "$branch_name" \
+            '.run_id == $run_id
+             and .resumed_from_run_id == $prior_run_id
+             and .branch_name == $branch_name
+             and .retired_at == null' \
+            "$candidate_file" >/dev/null 2>&1; then
+          pending_target_file="$candidate_file"
+        fi
+      done
+    fi
+    if [[ -n "$pending_owner_file" && -n "$pending_target_file" ]]; then
+      if ! jq -e \
+        --arg prd_number "$prd_number" \
+        --arg remote "$remote" \
+        --arg delivery_branch "$delivery_branch" \
+        '.prd_number == $prd_number
+         and .remote == $remote
+         and .delivery_branch == $delivery_branch' \
+        "$pending_owner_file" >/dev/null 2>&1; then
+        echo "ERROR: Pending ownership transfer belongs to different PRD or repository settings" >&2
+        return 1
+      fi
+      if [[ "$pending_target_run_id" != "$new_run_id" ]] \
+        && { prd_run_has_live_worker "$pending_target_run_id" \
+          || prd_state_has_live_claim; }; then
+        echo "ERROR: Pending successor run '$pending_target_run_id' still has live execution evidence" >&2
+        return 1
+      fi
+      transfer_owned_prd_branch "$pending_owner_run_id" "$pending_target_run_id" \
+        || return 1
+      if [[ "$pending_target_run_id" == "$new_run_id" ]]; then
+        return 0
+      fi
+      recover_stale_prd_branch \
+        "$new_run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch"
+      return
+    fi
   fi
   if [[ ${#owner_files[@]} -ne 1 ]]; then
     echo "ERROR: Existing branch '$branch_name' has unprovable or ambiguous ownership" >&2
@@ -758,13 +1366,43 @@ recover_stale_prd_branch() {
     return 1
   fi
 
-  retire_owned_prd_branch "$owner_run_id" "$new_run_id"
+  local pending_target_run_id
+  pending_target_run_id=$(jq -r '.transfer_pending.new_run_id // empty' "$owner_file")
+  if [[ -n "$pending_target_run_id" ]]; then
+    if [[ "$pending_target_run_id" != "$new_run_id" ]] \
+      && { prd_run_has_live_worker "$pending_target_run_id" \
+        || prd_state_has_live_claim; }; then
+      echo "ERROR: Pending successor run '$pending_target_run_id' still has live execution evidence" >&2
+      return 1
+    fi
+    transfer_owned_prd_branch "$owner_run_id" "$pending_target_run_id" || return 1
+    if [[ "$pending_target_run_id" == "$new_run_id" ]]; then
+      return 0
+    fi
+    recover_stale_prd_branch \
+      "$new_run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch"
+    return
+  fi
+
+  local remote_tip_rc=0
+  prd_remote_branch_tip "$remote" "$branch_name" >/dev/null \
+    || remote_tip_rc=$?
+  if [[ "$remote_tip_rc" -eq 0 ]]; then
+    transfer_owned_prd_branch "$owner_run_id" "$new_run_id"
+  elif [[ "$remote_tip_rc" -eq 2 ]]; then
+    # Backwards-compatible recovery for branches created by older installers
+    # before publication became part of the ownership interface.
+    retire_owned_prd_branch "$owner_run_id" "$new_run_id"
+  else
+    echo "ERROR: Could not inspect remote branch '$remote/$branch_name' for recovery" >&2
+    return 1
+  fi
 }
 
 # cleanup_stale_prd_branches
 # Retires every locally-present PRD branch whose ownership passes all gates.
 cleanup_stale_prd_branches() {
-  local ownership_file branch_name run_id failed=0
+  local ownership_file branch_name run_id transfer_target remote remote_rc failed=0
   prd_validate_ownership_records || return 1
   shopt -s nullglob
   for ownership_file in "$STATE_DIR/runs/"*/ownership.json; do
@@ -780,6 +1418,27 @@ cleanup_stale_prd_branches() {
     fi
     [[ -n "$branch_name" ]] || continue
     run_id=$(jq -r '.run_id // empty' "$ownership_file" 2>/dev/null)
+    transfer_target=$(jq -r '.transfer_pending.new_run_id // empty' "$ownership_file" 2>/dev/null)
+    if [[ -n "$transfer_target" ]]; then
+      echo "Skipping PRD branch '$branch_name': ownership transfer to run '$transfer_target' is pending."
+      continue
+    fi
+    remote=$(jq -r '.remote // empty' "$ownership_file" 2>/dev/null)
+    if ! [[ "$remote" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]]; then
+      echo "ERROR: Ownership for '$branch_name' contains an invalid remote name" >&2
+      failed=1
+      continue
+    fi
+    remote_rc=0
+    prd_remote_branch_tip "$remote" "$branch_name" >/dev/null || remote_rc=$?
+    if [[ "$remote_rc" -eq 0 ]]; then
+      echo "Skipping published PRD branch '$remote/$branch_name'; preserving it for same-PRD recovery."
+      continue
+    elif [[ "$remote_rc" -ne 2 ]]; then
+      echo "ERROR: Could not inspect remote PRD branch '$remote/$branch_name' during cleanup" >&2
+      failed=1
+      continue
+    fi
     if [[ -z "$run_id" ]] || ! retire_owned_prd_branch "$run_id" "cleanup"; then
      failed=1
     fi
@@ -789,8 +1448,9 @@ cleanup_stale_prd_branches() {
 }
 
 # create_prd_branch RUN_ID PRD_NUMBER PRD_TITLE REMOTE DELIVERY_BRANCH [TEMPLATE]
-# Creates a PRD integration branch from the latest remote delivery branch.
-# Atomically records ownership before creating the branch.
+# Creates and publishes a PRD integration branch from the latest remote delivery
+# branch. Ownership is recorded before local ref creation, and the interface
+# returns success only after the configured remote proves the expected tip.
 #
 # Args:
 #   RUN_ID          — unique run identifier
@@ -810,8 +1470,16 @@ create_prd_branch() {
   local template="${6:-}"
   
   local ownership_file="$STATE_DIR/runs/$run_id/ownership.json"
-  local branch_name frozen_base=""
+  local branch_name frozen_base="" owned_tip="" fresh_ownership_expected=""
   local has_ownership=0
+
+  if ! [[ "$run_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ \
+    && "$prd_number" =~ ^[1-9][0-9]*$ \
+    && "$remote" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] \
+    || ! git check-ref-format --branch "$delivery_branch" >/dev/null 2>&1; then
+    echo "ERROR: Invalid PRD branch identifiers or repository settings" >&2
+    return 1
+  fi
 
   if [[ -f "$ownership_file" ]]; then
     has_ownership=1
@@ -826,6 +1494,9 @@ create_prd_branch() {
        and .delivery_branch == $delivery_branch
        and (.branch_name | type == "string" and length > 0)
        and (.initial_base_sha | type == "string" and length > 0)
+       and (.owned_tip_sha == null
+         or (.owned_tip_sha
+           | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$")))
        and .retired_at == null' \
       "$ownership_file" >/dev/null 2>&1; then
       echo "ERROR: Ownership record for run '$run_id' conflicts with requested PRD or repository settings" >&2
@@ -833,6 +1504,7 @@ create_prd_branch() {
     fi
     branch_name=$(jq -r '.branch_name' "$ownership_file")
     frozen_base=$(jq -r '.initial_base_sha' "$ownership_file")
+    owned_tip=$(jq -r '.owned_tip_sha // .initial_base_sha' "$ownership_file")
   else
     branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
   fi
@@ -842,28 +1514,51 @@ create_prd_branch() {
     return 1
   fi
 
-  # Check if local branch already exists
+  local local_present=0 local_tip="" remote_tip="" remote_branch_rc=0
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
+    local_present=1
     if ! verify_prd_ownership "$run_id" "$branch_name"; then
       echo "ERROR: Branch '$branch_name' already exists but is not owned by run '$run_id'" >&2
       return 1
     fi
-    return 0
+    local_tip=$(git rev-parse "refs/heads/$branch_name") || return 1
   fi
 
-  local remote_branch_rc=0
-  git ls-remote --exit-code --heads "$remote" "refs/heads/$branch_name" \
-    >/dev/null 2>&1 || remote_branch_rc=$?
+  remote_tip=$(prd_remote_branch_tip "$remote" "$branch_name") \
+    || remote_branch_rc=$?
   if [[ "$remote_branch_rc" -eq 0 ]]; then
     if ! verify_prd_ownership "$run_id" "$branch_name"; then
       echo "ERROR: Remote branch '$remote/$branch_name' already exists but is not owned by run '$run_id'" >&2
       return 1
+    fi
+    if [[ "$remote_tip" != "$owned_tip" ]]; then
+      echo "ERROR: Remote branch '$remote/$branch_name' moved from owned tip '$owned_tip' to '$remote_tip'" >&2
+      return 1
+    fi
+    if [[ "$local_present" -eq 1 ]]; then
+      if [[ "$local_tip" != "$owned_tip" ]]; then
+        if ! prd_transferred_ownership_is_proven \
+            "$run_id" "$branch_name" "$owned_tip" \
+          || ! git fetch "$remote" \
+            "refs/heads/$branch_name:refs/remotes/$remote/$branch_name" >/dev/null 2>&1 \
+          || [[ "$(git rev-parse "refs/remotes/$remote/$branch_name")" != "$owned_tip" ]] \
+          || ! git merge-base --is-ancestor "$local_tip" "$owned_tip" \
+          || ! git update-ref "refs/heads/$branch_name" "$owned_tip" "$local_tip"; then
+          echo "ERROR: Local branch '$branch_name' moved from owned tip '$owned_tip' to '$local_tip'" >&2
+          return 1
+        fi
+      fi
+      return 0
     fi
     git fetch "$remote" \
       "refs/heads/$branch_name:refs/remotes/$remote/$branch_name" >/dev/null 2>&1 || {
       echo "ERROR: Failed to fetch owned branch $remote/$branch_name" >&2
       return 1
     }
+    if [[ "$(git rev-parse "refs/remotes/$remote/$branch_name")" != "$owned_tip" ]]; then
+      echo "ERROR: Remote branch '$remote/$branch_name' moved while it was fetched" >&2
+      return 1
+    fi
     git branch "$branch_name" "refs/remotes/$remote/$branch_name" >/dev/null 2>&1 || {
       echo "ERROR: Failed to restore owned branch '$branch_name'" >&2
       return 1
@@ -872,6 +1567,15 @@ create_prd_branch() {
   elif [[ "$remote_branch_rc" -ne 2 ]]; then
     echo "ERROR: Failed to verify whether remote branch '$remote/$branch_name' exists" >&2
     return 1
+  fi
+
+  if [[ "$local_present" -eq 1 ]]; then
+    if [[ "$local_tip" != "$owned_tip" ]]; then
+      echo "ERROR: Local branch '$branch_name' moved from owned tip '$owned_tip' to '$local_tip'" >&2
+      return 1
+    fi
+    prd_publish_owned_branch "$remote" "$branch_name" "$owned_tip"
+    return
   fi
 
   # Fetch latest remote and update remote-tracking ref
@@ -883,9 +1587,9 @@ create_prd_branch() {
 
   local branch_base
   if [[ "$has_ownership" -eq 1 ]]; then
-    branch_base="$frozen_base"
+    branch_base="$owned_tip"
     if ! git cat-file -e "${branch_base}^{commit}" 2>/dev/null; then
-      echo "ERROR: Frozen base '$branch_base' for run '$run_id' is unavailable" >&2
+      echo "ERROR: Owned tip '$branch_base' for run '$run_id' is unavailable" >&2
       return 1
     fi
   else
@@ -894,21 +1598,35 @@ create_prd_branch() {
       return 1
     }
     create_prd_ownership_record \
-      "$run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch" "$branch_base" || {
+      "$run_id" "$prd_number" "$branch_name" "$remote" "$delivery_branch" \
+      "$branch_base" "$branch_base" || {
       echo "ERROR: Failed to create ownership record" >&2
       return 1
     }
+    fresh_ownership_expected=$(jq -cS . "$ownership_file") || return 1
+    owned_tip="$branch_base"
   fi
 
   git branch "$branch_name" "$branch_base" >/dev/null 2>&1 || {
     echo "ERROR: Failed to create branch '$branch_name'" >&2
-    if [[ "$has_ownership" -eq 0 ]]; then
-      rm -f "$ownership_file"
+    if [[ "$has_ownership" -eq 0 && -n "$fresh_ownership_expected" ]]; then
+      local ownership_current rollback_remote_rc=0
+      ownership_current=$(jq -cS . "$ownership_file" 2>/dev/null) || true
+      prd_remote_branch_tip "$remote" "$branch_name" >/dev/null \
+        || rollback_remote_rc=$?
+      if [[ "$ownership_current" == "$fresh_ownership_expected" \
+        && "$rollback_remote_rc" -eq 2 ]] \
+        && ! git show-ref --verify --quiet "refs/heads/$branch_name"; then
+        rm -f "$ownership_file" || {
+          echo "ERROR: Failed to roll back fresh ownership for '$branch_name'" >&2
+          return 1
+        }
+      fi
     fi
     return 1
   }
 
-  return 0
+  prd_publish_owned_branch "$remote" "$branch_name" "$owned_tip"
 }
 
 # can_resume_prd_branch RUN_ID BRANCH_NAME
