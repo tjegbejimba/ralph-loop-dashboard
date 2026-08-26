@@ -118,6 +118,34 @@ test_check_is_read_only() {
   fi
 }
 
+test_check_reports_reconciliation_command_drift() {
+  local tmp_repo
+  tmp_repo=$(mktemp -d)
+  trap "rm -rf '$tmp_repo'" EXIT
+
+  git init "$tmp_repo" >/dev/null 2>&1
+  cd "$tmp_repo"
+  git config user.email "test@example.com"
+  git config user.name "Test"
+  echo "# test" > README.md
+  git add README.md
+  git commit -m "init" >/dev/null 2>&1
+
+  "$INSTALL_SH" "$tmp_repo" --scripts-only >/dev/null 2>&1
+  echo "# drift" >>"$tmp_repo/.ralph/reconcile-slice.sh"
+
+  local output
+  if output=$("$INSTALL_SH" "$tmp_repo" --check 2>&1); then
+    echo "✗ Test 4 FAILED: --check ignored reconcile-slice.sh drift"
+    exit 1
+  fi
+  if ! grep -q "reconcile-slice.sh" <<<"$output"; then
+    echo "✗ Test 4 FAILED: --check did not report reconcile-slice.sh"
+    exit 1
+  fi
+  echo "✓ Test 4: --check reports reconciliation command drift"
+}
+
 # Main
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_SH="$SCRIPT_DIR/../install.sh"
@@ -130,5 +158,6 @@ fi
 test_check_passes_when_content_matches
 test_check_fails_when_content_diverges
 test_check_is_read_only
+test_check_reports_reconciliation_command_drift
 
 echo "All install --check drift tests passed"
