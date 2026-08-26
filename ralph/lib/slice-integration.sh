@@ -59,15 +59,16 @@ verify_slice_pr_base() {
   fi
 }
 
-# record_slice_integrated ISSUE_NUMBER PR_NUMBER COMMIT_SHA [RUN_ID]
+# record_slice_integrated ISSUE_NUMBER PR_NUMBER COMMIT_SHA [RUN_ID] [RECONCILIATION_JSON]
 # Records that a slice has been integrated into the PRD branch.
-# Updates status.json with slice-integrated status, PR number, and commit SHA.
+# Atomically replaces its status item with canonical integration evidence.
 #
 # Args:
 #   ISSUE_NUMBER — slice issue number
 #   PR_NUMBER    — pull request number
 #   COMMIT_SHA   — merge commit SHA
 #   RUN_ID       — run identifier (optional, uses $RUN_ID if not provided)
+#   RECONCILIATION_JSON — optional guarded-recovery provenance object
 #
 # Returns: 0 on success, 1 on failure
 record_slice_integrated() {
@@ -75,30 +76,51 @@ record_slice_integrated() {
   local pr_number="$2"
   local commit_sha="$3"
   local run_id="${4:-$RUN_ID}"
+  local reconciliation_json="${5:-null}"
+
+  if ! printf '%s\n' "$reconciliation_json" \
+    | jq -e 'type == "object" or . == null' >/dev/null 2>&1; then
+    echo "ERROR: Slice integration reconciliation provenance must be an object" >&2
+    return 1
+  fi
   
-  local file
+  local file timestamp
   file=$(status_file "$run_id")
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   local tmp
-  tmp=$(status_mktemp "$run_id")
+  tmp=$(status_mktemp "$run_id") || return 1
   
   [[ ! -f "$file" ]] && printf '%s\n' '{"items":{}}' >"$file"
   
   jq --arg issue "$issue" \
      --arg pr "$pr_number" \
      --arg commit "$commit_sha" \
-     --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '
-    .items[$issue] = {
-      status: "slice-integrated",
-      pr_number: $pr,
-      integrated_commit: $commit,
-      integrated_at: $timestamp,
-      workerId: null,
-      pid: null,
-      logFile: null,
-      startedAt: null,
-      error: null
-    }
-  ' "$file" >"$tmp" && mv "$tmp" "$file"
+     --arg timestamp "$timestamp" \
+     --argjson reconciliation "$reconciliation_json" '
+    .items[$issue] = (
+      {
+        status: "slice-integrated",
+        pr_number: $pr,
+        integrated_commit: $commit,
+        integrated_at: $timestamp,
+        workerId: null,
+        pid: null,
+        logFile: null,
+        startedAt: null,
+        error: null
+      }
+      + if $reconciliation == null then {}
+        else {
+          reconciliation: (
+            $reconciliation + {applied_at: $timestamp}
+          )
+        }
+        end
+    )
+  ' "$file" >"$tmp" && mv "$tmp" "$file" || {
+    rm -f "$tmp"
+    return 1
+  }
 }
 
 # close_slice_issue ISSUE_NUMBER PR_NUMBER REPO
