@@ -136,10 +136,10 @@ if [[ "$MODE" == "--check" ]]; then
     exit 1
   fi
   
-  # Files to check: ralph.sh, launch.sh, lib/*, profiles/* (not config.json, RALPH.md)
+  # Files to check: shell entrypoints, lib/*, profiles/* (not config.json, RALPH.md)
   drift_found=0
   
-  for file in ralph.sh launch.sh; do
+  for file in ralph.sh launch.sh reconcile-slice.sh; do
     if [[ ! -f "$ralph_src/$file" ]]; then
       continue
     fi
@@ -398,12 +398,16 @@ install_scripts() {
     mkdir -p "$ralph_dir"
     
     # Remove existing files/symlinks to ensure clean symlink creation
-    rm -f "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
+    rm -f \
+      "$ralph_dir/ralph.sh" \
+      "$ralph_dir/launch.sh" \
+      "$ralph_dir/reconcile-slice.sh"
     rm -rf "$ralph_dir/lib" "$ralph_dir/profiles"
     
     # Symlink executable surface
     ln -s "../ralph/ralph.sh" "$ralph_dir/ralph.sh"
     ln -s "../ralph/launch.sh" "$ralph_dir/launch.sh"
+    ln -s "../ralph/reconcile-slice.sh" "$ralph_dir/reconcile-slice.sh"
     ln -s "../ralph/lib" "$ralph_dir/lib"
     ln -s "../ralph/profiles" "$ralph_dir/profiles"
   else
@@ -411,6 +415,7 @@ install_scripts() {
     mkdir -p "$ralph_dir/lib"
     cp "$REPO_DIR/ralph/ralph.sh" "$ralph_dir/ralph.sh"
     cp "$REPO_DIR/ralph/launch.sh" "$ralph_dir/launch.sh"
+    cp "$REPO_DIR/ralph/reconcile-slice.sh" "$ralph_dir/reconcile-slice.sh"
     cp "$REPO_DIR/ralph/lib/state.sh" "$ralph_dir/lib/state.sh"
     cp "$REPO_DIR/ralph/lib/labels.sh" "$ralph_dir/lib/labels.sh"
     cp "$REPO_DIR/ralph/lib/status.sh" "$ralph_dir/lib/status.sh"
@@ -424,7 +429,10 @@ install_scripts() {
     cp "$REPO_DIR/ralph/lib/slice-integration.sh" "$ralph_dir/lib/slice-integration.sh"
     rm -rf "$ralph_dir/profiles"
     cp -R "$REPO_DIR/ralph/profiles" "$ralph_dir/profiles"
-    chmod +x "$ralph_dir/ralph.sh" "$ralph_dir/launch.sh"
+    chmod +x \
+      "$ralph_dir/ralph.sh" \
+      "$ralph_dir/launch.sh" \
+      "$ralph_dir/reconcile-slice.sh"
   fi
   install_config "$target"
   install_local_context "$target"
