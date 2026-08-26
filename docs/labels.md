@@ -42,7 +42,7 @@ conflict and fail closed until repaired.
 - No taxonomy conflicts (multiple labels in same dimension).
 - No open linked PR.
 - No assignee.
-- No unresolved `Blocked by #N` dependencies.
+- No unresolved bulleted `#N` dependencies under `## Blocked by`.
 - For `work:slice`, must have exact `Parent #N` marker.
 - No `## Open questions` or `TBD` markers in body.
 
@@ -167,7 +167,7 @@ Workers are canonical-only by default. A runnable issue must be:
 1. Open.
 2. `ralph:ready`, `work:slice` or `work:standalone`, and exactly one label per dimension.
 3. Unassigned.
-4. Free of unresolved `Blocked by #N` dependencies, including `ralph:failed` dependencies.
+4. Free of unresolved bulleted `#N` dependencies under `## Blocked by`, including `ralph:failed` dependencies.
 
 Compatibility aliases for the old labels (`ready-for-agent`, `needs-triage`,
 `hitl`) are only accepted by explicit compatibility code paths and always emit

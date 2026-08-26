@@ -23,19 +23,27 @@ make_fake_home() {
   local h
   h="$(mktemp -d)"
   mkdir -p "$h/.agents/skills"
-  CLEANUP_DIRS+=("$h")
   echo "$h"
 }
 
 make_fake_home_no_skills() {
   local h
   h="$(mktemp -d)"
-  CLEANUP_DIRS+=("$h")
   # intentionally no ~/.agents/skills/
   echo "$h"
 }
 
 skill_link() { echo "$1/.agents/skills/${2:-to-ralph}"; }
+is_skill_install() {
+  [[ -L "$1" || -f "$1/.ralph-skill-source" ]]
+}
+skill_install_source() {
+  if [[ -L "$1" ]]; then
+    readlink "$1"
+  else
+    sed -n 's/^source=//p' "$1/.ralph-skill-source"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Test 1 (tracer bullet): SKILL.md file exists with required frontmatter
@@ -142,6 +150,7 @@ done
 # Test 2: --skills-only creates symlink in ~/.agents/skills/to-ralph
 # ---------------------------------------------------------------------------
 TEST_HOME="$(make_fake_home)"
+CLEANUP_DIRS+=("$TEST_HOME")
 
 exit_code=0
 output=$(HOME="$TEST_HOME" "$REPO_ROOT/install.sh" --skills-only 2>&1) || exit_code=$?
@@ -153,54 +162,78 @@ else
 fi
 
 link="$(skill_link "$TEST_HOME")"
-if [[ -L "$link" ]]; then
-  pass "--skills-only creates symlink at ~/.agents/skills/to-ralph"
+if is_skill_install "$link"; then
+  pass "--skills-only installs ~/.agents/skills/to-ralph"
 else
-  fail "--skills-only should create a symlink at $link"
+  fail "--skills-only should install a managed skill at $link"
 fi
 
 triage_link="$(skill_link "$TEST_HOME" "ralph-issue-triage-agent")"
-if [[ -L "$triage_link" ]]; then
-  pass "--skills-only creates symlink at ~/.agents/skills/ralph-issue-triage-agent"
+if is_skill_install "$triage_link"; then
+  pass "--skills-only installs ~/.agents/skills/ralph-issue-triage-agent"
 else
-  fail "--skills-only should create a symlink at $triage_link"
+  fail "--skills-only should install a managed skill at $triage_link"
 fi
 
-# Symlink must point to the correct source
+# Installation must record the correct source.
 expected_target="$REPO_ROOT/skills/to-ralph"
-actual_target="$(readlink "$link")"
+actual_target="$(skill_install_source "$link")"
 if [[ "$actual_target" == "$expected_target" ]]; then
-  pass "symlink points to correct source: $expected_target"
+  pass "installation points to correct source: $expected_target"
 else
-  fail "symlink points to '$actual_target', expected '$expected_target'"
+  fail "installation points to '$actual_target', expected '$expected_target'"
 fi
 
 expected_triage_target="$REPO_ROOT/skills/ralph-issue-triage-agent"
-actual_triage_target="$(readlink "$triage_link")"
+actual_triage_target="$(skill_install_source "$triage_link")"
 if [[ "$actual_triage_target" == "$expected_triage_target" ]]; then
-  pass "triage symlink points to correct source: $expected_triage_target"
+  pass "triage installation points to correct source: $expected_triage_target"
 else
-  fail "triage symlink points to '$actual_triage_target', expected '$expected_triage_target'"
+  fail "triage installation points to '$actual_triage_target', expected '$expected_triage_target'"
 fi
 
 orchestrator_link="$(skill_link "$TEST_HOME" "ralph-orchestrator")"
-if [[ -L "$orchestrator_link" ]]; then
-  pass "--skills-only creates symlink at ~/.agents/skills/ralph-orchestrator"
+if is_skill_install "$orchestrator_link"; then
+  pass "--skills-only installs ~/.agents/skills/ralph-orchestrator"
 else
-  fail "--skills-only should create a symlink at $orchestrator_link"
+  fail "--skills-only should install a managed skill at $orchestrator_link"
 fi
 
 expected_orchestrator_target="$REPO_ROOT/skills/ralph-orchestrator"
-actual_orchestrator_target="$(readlink "$orchestrator_link")"
+actual_orchestrator_target="$(skill_install_source "$orchestrator_link")"
 if [[ "$actual_orchestrator_target" == "$expected_orchestrator_target" ]]; then
-  pass "orchestrator symlink points to correct source: $expected_orchestrator_target"
+  pass "orchestrator installation points to correct source: $expected_orchestrator_target"
 else
-  fail "orchestrator symlink points to '$actual_orchestrator_target', expected '$expected_orchestrator_target'"
+  fail "orchestrator installation points to '$actual_orchestrator_target', expected '$expected_orchestrator_target'"
 fi
+
+for planning_skill in to-spec to-tickets; do
+  planning_link="$(skill_link "$TEST_HOME" "$planning_skill")"
+  expected_planning_target="$REPO_ROOT/skills/$planning_skill"
+  if is_skill_install "$planning_link"; then
+    pass "--skills-only installs ~/.agents/skills/$planning_skill"
+  else
+    fail "--skills-only should install a managed skill at $planning_link"
+    continue
+  fi
+  actual_planning_target="$(skill_install_source "$planning_link")"
+  if [[ "$actual_planning_target" == "$expected_planning_target" ]]; then
+    pass "$planning_skill installation points to correct source"
+  else
+    fail "$planning_skill installation points to '$actual_planning_target', expected '$expected_planning_target'"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Test 3: --skills-only is idempotent (re-run doesn't fail)
 # ---------------------------------------------------------------------------
+managed_copy_refreshed=0
+managed_copy_path="$(skill_link "$TEST_HOME" "to-spec")"
+if [[ -f "$managed_copy_path/.ralph-skill-source" ]]; then
+  printf 'stale managed copy\n' > "$managed_copy_path/SKILL.md"
+  managed_copy_refreshed=1
+fi
+
 exit_code2=0
 output2=$(HOME="$TEST_HOME" "$REPO_ROOT/install.sh" --skills-only 2>&1) || exit_code2=$?
 
@@ -210,31 +243,74 @@ else
   fail "--skills-only second run should exit 0, got $exit_code2. Output: $output2"
 fi
 
-link_after="$(readlink "$(skill_link "$TEST_HOME")")"
+if [[ "$managed_copy_refreshed" -eq 1 ]]; then
+  if cmp -s "$REPO_ROOT/skills/to-spec/SKILL.md" "$managed_copy_path/SKILL.md"; then
+    pass "--skills-only refreshes a stale Windows managed copy"
+  else
+    fail "--skills-only should refresh a stale Windows managed copy"
+  fi
+fi
+
+link_after="$(skill_install_source "$(skill_link "$TEST_HOME")")"
 if [[ "$link_after" == "$expected_target" ]]; then
-  pass "symlink still points to correct source after re-run"
+  pass "installation still points to correct source after re-run"
 else
-  fail "symlink target changed after re-run: $link_after"
+  fail "installation source changed after re-run: $link_after"
 fi
 
-triage_link_after="$(readlink "$(skill_link "$TEST_HOME" "ralph-issue-triage-agent")")"
+triage_link_after="$(skill_install_source "$(skill_link "$TEST_HOME" "ralph-issue-triage-agent")")"
 if [[ "$triage_link_after" == "$expected_triage_target" ]]; then
-  pass "triage symlink still points to correct source after re-run"
+  pass "triage installation still points to correct source after re-run"
 else
-  fail "triage symlink target changed after re-run: $triage_link_after"
+  fail "triage installation source changed after re-run: $triage_link_after"
 fi
 
-orchestrator_link_after="$(readlink "$(skill_link "$TEST_HOME" "ralph-orchestrator")")"
+orchestrator_link_after="$(skill_install_source "$(skill_link "$TEST_HOME" "ralph-orchestrator")")"
 if [[ "$orchestrator_link_after" == "$expected_orchestrator_target" ]]; then
-  pass "orchestrator symlink still points to correct source after re-run"
+  pass "orchestrator installation still points to correct source after re-run"
 else
-  fail "orchestrator symlink target changed after re-run: $orchestrator_link_after"
+  fail "orchestrator installation source changed after re-run: $orchestrator_link_after"
+fi
+
+for planning_skill in to-spec to-tickets; do
+  planning_link_after="$(skill_install_source "$(skill_link "$TEST_HOME" "$planning_skill")")"
+  expected_planning_target="$REPO_ROOT/skills/$planning_skill"
+  if [[ "$planning_link_after" == "$expected_planning_target" ]]; then
+    pass "$planning_skill installation still points to correct source after re-run"
+  else
+    fail "$planning_skill installation source changed after re-run: $planning_link_after"
+  fi
+done
+
+# A managed install belongs to Ralph, not to one checkout path. Reinstalling
+# from a replacement clone/worktree must refresh it to the new source.
+ALT_SOURCE="$(mktemp -d)"
+CLEANUP_DIRS+=("$ALT_SOURCE")
+mkdir -p "$ALT_SOURCE/skills"
+cp "$REPO_ROOT/install.sh" "$ALT_SOURCE/install.sh"
+chmod +x "$ALT_SOURCE/install.sh"
+cp -R "$REPO_ROOT/skills/." "$ALT_SOURCE/skills/"
+
+alternate_exit=0
+alternate_output=$(HOME="$TEST_HOME" "$ALT_SOURCE/install.sh" --skills-only 2>&1) || alternate_exit=$?
+if [[ "$alternate_exit" -eq 0 ]]; then
+  pass "--skills-only refreshes installs from a replacement checkout"
+else
+  fail "--skills-only replacement-checkout refresh failed: $alternate_output"
+fi
+
+alternate_spec_source="$(skill_install_source "$(skill_link "$TEST_HOME" "to-spec")")"
+if [[ "$alternate_spec_source" == "$ALT_SOURCE/skills/to-spec" ]]; then
+  pass "replacement-checkout refresh records the new source"
+else
+  fail "replacement-checkout source is '$alternate_spec_source', expected '$ALT_SOURCE/skills/to-spec'"
 fi
 
 # ---------------------------------------------------------------------------
 # Test 4: missing ~/.agents/skills/ prints actionable hint, exits 0
 # ---------------------------------------------------------------------------
 NO_SKILLS_HOME="$(make_fake_home_no_skills)"
+CLEANUP_DIRS+=("$NO_SKILLS_HOME")
 
 hint_exit=0
 hint_output=$(HOME="$NO_SKILLS_HOME" "$REPO_ROOT/install.sh" --skills-only 2>&1) || hint_exit=$?
@@ -269,10 +345,19 @@ else
   fail "should not create orchestrator symlink when ~/.agents/skills/ doesn't exist"
 fi
 
+for planning_skill in to-spec to-tickets; do
+  if [[ ! -e "$NO_SKILLS_HOME/.agents/skills/$planning_skill" ]]; then
+    pass "no $planning_skill symlink created when ~/.agents/skills/ missing"
+  else
+    fail "should not create $planning_skill symlink when ~/.agents/skills/ doesn't exist"
+  fi
+done
+
 # ---------------------------------------------------------------------------
 # Test 5: non-symlink at target path is not clobbered
 # ---------------------------------------------------------------------------
 SAFE_HOME="$(make_fake_home)"
+CLEANUP_DIRS+=("$SAFE_HOME")
 
 # Place a real file at the target location
 mkdir -p "$SAFE_HOME/.agents/skills"
@@ -297,6 +382,7 @@ fi
 # Test 6: --both mode installs skills (best-effort, does not fail on missing skills dir)
 # ---------------------------------------------------------------------------
 BOTH_HOME="$(make_fake_home)"
+CLEANUP_DIRS+=("$BOTH_HOME")
 TARGET="$BOTH_HOME/target"
 
 git init -q "$TARGET"
@@ -318,25 +404,34 @@ else
 fi
 
 both_link="$(skill_link "$BOTH_HOME")"
-if [[ -L "$both_link" ]]; then
-  pass "--both mode creates skills symlink"
+if is_skill_install "$both_link"; then
+  pass "--both mode installs to-ralph skill"
 else
-  fail "--both mode should create skills symlink at $both_link"
+  fail "--both mode should install to-ralph at $both_link"
 fi
 
 both_triage_link="$(skill_link "$BOTH_HOME" "ralph-issue-triage-agent")"
-if [[ -L "$both_triage_link" ]]; then
-  pass "--both mode creates triage skill symlink"
+if is_skill_install "$both_triage_link"; then
+  pass "--both mode installs triage skill"
 else
-  fail "--both mode should create triage skill symlink at $both_triage_link"
+  fail "--both mode should install triage skill at $both_triage_link"
 fi
 
 both_orchestrator_link="$(skill_link "$BOTH_HOME" "ralph-orchestrator")"
-if [[ -L "$both_orchestrator_link" ]]; then
-  pass "--both mode creates orchestrator skill symlink"
+if is_skill_install "$both_orchestrator_link"; then
+  pass "--both mode installs orchestrator skill"
 else
-  fail "--both mode should create orchestrator skill symlink at $both_orchestrator_link"
+  fail "--both mode should install orchestrator skill at $both_orchestrator_link"
 fi
+
+for planning_skill in to-spec to-tickets; do
+  both_planning_link="$(skill_link "$BOTH_HOME" "$planning_skill")"
+  if is_skill_install "$both_planning_link"; then
+    pass "--both mode installs $planning_skill skill"
+  else
+    fail "--both mode should install $planning_skill skill at $both_planning_link"
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Summary

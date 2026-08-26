@@ -1,6 +1,6 @@
 ---
 name: to-ralph
-description: Load a PRD issue into the Ralph TDD loop and surface preflight status. Use when the user wants to queue a PRD for Ralph after completing to-issues, or when they say "enqueue for Ralph", "send to Ralph", or "start the Ralph loop".
+description: Load a PRD issue into the Ralph TDD loop and surface preflight status. Use when the user wants to queue a PRD for Ralph after completing to-tickets, or when they say "enqueue for Ralph", "send to Ralph", or "start the Ralph loop".
 ---
 
 # To Ralph
@@ -8,7 +8,7 @@ description: Load a PRD issue into the Ralph TDD loop and surface preflight stat
 Close the planning loop by enqueueing a PRD's issues into Ralph and surfacing any blockers before the human launches workers.
 
 ```
-grill-me → to-prd → to-issues → to-ralph → ./.ralph/launch.sh
+grilling (optional) → to-spec → to-tickets → to-ralph → ./.ralph/launch.sh
 ```
 
 **You must never run `.ralph/launch.sh` without one of the permitted flags (`--enqueue`, `--enqueue-prd`, or `--status`). Launching workers is a human decision. Do not run `launch.sh` with `--start`, `--foreground`, or any flag that starts workers.**

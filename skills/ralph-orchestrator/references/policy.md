@@ -13,7 +13,7 @@ the headless Ralph worker's job (see "Worker contract").
 | Actor | Owns |
 | --- | --- |
 | **Ralph CLI** (`extension/cli.mjs`, `.ralph/launch.sh`) | Query/snapshot, taxonomy + preflight, baseline triage JSON, fingerprinted advisory comment create/update, enqueue, launch (`orchestrateRun`), verify. |
-| **`to-issues` skill** | PRD → slice authoring (a reasoning task — never build a CLI slicer). Sets each slice's initial label by the readiness-based **born-ready rule** (`docs/labels.md`), not by provenance: born `ralph:ready` only when the slice is newly created, auditable, non-HITL, non-blocked, non-duplicate, PR-sized, and test-verifiable; otherwise `ralph:needs-triage` (underspecified) or `ralph:hitl` (needs a human/product/security/destructive decision). |
+| **`to-tickets` skill** | PRD → slice authoring (a reasoning task — never build a CLI slicer). Sets each slice's initial label by the readiness-based **born-ready rule** (`docs/labels.md`), not by provenance: born `ralph:ready` only when the slice is newly created, auditable, non-HITL, free of unsatisfied external blockers and dependency cycles, non-duplicate, PR-sized, and test-verifiable; otherwise `ralph:needs-triage` (underspecified) or `ralph:hitl` (needs a human/product/security/destructive decision). |
 | **`ralph-issue-triage-agent` skill** | Optional advisory reasoning over a **frozen** triage snapshot only. No writes/discovery/enqueue/launch. |
 | **orchestrator** (this skill) | Consume structured output, apply gates, build the queue, launch behind gates, poll/monitor, owner briefs, ledger, and close a fully-delivered `work:prd` parent as completed (the one closure it owns — see "PRD parent close"). Spawns a sub-agent ONLY for shaping/owner-brief reasoning — never one agent per slice. |
 | **Ralph headless workers** | Claim + implement + test + dual-review + open/merge PR per `.ralph/RALPH.md`. |
@@ -76,7 +76,7 @@ Pause and emit an owner-decision brief (never auto-resolve) on any of:
    unwritable).
 
 Everything else is autonomous. The only human hand is at PRD creation; after
-`to-prd` hands off a PRD number, the orchestrator creates/labels/enqueues/launches
+`to-spec` hands off a PRD number, the orchestrator creates/labels/enqueues/launches
 without further confirmation, gated only by the authorization gates above.
 
 ## PRD parent close (the one closure the orchestrator owns)
@@ -125,10 +125,13 @@ not a general license to close issues. Everything else stays prohibited.
 Preflight warnings the orchestrator may reconcile autonomously by re-running the
 canonical CLI path (not by mutating GitHub directly): `missing_priority` defaulting
 to `priority:P2`, `RALPH.md` placeholder fixed by re-running `--enqueue-prd`, and
-queue-mode confirmation. Anything requiring a label/state/product judgment
-(`missing_state`, `missing_work_type`, `state_conflict`, `not_runnable_state`,
-`unresolved_blocker`, `assigned`, `closed`, dirty tree) is a hard stop with an
-owner brief — the orchestrator does not relabel or force a tree clean.
+queue-mode confirmation. Open dependency edges within the enqueued PRD frontier are
+sequencing constraints enforced by the worker loop, not preflight blockers.
+Dependency cycles and unsatisfied blockers outside that frontier are hard stops.
+Anything requiring a label/state/product judgment (`missing_state`,
+`missing_work_type`, `state_conflict`, `not_runnable_state`, `assigned`, `closed`,
+dirty tree) is also a hard stop with an owner brief — the orchestrator does not
+relabel or force a tree clean.
 
 ## Concurrency
 

@@ -6,6 +6,7 @@ import {
   buildLabelSchemaPlan,
   classifyIssue,
   orderIssuesForQueue,
+  parseBlockerNumbers,
   parseParentNumber,
   planBackfill,
   planRepair,
@@ -55,6 +56,32 @@ describe("parseParentNumber", () => {
     assert.equal(parseParentNumber("Example:\n```markdown\n## Parent\n#123\n```"), null);
     assert.equal(parseParentNumber("Example: `Parent #99` is the syntax"), null);
     assert.equal(parseParentNumber("~~~\nParent #88\n~~~"), null);
+  });
+});
+
+describe("parseBlockerNumbers", () => {
+  it("parses the canonical to-tickets body without treating parent evidence as a blocker", () => {
+    const body = [
+      "## Parent",
+      "Parent #320",
+      "",
+      "## Acceptance criteria",
+      "- [ ] Foo",
+      "",
+      "## Blocked by",
+      "- #322",
+      "- #323",
+      "",
+      "## Born-ready checklist",
+      "- Parent #320",
+      "- Blocked by: #322 and #323",
+    ].join("\n");
+
+    assert.deepEqual(parseBlockerNumbers(body), [322, 323]);
+  });
+
+  it("ignores prose blocker references", () => {
+    assert.deepEqual(parseBlockerNumbers("## Blocked by\nBlocked by #777"), []);
   });
 });
 

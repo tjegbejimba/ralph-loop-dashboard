@@ -13,7 +13,7 @@
         "Every factual Why bullet cites the frozen issue body, TJ comment, label list, linked PR URL, or docs/dashboard.md.",
         "The TJ comment is treated as authoritative for value and regression-test preflight guidance.",
         "Optional trust is N/A because TJ/owner evidence is present or, if mentioned, is factual and weaker than the TJ comment.",
-        "The output does not include gh issue, GraphQL, to-prd, to-issues, to-ralph, or Ralph enqueue commands."
+        "The output does not include gh issue, GraphQL, to-spec, to-tickets, to-ralph, or Ralph enqueue commands."
       ]
     },
     {
@@ -79,7 +79,7 @@
         "The author trust line for @helper is factual and weak, and it is not used as proof of correctness.",
         "The TJ comment on issue 202 is authoritative over labels like ralph:needs-triage and priority:P1.",
         "Labels ralph:needs-triage, priority:P1, and work:standalone are treated as advisory taxonomy/preflight classifications only.",
-        "No to-prd, to-issues, to-ralph, enqueue, worker launch, or GitHub mutation commands are present."
+        "No to-spec, to-tickets, to-ralph, enqueue, worker launch, or GitHub mutation commands are present."
       ]
     },
     {

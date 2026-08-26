@@ -1,6 +1,6 @@
 ---
 name: ralph-orchestrator
-description: "Autonomous control-plane orchestrator that drives a PRD or a scheduled repo sweep through the Ralph headless TDD loop end to end. Use when to-prd hands off a PRD issue number to run it through Ralph (validate -> slice via to-issues -> enqueue -> gated launch -> monitor -> drain), when the user says orchestrate/run/drive a PRD through Ralph, or on an hourly scheduled tick for TJ's Ready agent automation (repo-maintain sweep). Launches are gated by allowAgentLaunch + preflight via orchestrateRun(); it never claims, implements, or merges work itself. Do not use for one-off enqueue/preflight (use to-ralph), advisory-only issue triage (use ralph-issue-triage-agent), PRD authoring (to-prd), or slice authoring (to-issues)."
+description: "Autonomous control-plane orchestrator that drives a PRD or a scheduled repo sweep through the Ralph headless TDD loop end to end. Use when to-spec hands off a PRD issue number to run it through Ralph (validate -> slice via to-tickets -> enqueue -> gated launch -> monitor -> drain), when the user says orchestrate/run/drive a PRD through Ralph, or on an hourly scheduled tick for TJ's Ready agent automation (repo-maintain sweep). Launches are gated by allowAgentLaunch + preflight via orchestrateRun(); it never claims, implements, or merges work itself. Do not use for one-off enqueue/preflight (use to-ralph), advisory-only issue triage (use ralph-issue-triage-agent), PRD authoring (to-spec), or slice authoring (to-tickets)."
 ---
 
 # Ralph Orchestrator
@@ -12,8 +12,8 @@ owner-decision briefs on hard stops, and keeps a compact ledger. It does **not**
 claim, implement, review, or merge — that is the worker's job.
 
 ```
-grill-me → to-prd → ralph-orchestrator (prd-run) → Ralph workers
-                    └ uses to-issues to author slices, then enqueues + launches
+grilling (optional) → to-spec → ralph-orchestrator (prd-run) → Ralph workers
+                                └ uses to-tickets to author slices, then enqueues + launches
 repo-maintain (hourly schedule, per allowlist repo session) → ralph-orchestrator → Ralph workers
 ```
 
@@ -22,7 +22,7 @@ repo-maintain (hourly schedule, per allowlist repo session) → ralph-orchestrat
 Pick exactly one mode and **load only that mode file** — never both in context at
 once.
 
-- **`prd-run`** — entry is a single PRD issue number (a `to-prd` handoff, or the
+- **`prd-run`** — entry is a single PRD issue number (a `to-spec` handoff, or the
   operator says "run/orchestrate this PRD through Ralph"). → load
   [`modes/prd-run.md`](modes/prd-run.md).
 - **`repo-maintain`** — entry is an hourly Copilot scheduled-workflow tick with no
@@ -36,7 +36,7 @@ tick), ask which mode is intended before loading either file.
 
 ## Autonomy
 
-The only human hand is at PRD creation. Once `to-prd` hands off a PRD number (or a
+The only human hand is at PRD creation. Once `to-spec` hands off a PRD number (or a
 schedule tick fires), the orchestrator creates/labels/enqueues/launches without
 further confirmation — gated only by the authorization gates below. It pauses only
 on a hard stop.
@@ -72,7 +72,7 @@ auto-resolvable-vs-hard-stop split: [`references/policy.md`](references/policy.m
 Triage is **CLI-first hybrid** (ADR 0003): the orchestrator consumes
 `node extension/cli.mjs triage --dry-run --json` as the deterministic source of
 truth and escalates to the advisory `ralph-issue-triage-agent` (frozen snapshot,
-zero mutations) only by exception. `to-issues` owns slice authoring; the
+zero mutations) only by exception. `to-tickets` owns slice authoring; the
 orchestrator owns gating/queueing/launch/monitor/ledger **and closing a
 fully-delivered `work:prd` parent** (its one issue-closure power); workers own
 claim→implement→review→merge. Interface in
