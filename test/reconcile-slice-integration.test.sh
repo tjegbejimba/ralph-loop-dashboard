@@ -39,7 +39,7 @@ create_fixture() {
   local origin="$root/origin.git"
   local bin="$root/bin"
   local run_id="20260825-184631-43b25623"
-  local branch="ralph/prd/glasswork-505"
+  local branch="ralph/prd/prd-parent-tasks-hierarchy-and-leaf-first-execution-505"
 
   mkdir -p "$repo" "$bin"
   git init -q --bare "$origin"
@@ -69,12 +69,20 @@ create_fixture() {
   git -C "$repo" checkout -q main
 
   mkdir -p "$repo/.ralph/logs" "$repo/.ralph/runs/$run_id"
+  jq -n '{
+    repo: "test/example",
+    prd: {remote: "origin", deliveryBranch: "main"},
+    issue: {branchPrefix: "slice-"}
+  }' >"$repo/.ralph/config.json"
   printf '{"claims":{},"active_prd":"505","active_run_id":"%s"}\n' "$run_id" \
     >"$repo/.ralph/state.json"
   printf '[{"number":507,"title":"Legacy integrated slice"}]\n' \
     >"$repo/.ralph/runs/$run_id/queue.json"
-  printf '{"items":{"507":{"status":"merged","pr_number":"533","pid":null}}}\n' \
+  printf '{"items":{"507":{"status":"merged","pr_number":"533","pid":null,"legacy_marker":"remove-me"}}}\n' \
     >"$repo/.ralph/runs/$run_id/status.json"
+  jq -n --arg root "$(cd "$repo" && pwd -P)" \
+    '{repoRoot:$root,runMode:"until-empty",createdAt:"2026-08-25T18:46:31Z"}' \
+    >"$repo/.ralph/runs/$run_id/metadata.json"
   jq -n \
     --arg run "$run_id" \
     --arg branch "$branch" \
@@ -95,8 +103,12 @@ create_fixture() {
 set -euo pipefail
 if [[ "\$1 \$2 \$3" == "issue view 507" ]]; then
   case "\${GH_ISSUE_MODE:-closed}" in
-    closed) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","url":"https://github.com/test/example/issues/507"}\n' ;;
-    open) printf '{"number":507,"state":"OPEN","stateReason":null,"url":"https://github.com/test/example/issues/507"}\n' ;;
+    closed) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"test-owner"},"authorAssociation":"OWNER","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T20:01:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    closed-by-pr) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[{"number":533}],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    no-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    untrusted-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"outside-user"},"authorAssociation":"CONTRIBUTOR","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T20:01:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    stale-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"test-owner"},"authorAssociation":"OWNER","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T19:59:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    open) printf '{"number":507,"state":"OPEN","stateReason":null,"closedAt":null,"closedByPullRequestsReferences":[],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
     malformed) printf '{not-json\n' ;;
     fail) echo "simulated issue API failure" >&2; exit 1 ;;
   esac
@@ -108,9 +120,12 @@ if [[ "\$1 \$2 \$3" == "issue view 508" ]]; then
 fi
 if [[ "\$1 \$2 \$3" == "pr view 533" ]]; then
   case "\${GH_PR_MODE:-merged}" in
-    merged) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507}],"url":"https://github.com/test/example/pull/533"}\n' ;;
-    wrong-base) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"main","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507}],"url":"https://github.com/test/example/pull/533"}\n' ;;
-    wrong-link) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":999}],"url":"https://github.com/test/example/pull/533"}\n' ;;
+    merged) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Implements the slice. Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
+    closing-ref) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507}],"body":"","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-base) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"main","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-link) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":999}],"body":"Closes #999","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-head) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"feature-unrelated","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-head-repo) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"attacker/fork"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
     open) printf '{"number":533,"state":"OPEN","mergedAt":null,"baseRefName":"$branch","headRefName":"slice-507","mergeCommit":null,"url":"https://github.com/test/example/pull/533"}\n' ;;
     malformed) printf '{not-json\n' ;;
     fail) echo "simulated PR API failure" >&2; exit 1 ;;
@@ -121,19 +136,16 @@ if [[ "\$1 \$2 \$3" == "pr view 534" && -n "\${GH_DESCENDANT_COMMIT:-}" ]]; then
   printf '{"number":534,"state":"MERGED","mergedAt":"2026-08-25T21:00:00Z","baseRefName":"$branch","headRefName":"slice-508","mergeCommit":{"oid":"%s"},"closingIssuesReferences":[{"number":508}],"url":"https://github.com/test/example/pull/534"}\n' "\$GH_DESCENDANT_COMMIT"
   exit 0
 fi
-if [[ "\$1 \$2" == "pr list" ]]; then
-  case "\${GH_LIST_MODE:-exact}" in
-    exact)
-      if [[ -n "\${GH_DESCENDANT_COMMIT:-}" ]]; then
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507}]},{"number":534,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"%s"},"closingIssuesReferences":[{"number":508}]}]\n' "\$GH_DESCENDANT_COMMIT"
-      else
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507}]}]\n'
-      fi
-      ;;
-    conflict) printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507}]},{"number":534,"state":"OPEN","baseRefName":"$branch","mergeCommit":null,"closingIssuesReferences":[{"number":507}]}]\n' ;;
-    empty) printf '[]\n' ;;
+if [[ "\$1 \$2" == "api --paginate" ]]; then
+  case "\${GH_OPEN_PRS_MODE:-empty}" in
+    empty) printf '[[]]\n' ;;
+    body-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"other","repo":{"full_name":"test/example"}},"body":"Fixes #507"}]]\n' ;;
+    head-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"slice-507-competing","repo":{"full_name":"test/example"}},"body":""}]]\n' ;;
+    branch-pr) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"$branch","repo":{"full_name":"test/example"}},"body":""}]]\n' ;;
+    page-two-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"unrelated","repo":{"full_name":"test/example"}},"body":""}],[{"number":535,"state":"open","base":{"ref":"main"},"head":{"ref":"slice-507-page-two","repo":{"full_name":"test/example"}},"body":""}]]\n' ;;
     malformed) printf '{not-json\n' ;;
-    fail) echo "simulated PR list API failure" >&2; exit 1 ;;
+    malformed-page) printf '[{"number":534}]\n' ;;
+    fail) echo "simulated open PR API failure" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -160,10 +172,19 @@ jq -e '
   and .prd_number == 505
   and .issue.number == 507
   and .issue.state == "CLOSED"
+  and .issue.closed_at == "2026-08-25T23:05:34Z"
+  and .issue.closure_comment.author_association == "OWNER"
   and .issue.ralph_status == "merged"
   and .issue.integrated_commit == null
   and .pull_request.number == 533
   and .pull_request.state == "MERGED"
+  and .pull_request.merged_at == "2026-08-25T23:04:39Z"
+  and .pull_request.base
+    == "ralph/prd/prd-parent-tasks-hierarchy-and-leaf-first-execution-505"
+  and .pull_request.head == "slice-507-safe-canonical-parent-hierarchy"
+  and .pull_request.head_repository == "tjegbejimba/Glasswork"
+  and .pull_request.body_link == "Closes #507"
+  and .pull_request.closing_issue_references == []
   and .pull_request.merge_commit
     == "f1d5213c3e07148afa508b044ea630406ad98422"
   and .remote_integration_tip == .pull_request.merge_commit
@@ -194,9 +215,17 @@ printf '%s\n' "$proof" | jq -e \
     and .prd_number == "505"
     and .issue.number == 507
     and .issue.state == "CLOSED"
+    and .issue.closed_at == "2026-08-25T20:05:00Z"
+    and .issue.closure.kind == "trusted-explicit-comment"
+    and .issue.closure.author == "test-owner"
+    and .issue.closure.author_association == "OWNER"
+    and .issue.closure.created_at == "2026-08-25T20:01:00Z"
     and .pull_request.number == 533
     and .pull_request.state == "MERGED"
     and .pull_request.base == $branch
+    and .pull_request.head == "slice-507-safe-canonical-parent-hierarchy"
+    and .pull_request.head_repository == "test/example"
+    and .pull_request.issue_link == "closing-keyword"
     and .pull_request.merge_commit == $commit
     and .remote.tip == $commit
     and .remote.policy == "exact-tip"
@@ -234,6 +263,19 @@ jq -e \
     and (.items["507"].integrated_at | type == "string" and length > 0)
     and .items["507"].workerId == null
     and .items["507"].pid == null
+    and .items["507"].legacy_marker == null
+    and ((.items["507"] | keys | sort) == [
+      "error",
+      "integrated_at",
+      "integrated_commit",
+      "logFile",
+      "pid",
+      "pr_number",
+      "reconciliation",
+      "startedAt",
+      "status",
+      "workerId"
+    ])
     and .items["507"].reconciliation.schema_version == 1
     and .items["507"].reconciliation.source
       == "operator-guarded-reconciliation"
@@ -290,10 +332,14 @@ assert_dry_run_rejected "$repo" "$bin" "$run_id" "not merged into owned branch" 
   GH_PR_MODE=wrong-base
 assert_dry_run_rejected "$repo" "$bin" "$run_id" "not linked to issue" \
   GH_PR_MODE=wrong-link
-echo "PASS: wrong PR base and issue link are rejected"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "does not use canonical issue head" \
+  GH_PR_MODE=wrong-head
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "head repository does not match" \
+  GH_PR_MODE=wrong-head-repo
+echo "PASS: wrong PR base, linkage, head, and head repository are rejected"
 
 echo ""
-echo "Test 6: dry-run accepts only fully accounted descendants of the target merge"
+echo "Test 6: exact-tip policy rejects even fully accounted descendants"
 IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture accounted-descendant)
 git -C "$repo" checkout -qb slice-508 "$branch"
 printf 'second integrated slice\n' >>"$repo/README.md"
@@ -320,30 +366,44 @@ jq '. + [{"number":508,"title":"Later integrated slice"}]' \
   >"$repo/.ralph/runs/$run_id/queue.tmp"
 mv "$repo/.ralph/runs/$run_id/queue.tmp" \
   "$repo/.ralph/runs/$run_id/queue.json"
-descendant_proof=$(
-  GH_DESCENDANT_COMMIT="$descendant_tip" \
-  RALPH_MAIN_REPO="$repo" \
-  RALPH_REPO="test/example" \
-  RALPH_GH_BIN="$bin/gh" \
-    "$REPO_ROOT/ralph/reconcile-slice.sh" \
-      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
-) || fail "fully accounted descendant history should be accepted"
-printf '%s\n' "$descendant_proof" | jq -e \
-  --arg tip "$descendant_tip" '
-    .remote.tip == $tip
-    and .remote.policy == "accounted-first-parent-descendant"
-    and .remote.accounted_commits == [$tip]
-  ' >/dev/null || fail "descendant proof should identify the exact accounted commits"
-echo "PASS: fully accounted first-parent descendant history is proven"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not equal current remote integration tip"
+echo "PASS: accounted descendants cannot weaken exact-tip recovery"
 
 echo ""
 echo "Test 7: dry-run rejects open issues and open pull requests"
 IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture open-state)
 assert_dry_run_rejected "$repo" "$bin" "$run_id" "not closed" \
   GH_ISSUE_MODE=open
-assert_dry_run_rejected "$repo" "$bin" "$run_id" "not merged into owned branch" \
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "not merged" \
   GH_PR_MODE=open
 echo "PASS: open issue and PR evidence are rejected"
+
+echo ""
+echo "Test 7a: issue closure provenance is mandatory and independently trusted"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture closure-provenance)
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "lacks canonical closure provenance" \
+  GH_ISSUE_MODE=no-closure
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "lacks canonical closure provenance" \
+  GH_ISSUE_MODE=untrusted-closure
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "lacks canonical closure provenance" \
+  GH_ISSUE_MODE=stale-closure
+closing_ref_proof=$(
+  GH_ISSUE_MODE=closed-by-pr \
+  GH_PR_MODE=closing-ref \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
+) || fail "GitHub closing-reference provenance should be accepted"
+printf '%s\n' "$closing_ref_proof" \
+  | jq -e '
+      .issue.closure.kind == "github-closing-reference"
+      and .pull_request.issue_link == "github-closing-reference"
+    ' >/dev/null \
+  || fail "closing-reference proof should preserve exact provenance"
+echo "PASS: missing, untrusted, and stale closure evidence fail closed"
 
 echo ""
 echo "Test 8: unaccounted remote descendants fail closed"
@@ -354,7 +414,7 @@ git -C "$repo" commit -qam "unaccounted branch movement"
 git -C "$repo" push -q origin "$branch"
 git -C "$repo" checkout -q main
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "lacks unique canonical slice evidence"
+  "does not equal current remote integration tip"
 echo "PASS: descendant branch ambiguity is rejected"
 
 echo ""
@@ -446,7 +506,13 @@ assert_dry_run_rejected "$repo" "$bin" "$run_id" \
 
 IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture conflicting-pr)
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "missing or conflicting" GH_LIST_MODE=conflict
+  "another open delivery PR" GH_OPEN_PRS_MODE=body-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=head-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=page-two-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "integration branch has a live pull request" GH_OPEN_PRS_MODE=branch-pr
 echo "PASS: ownership and pull request conflicts are rejected"
 
 echo ""
@@ -460,6 +526,9 @@ jq '.remote = "evil"' "$repo/.ralph/runs/$run_id/ownership.json" \
   >"$repo/.ralph/runs/$run_id/ownership.tmp"
 mv "$repo/.ralph/runs/$run_id/ownership.tmp" \
   "$repo/.ralph/runs/$run_id/ownership.json"
+jq '.prd.remote = "evil"' "$repo/.ralph/config.json" \
+  >"$repo/.ralph/config.tmp"
+mv "$repo/.ralph/config.tmp" "$repo/.ralph/config.json"
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "does not match GitHub repository"
 echo "PASS: mismatched Git remote is rejected"
@@ -524,6 +593,12 @@ assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "GitHub issue lookup failed" GH_ISSUE_MODE=fail
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "returned invalid evidence" GH_ISSUE_MODE=malformed
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "conflicting open pull request lookup failed" GH_OPEN_PRS_MODE=fail
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "returned malformed evidence" GH_OPEN_PRS_MODE=malformed
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "returned malformed evidence" GH_OPEN_PRS_MODE=malformed-page
 printf '{not-json\n' >"$repo/.ralph/runs/$run_id/status.json"
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "not a valid terminal prior run"
@@ -619,3 +694,51 @@ identical_after=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
 [[ "$identical_after" == "$identical_before" ]] \
   || fail "identical canonical evidence must not be rewritten"
 echo "PASS: identical canonical evidence remains unchanged"
+
+echo ""
+echo "Test 22: config and run metadata must bind to this repository and ownership"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture config-repo)
+jq '.repo = "attacker/mirror"' "$repo/.ralph/config.json" \
+  >"$repo/.ralph/config.tmp"
+mv "$repo/.ralph/config.tmp" "$repo/.ralph/config.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not match canonical Ralph config"
+
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture config-remote)
+jq '.prd.remote = "upstream"' "$repo/.ralph/config.json" \
+  >"$repo/.ralph/config.tmp"
+mv "$repo/.ralph/config.tmp" "$repo/.ralph/config.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not match configured PRD remote"
+
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture metadata-root)
+mkdir -p "$TEST_ROOT/metadata-root/other"
+jq --arg root "$TEST_ROOT/metadata-root/other" '.repoRoot = $root' \
+  "$repo/.ralph/runs/$run_id/metadata.json" \
+  >"$repo/.ralph/runs/$run_id/metadata.tmp"
+mv "$repo/.ralph/runs/$run_id/metadata.tmp" \
+  "$repo/.ralph/runs/$run_id/metadata.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not belong to this repository"
+echo "PASS: configuration and run metadata are canonical ownership evidence"
+
+echo ""
+echo "Test 23: native Windows metadata resolves to the same repository"
+if command -v cygpath >/dev/null 2>&1; then
+  IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture windows-metadata)
+  native_root=$(cygpath -w "$repo")
+  jq --arg root "$native_root" '.repoRoot = $root' \
+    "$repo/.ralph/runs/$run_id/metadata.json" \
+    >"$repo/.ralph/runs/$run_id/metadata.tmp"
+  mv "$repo/.ralph/runs/$run_id/metadata.tmp" \
+    "$repo/.ralph/runs/$run_id/metadata.json"
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >/dev/null \
+    || fail "native Windows metadata path should normalize to the active repository"
+  echo "PASS: native Windows metadata path is canonicalized"
+else
+  echo "SKIP: native Windows metadata path requires cygpath"
+fi

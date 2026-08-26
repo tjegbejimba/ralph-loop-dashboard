@@ -144,14 +144,24 @@ jq . "$proof_file"
 
 The dry-run succeeds only when all of these facts are unambiguous:
 
-- The run ID, PRD, queue, status, and one active ownership record agree; the run
-  is terminal and the ownership record is neither transferring nor retiring.
+- The run ID, PRD, queue, status, run metadata, Ralph config, and one active
+  ownership record agree. The metadata resolves to the current repository
+  (including native Windows paths), the run is terminal, and ownership is
+  neither transferring nor retiring. Configured repository, remote, delivery
+  branch, and issue-branch prefix must match the ownership evidence.
 - `state.json` is valid, has no claims, and does not name another active run.
 - Strict process inspection finds no scoped launcher or worker; no launcher
   pidfile, launcher/worker lock, or linked worktree exists.
-- The issue is closed. The exact PR exists, is merged, targets the owned
-  integration branch, names that issue in its closing references, and is the
-  only PR linked to that issue and base.
+- The issue is closed with a closure timestamp. The exact PR exists, is merged,
+  targets the owned integration branch, comes from the same repository, and
+  uses the configured `<prefix><issue>-...` head. Its GitHub closing references
+  or body closing keyword must name the issue.
+- Issue closure must independently point to that PR, either through GitHub's
+  closing-PR references or one exact OWNER/MEMBER/COLLABORATOR closure comment
+  written between PR merge and issue closure. This supports non-default-base
+  integration PRs such as `Closes #507`, which GitHub does not auto-close.
+- Exhaustive paginated inspection finds no live PR from the integration branch
+  and no other open PR whose body or canonical issue head claims the slice.
 - The configured Git remote is a network URL for the same GitHub `owner/repo`
   returned by the API. Local and path-like remotes are rejected.
 - The remote branch exists at one exact tip, descends from both frozen ownership
@@ -160,21 +170,20 @@ The dry-run succeeds only when all of these facts are unambiguous:
   cannot be attributed to a later run.
 - Git replacement refs and legacy grafts must be absent. Ancestry checks also
   disable replacement objects explicitly.
-- The PR merge commit is either the exact remote tip or lies on its first-parent
-  history. In the latter case, every later first-parent commit must have exactly
-  one different `slice-integrated` status item with a valid PR number and
-  integration timestamp. Ralph independently verifies each accounted issue and
-  PR through GitHub, including its closing reference, merged state, branch base,
-  and merge commit. Direct or otherwise unaccounted branch movement is rejected.
+- The PR merge commit equals the current remote integration-branch tip exactly.
+  Descendant commits are rejected even if they have other canonical status
+  evidence; an operator must reconcile against an unambiguous exact tip.
 - Existing evidence is either the expected legacy `merged` item, or identical
   canonical evidence. Conflicting PR, commit, or provenance fails closed.
 
 The proof records the authenticated GitHub operator, repository, run/PRD/issue/
-PR identities, URLs, merge time and commit, ownership branch and remote, exact
-remote tip, tip-accounting policy, later accounted commits, prior status
-evidence, and proof timestamp. Apply stores that reviewed proof under
+PR identities, issue closure source and time, exact PR body linkage, head and
+head repository, URLs, merge time and commit, config and run-metadata binding,
+ownership branch and remote, exact remote tip, prior status evidence, and proof
+timestamp. Apply stores that reviewed proof under
 `items["<issue>"].reconciliation`, adds its own apply timestamp and source
-`operator-guarded-reconciliation`, and writes the canonical top-level fields:
+`operator-guarded-reconciliation`, then invokes the normal slice-integration
+lifecycle helper to atomically replace the item with canonical fields:
 
 ```json
 {
