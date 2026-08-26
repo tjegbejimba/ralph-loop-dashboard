@@ -1,0 +1,17 @@
+{
+  "repository": "tjegbejimba/Glasswork",
+  "run_id": "20260825-184631-43b25623",
+  "prd_number": 505,
+  "issue": {
+    "number": 507,
+    "state": "CLOSED",
+    "ralph_status": "merged",
+    "integrated_commit": null
+  },
+  "pull_request": {
+    "number": 533,
+    "state": "MERGED",
+    "merge_commit": "f1d5213c3e07148afa508b044ea630406ad98422"
+  },
+  "remote_integration_tip": "f1d5213c3e07148afa508b044ea630406ad98422"
+}

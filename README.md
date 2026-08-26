@@ -15,6 +15,7 @@ ralph-loop-dashboard/
 ├── ralph/                      # The loop itself
 │   ├── ralph.sh                # Main loop: pick lowest-numbered open issue, run, wait for merge
 │   ├── launch.sh               # Idempotent worktree setup + background launcher
+│   ├── reconcile-slice.sh      # Guarded legacy integrated-slice evidence repair
 │   └── RALPH.md.template       # Per-iteration prompt (workflow law for the agent)
 ├── extension/                  # The Copilot CLI dashboard extension
 │   ├── extension.mjs           # Bootstrapper

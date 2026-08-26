@@ -7,6 +7,7 @@ This document describes Ralph's recovery and reset behavior for operators and ma
 3. **Terminal failure exclusion** — why exhausted failures don't auto-retry
 4. **Reset budget operation** — how operators can manually retry terminal failures
 5. **PRD ownership recovery** — how published branches transfer between runs
+6. **Legacy integrated-slice reconciliation** — how operators repair missing canonical evidence
 
 ---
 
@@ -104,6 +105,91 @@ from being killed solely because ownership setup has not yet produced a worker
 status item.
 
 ---
+
+## Legacy Integrated-Slice Reconciliation
+
+Use `.ralph/reconcile-slice.sh` only when a prior terminal PRD run delivered a
+slice to its owned integration branch but retained legacy `merged` status
+instead of canonical `slice-integrated` evidence. Never call
+`record_slice_integrated` directly and never hand-edit `status.json`.
+
+The command has a mandatory two-step contract. Dry-run independently proves the
+local, GitHub, process, worktree, ownership, and branch evidence and emits one
+JSON proof. Apply requires that reviewed proof, acquires both launcher setup
+locks and the shared state lock, then repeats every proof while locked before
+atomically replacing `status.json`.
+
+```bash
+# Run from the target repository in Bash (including Git Bash on Windows).
+proof_file="$(mktemp "${TMPDIR:-/tmp}/ralph-reconcile-507.XXXXXX.json")"
+
+.ralph/reconcile-slice.sh \
+  --run 20260825-184631-43b25623 \
+  --prd 505 \
+  --issue 507 \
+  --pr 533 \
+  --dry-run >"$proof_file"
+
+# Review the complete proof before applying it.
+jq . "$proof_file"
+
+.ralph/reconcile-slice.sh \
+  --run 20260825-184631-43b25623 \
+  --prd 505 \
+  --issue 507 \
+  --pr 533 \
+  --apply \
+  --proof "$proof_file"
+```
+
+The dry-run succeeds only when all of these facts are unambiguous:
+
+- The run ID, PRD, queue, status, and one active ownership record agree; the run
+  is terminal and the ownership record is neither transferring nor retiring.
+- `state.json` is valid, has no claims, and does not name another active run.
+- Strict process inspection finds no scoped launcher or worker; no launcher
+  pidfile, launcher/worker lock, or linked worktree exists.
+- The issue is closed. The exact PR exists, is merged, targets the owned
+  integration branch, names that issue in its closing references, and is the
+  only PR linked to that issue and base.
+- The configured Git remote is a network URL for the same GitHub `owner/repo`
+  returned by the API. Local and path-like remotes are rejected.
+- The remote branch exists at one exact tip, descends from both frozen ownership
+  commits, and does not conflict with a local branch tip. The target merge must
+  be a strict descendant of the run's frozen owned tip, so a historical merge
+  cannot be attributed to a later run.
+- Git replacement refs and legacy grafts must be absent. Ancestry checks also
+  disable replacement objects explicitly.
+- The PR merge commit is either the exact remote tip or lies on its first-parent
+  history. In the latter case, every later first-parent commit must have exactly
+  one different `slice-integrated` status item with a valid PR number and
+  integration timestamp. Ralph independently verifies each accounted issue and
+  PR through GitHub, including its closing reference, merged state, branch base,
+  and merge commit. Direct or otherwise unaccounted branch movement is rejected.
+- Existing evidence is either the expected legacy `merged` item, or identical
+  canonical evidence. Conflicting PR, commit, or provenance fails closed.
+
+The proof records the authenticated GitHub operator, repository, run/PRD/issue/
+PR identities, URLs, merge time and commit, ownership branch and remote, exact
+remote tip, tip-accounting policy, later accounted commits, prior status
+evidence, and proof timestamp. Apply stores that reviewed proof under
+`items["<issue>"].reconciliation`, adds its own apply timestamp and source
+`operator-guarded-reconciliation`, and writes the canonical top-level fields:
+
+```json
+{
+  "status": "slice-integrated",
+  "pr_number": "533",
+  "integrated_commit": "<verified merge commit>",
+  "integrated_at": "<reconciliation apply time>"
+}
+```
+
+If any API call, JSON parse, process inspection, fetch, lock, atomic rename, or
+revalidation fails, no canonical evidence is written. If evidence changes after
+dry-run, discard the proof and start again. Reapplying the same proof, or
+applying a fresh proof to identical canonical evidence, returns `unchanged`
+without rewriting status.
 
 ## Stale Worker Reconciliation
 

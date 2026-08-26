@@ -57,6 +57,11 @@ if ! cmp -s "$REPO_ROOT/ralph/launch.sh" "$TARGET/.ralph/launch.sh"; then
   exit 1
 fi
 
+if ! cmp -s "$REPO_ROOT/ralph/reconcile-slice.sh" "$TARGET/.ralph/reconcile-slice.sh"; then
+  echo "FAIL: installer should install/refresh reconcile-slice.sh"
+  exit 1
+fi
+
 if ! cmp -s "$REPO_ROOT/ralph/lib/status.sh" "$TARGET/.ralph/lib/status.sh"; then
   echo "FAIL: installer should refresh lib/status.sh"
   exit 1
@@ -67,7 +72,9 @@ if ! cmp -s "$REPO_ROOT/ralph/lib/labels.sh" "$TARGET/.ralph/lib/labels.sh"; the
   exit 1
 fi
 
-if [[ ! -x "$TARGET/.ralph/launch.sh" || ! -x "$TARGET/.ralph/ralph.sh" ]]; then
+if [[ ! -x "$TARGET/.ralph/launch.sh" \
+  || ! -x "$TARGET/.ralph/ralph.sh" \
+  || ! -x "$TARGET/.ralph/reconcile-slice.sh" ]]; then
   echo "FAIL: installer should keep shell entrypoints executable"
   exit 1
 fi
