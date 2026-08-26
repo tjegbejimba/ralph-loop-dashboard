@@ -67,6 +67,11 @@ if ! cmp -s "$REPO_ROOT/ralph/lib/labels.sh" "$TARGET/.ralph/lib/labels.sh"; the
   exit 1
 fi
 
+if ! cmp -s "$REPO_ROOT/ralph/lib/slice-integration.sh" "$TARGET/.ralph/lib/slice-integration.sh"; then
+  echo "FAIL: installer should install/refresh lib/slice-integration.sh"
+  exit 1
+fi
+
 if [[ ! -x "$TARGET/.ralph/launch.sh" || ! -x "$TARGET/.ralph/ralph.sh" ]]; then
   echo "FAIL: installer should keep shell entrypoints executable"
   exit 1

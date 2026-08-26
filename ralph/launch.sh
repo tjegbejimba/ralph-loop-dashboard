@@ -14,6 +14,7 @@
 #   .ralph/launch.sh --cleanup    # stop workers and remove clean loop worktrees
 #   .ralph/launch.sh --enqueue <N>... # write issue numbers to config.json
 #   .ralph/launch.sh --enqueue-prd <N> # resolve PRD slices and enqueue
+#   .ralph/launch.sh --reconcile-slice-integration ... # guarded evidence repair
 #   .ralph/launch.sh --once       # run one worker iteration, then exit
 #   .ralph/launch.sh --help       # show usage
 #
@@ -237,6 +238,13 @@ if [[ -f "$_prd_branch_lib" ]]; then
   . "$_prd_branch_lib"
 fi
 
+_slice_integration_lib="$MAIN_REPO/.ralph/lib/slice-integration.sh"
+if [[ -f "$_slice_integration_lib" ]]; then
+  # shellcheck disable=SC1090
+  . "$_slice_integration_lib"
+fi
+unset _slice_integration_lib
+
 # Terminal CLI helper (optional). Provides resolve_terminal_cli /
 # invoke_terminal_cli for --status augmentation and the new --watch / --follow
 # commands. Sourcing is conditional so older installs still work.
@@ -441,6 +449,7 @@ Usage:
   .ralph/launch.sh --cleanup                # stop workers + remove worktrees
   .ralph/launch.sh --enqueue <N>...         # write issue numbers to config.json
   .ralph/launch.sh --enqueue-prd <N>        # resolve PRD slices and enqueue them
+  .ralph/launch.sh --reconcile-slice-integration --run-id ID --issue N --pr N --prd N --branch BRANCH
   .ralph/launch.sh --once                   # run one worker iteration, then exit
   .ralph/launch.sh --help | -h              # print this message
 
@@ -454,6 +463,12 @@ Options:
       (ralph:ready, work:slice, exact Parent #N marker, unassigned) via GitHub
       search, enqueues them via --enqueue, and updates the {{PRD_REFERENCE}} in
       .ralph/RALPH.md. Mutually exclusive with --enqueue.
+
+  --reconcile-slice-integration
+      Repair missing terminal slice-integration evidence after independently
+      proving the closed issue, merged PR, exact PRD base and remote tip, run
+      ownership, and absence of live or conflicting work. Requires explicit
+      --run-id, --issue, --pr, --prd, and --branch values. Idempotent.
 
   --foreground    Run the worker loop in the foreground (RALPH_PARALLELISM=1 only).
   --once          Ask each worker to run one iteration, then exit.
@@ -495,6 +510,73 @@ USAGE
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   print_usage
   exit 0
+fi
+
+if [[ "${1:-}" == "--reconcile-slice-integration" ]]; then
+  shift
+  _reconcile_run=""
+  _reconcile_issue=""
+  _reconcile_pr=""
+  _reconcile_prd=""
+  _reconcile_branch=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --run-id)
+        [[ $# -ge 2 ]] || { echo "ERROR: --run-id requires a value" >&2; exit 2; }
+        _reconcile_run="$2"
+        shift 2
+        ;;
+      --issue)
+        [[ $# -ge 2 ]] || { echo "ERROR: --issue requires a value" >&2; exit 2; }
+        _reconcile_issue="$2"
+        shift 2
+        ;;
+      --pr)
+        [[ $# -ge 2 ]] || { echo "ERROR: --pr requires a value" >&2; exit 2; }
+        _reconcile_pr="$2"
+        shift 2
+        ;;
+      --prd)
+        [[ $# -ge 2 ]] || { echo "ERROR: --prd requires a value" >&2; exit 2; }
+        _reconcile_prd="$2"
+        shift 2
+        ;;
+      --branch)
+        [[ $# -ge 2 ]] || { echo "ERROR: --branch requires a value" >&2; exit 2; }
+        _reconcile_branch="$2"
+        shift 2
+        ;;
+      *)
+        echo "ERROR: Unknown reconciliation option '$1'" >&2
+        exit 2
+        ;;
+    esac
+  done
+  if [[ -z "$_reconcile_run" || -z "$_reconcile_issue" || -z "$_reconcile_pr" \
+    || -z "$_reconcile_prd" || -z "$_reconcile_branch" ]]; then
+    echo "ERROR: --reconcile-slice-integration requires --run-id, --issue, --pr, --prd, and --branch" >&2
+    exit 2
+  fi
+  if ! declare -F reconcile_slice_integration_evidence >/dev/null 2>&1; then
+    echo "ERROR: Guarded slice reconciliation is unavailable; refresh Ralph scripts" >&2
+    exit 2
+  fi
+  if ! acquire_launcher_setup_locks; then
+    exit 1
+  fi
+  trap 'release_launcher_setup_locks' EXIT
+  (
+    cd "$MAIN_REPO"
+    reconcile_slice_integration_evidence \
+      "$_reconcile_run" \
+      "$_reconcile_issue" \
+      "$_reconcile_pr" \
+      "$_reconcile_prd" \
+      "$_reconcile_branch" \
+      "$MAIN_REPO" \
+      "$REPO"
+  )
+  exit $?
 fi
 
 if [[ "${1:-}" == "--status" ]]; then
