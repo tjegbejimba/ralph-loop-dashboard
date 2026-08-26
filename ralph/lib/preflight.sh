@@ -84,7 +84,11 @@ _preflight_fetch_issue() {
 _preflight_scan_issue() {
   local n="$1"
   local record state body
-  record=$(_preflight_fetch_issue "$n")
+  if [[ "$#" -ge 2 ]]; then
+    record="$2"
+  else
+    record=$(_preflight_fetch_issue "$n")
+  fi
   if [[ -z "$record" ]]; then
     _preflight_emit_issue "$n" "lookup_failed" "?"
     PREFLIGHT_BLOCKERS_FOUND=1
@@ -174,11 +178,90 @@ preflight_run() {
     echo "  Queue mode: direct-numbers (${nums_count} issues)"
     echo "  Issues:"
     PREFLIGHT_ISSUE_COUNT="$nums_count"
+    local queue_records=()
     local n
     while IFS= read -r n; do
       [[ -z "$n" ]] && continue
-      _preflight_scan_issue "$n"
+      queue_records[$n]=$(_preflight_fetch_issue "$n")
     done < <(echo "$numbers_json" | jq -r '.[]' | tr -d '\r')
+
+    # Open dependencies within this same queue are sequencing edges, not start
+    # blockers. Closed queue entries are deliberately excluded: a dependent must
+    # still prove that such a blocker closed through a merged PR.
+    RALPH_INTERNAL_BLOCKER_NUMBERS=""
+    while IFS= read -r n; do
+      [[ -z "$n" ]] && continue
+      local internal_record internal_state
+      internal_record="${queue_records[$n]-}"
+      internal_state=$(echo "$internal_record" | jq -r '.state // ""' 2>/dev/null | tr -d '\r')
+      if [[ "$internal_state" == "OPEN" ]]; then
+        RALPH_INTERNAL_BLOCKER_NUMBERS="${RALPH_INTERNAL_BLOCKER_NUMBERS}${n} "
+      fi
+    done < <(echo "$numbers_json" | jq -r '.[]' | tr -d '\r')
+
+    # Cache unique external/closed blocker checks once. Per-issue classification
+    # then consumes these lists without repeating GitHub requests.
+    RALPH_SATISFIED_BLOCKER_NUMBERS=""
+    RALPH_UNSATISFIED_BLOCKER_NUMBERS=""
+    local all_blocker_numbers=() blocker_num blocker_body
+    while IFS= read -r n; do
+      [[ -z "$n" ]] && continue
+      blocker_body=$(echo "${queue_records[$n]-}" | jq -r '.body // ""' 2>/dev/null | tr -d '\r')
+      while IFS= read -r blocker_num; do
+        [[ -n "$blocker_num" ]] && all_blocker_numbers+=("$blocker_num")
+      done < <(parse_blockers "$blocker_body")
+    done < <(echo "$numbers_json" | jq -r '.[]' | tr -d '\r')
+    while IFS= read -r blocker_num; do
+      [[ -z "$blocker_num" ]] && continue
+      if [[ " $RALPH_INTERNAL_BLOCKER_NUMBERS " == *" $blocker_num "* ]]; then
+        continue
+      fi
+      if [[ "$(is_issue_satisfied "$blocker_num")" == "1" ]]; then
+        RALPH_SATISFIED_BLOCKER_NUMBERS="${RALPH_SATISFIED_BLOCKER_NUMBERS}${blocker_num} "
+      else
+        RALPH_UNSATISFIED_BLOCKER_NUMBERS="${RALPH_UNSATISFIED_BLOCKER_NUMBERS}${blocker_num} "
+      fi
+    done < <(printf '%s\n' "${all_blocker_numbers[@]:-}" | sed '/^$/d' | sort -nu)
+
+    if declare -F parse_blockers >/dev/null 2>&1; then
+      local cycle_remaining=() cycle_next=() cycle_num cycle_body cycle_blocker
+      local cycle_waits cycle_progress cycle_display
+      read -r -a cycle_remaining <<<"$RALPH_INTERNAL_BLOCKER_NUMBERS"
+      while [[ "${#cycle_remaining[@]}" -gt 0 ]]; do
+        cycle_next=()
+        cycle_progress=0
+        for cycle_num in "${cycle_remaining[@]}"; do
+          cycle_body=$(echo "${queue_records[$cycle_num]-}" | jq -r '.body // ""' 2>/dev/null | tr -d '\r')
+          cycle_waits=0
+          while IFS= read -r cycle_blocker; do
+            [[ -z "$cycle_blocker" ]] && continue
+            if [[ " ${cycle_remaining[*]} " == *" $cycle_blocker "* ]]; then
+              cycle_waits=1
+              break
+            fi
+          done < <(parse_blockers "$cycle_body")
+          if [[ "$cycle_waits" -eq 1 ]]; then
+            cycle_next+=("$cycle_num")
+          else
+            cycle_progress=1
+          fi
+        done
+        if [[ "$cycle_progress" -eq 0 ]]; then
+          cycle_display=$(printf '#%s ' "${cycle_remaining[@]}" | sed 's/ $//')
+          echo "  Dependency cycle: $cycle_display"
+          PREFLIGHT_BLOCKERS_FOUND=1
+          break
+        fi
+        cycle_remaining=("${cycle_next[@]}")
+      done
+    fi
+
+    while IFS= read -r n; do
+      [[ -z "$n" ]] && continue
+      _preflight_scan_issue "$n" "${queue_records[$n]-}"
+    done < <(echo "$numbers_json" | jq -r '.[]' | tr -d '\r')
+    unset RALPH_INTERNAL_BLOCKER_NUMBERS
+    unset RALPH_SATISFIED_BLOCKER_NUMBERS RALPH_UNSATISFIED_BLOCKER_NUMBERS
   else
     echo "  Queue mode: issueSearch: ${issue_search}"
     if [[ -z "$issue_search" ]]; then

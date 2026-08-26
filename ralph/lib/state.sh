@@ -245,7 +245,7 @@ state_get_resume_branch() {
 # The section is bounded by `## Blocked by` and either the next `## ` header,
 # end of body, OR the first non-blank line that isn't a list item / `none`
 # line. This keeps trailing footers like `Part of #<parent-prd>` or
-# `Closes #N` (canonical output of the `to-issues` skill) from being
+# `Closes #N` (canonical output of the `to-tickets` skill) from being
 # wrongly extracted as blockers — see issue #73.
 #
 # Extraction is bullet-only (`-`, `*`, or `+`): inline prose like

@@ -6,7 +6,8 @@
 #      the target repo so the loop is git-tracked per-project.
 #   2. The dashboard extension gets copied into ~/.copilot/extensions/
 #      so it's available in every Copilot CLI session, not just one repo.
-#   3. Bundled skills get symlinked into ~/.agents/skills/
+#   3. Bundled skills get linked into ~/.agents/skills/ (or installed as
+#      refreshable managed copies in native Windows Git Bash)
 #      so the global agent gains Ralph-specific workflows.
 #
 # Usage (from inside this repo):
@@ -30,7 +31,7 @@ Modes (default: --both):
   --both            Install loop scripts, dashboard extension, and skills (default)
   --scripts-only    Install only the .ralph/ loop scripts into the target repo
   --extension-only  Install only the dashboard extension into ~/.copilot/extensions/
-  --skills-only     Symlink bundled agent skills into ~/.agents/skills/
+  --skills-only     Install bundled agent skills into ~/.agents/skills/
                     No target repo is required for this mode.
   --check           Verify installed .ralph/* scripts match ralph/* source by content.
                     Exits 0 if content matches, non-zero if diverged (reports files).
@@ -43,14 +44,19 @@ Options:
   --help, -h        Show this help message and exit.
 
 Skills (installed in --both and --skills-only modes):
-  to-ralph          Symlinked to ~/.agents/skills/to-ralph.
+  to-spec           Installed at ~/.agents/skills/to-spec.
+                    Publishes a shaped Ralph PRD/spec parent and can hand it to
+                    the orchestrator.
+  to-tickets        Installed at ~/.agents/skills/to-tickets.
+                    Authors canonical tracer-bullet slice issues from a PRD.
+  to-ralph          Installed at ~/.agents/skills/to-ralph.
                     Enables the agent to enqueue a PRD into Ralph and surface
                     preflight warnings before you launch workers.
   ralph-issue-triage-agent
-                    Symlinked to ~/.agents/skills/ralph-issue-triage-agent.
+                    Installed at ~/.agents/skills/ralph-issue-triage-agent.
                     Enables dry-run-only advisory triage from frozen issue evidence.
   ralph-orchestrator
-                    Symlinked to ~/.agents/skills/ralph-orchestrator.
+                    Installed at ~/.agents/skills/ralph-orchestrator.
                     Control-plane orchestrator that drives a PRD (prd-run) or a
                     scheduled repo sweep (repo-maintain) through the Ralph loop.
 
@@ -537,6 +543,16 @@ install_skills() {
   local skill_sources=()
   local source skill_name install_target
 
+  is_managed_skill_copy() {
+    local candidate="$1" expected_source="$2"
+    local expected_skill
+    expected_skill="$(basename "$expected_source")"
+    [[ -d "$candidate" && -f "$candidate/.ralph-skill-source" ]] || return 1
+    grep -qxF 'owner=ralph-loop-dashboard' "$candidate/.ralph-skill-source" 2>/dev/null \
+      && grep -qxF 'version=1' "$candidate/.ralph-skill-source" 2>/dev/null \
+      && grep -qxF "skill=$expected_skill" "$candidate/.ralph-skill-source" 2>/dev/null
+  }
+
   if [[ ! -d "$skills_dir" ]]; then
     echo "ℹ️  ~/.agents/skills/ not found — bundled skills not installed."
     echo "   Create the directory and re-run to install skills:"
@@ -557,7 +573,8 @@ install_skills() {
   for source in "${skill_sources[@]}"; do
     skill_name="$(basename "$source")"
     install_target="$skills_dir/$skill_name"
-    if [[ -e "$install_target" && ! -L "$install_target" ]]; then
+    if [[ -e "$install_target" && ! -L "$install_target" ]] \
+      && ! is_managed_skill_copy "$install_target" "$source"; then
       echo "⚠️  $install_target exists and is not a symlink — leaving untouched." >&2
       echo "   Remove it manually to install the $skill_name skill." >&2
       return 1
@@ -568,13 +585,28 @@ install_skills() {
     skill_name="$(basename "$source")"
     install_target="$skills_dir/$skill_name"
 
-    # Remove stale symlink before re-creating (idempotent).
+    # Remove a stale repo-managed installation before re-creating it.
     if [[ -L "$install_target" ]]; then
       rm "$install_target"
+    elif is_managed_skill_copy "$install_target" "$source"; then
+      rm -rf "$install_target"
     fi
 
-    ln -s "$source" "$install_target"
-    echo "✅ $skill_name skill symlinked: $install_target -> $source"
+    case "$(uname -s)" in
+      MINGW*|MSYS*|CYGWIN*)
+        # Native Windows Git Bash emulates directory symlinks as plain copies.
+        # Make that behavior explicit and mark the copy so later installs can
+        # refresh it without clobbering an unrelated user-owned skill.
+        cp -R "$source" "$install_target"
+        printf 'owner=ralph-loop-dashboard\nversion=1\nskill=%s\nsource=%s\n' \
+          "$skill_name" "$source" > "$install_target/.ralph-skill-source"
+        echo "✅ $skill_name skill installed (managed copy): $install_target"
+        ;;
+      *)
+        ln -s "$source" "$install_target"
+        echo "✅ $skill_name skill symlinked: $install_target -> $source"
+        ;;
+    esac
   done
 }
 

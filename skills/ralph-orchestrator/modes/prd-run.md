@@ -5,11 +5,11 @@ PRD. Shared rules (gates, hard stops, worker contract, owner-brief, ledger) live
 `../references/policy.md`; the triage interface in `../references/triage-contract.md`.
 
 ```
-to-prd ──(PRD #N)──▶ ralph-orchestrator: prd-run ──▶ Ralph headless workers
+to-spec ──(PRD #N)──▶ ralph-orchestrator: prd-run ──▶ Ralph headless workers
                      validate → slice → enqueue → launch(gated) → monitor → drain
 ```
 
-Entry: a PRD issue number, handed off automatically by `to-prd` or supplied by the
+Entry: a PRD issue number, handed off by `to-spec` or supplied by the
 operator. After entry this mode is autonomous — no further confirmation — gated only
 by the authorization gates in policy. The single human hand was PRD creation.
 
@@ -26,9 +26,9 @@ by the authorization gates in policy. The single human hand was PRD creation.
    mislabeled PRD yourself. (Closing a *fully-delivered* PRD is different and is the
    orchestrator's to own — see step 8 and policy "PRD parent close".)
 
-3. **Author slices via `to-issues`.** Invoke the existing `to-issues` skill to turn
+3. **Author slices via `to-tickets`.** Invoke the repo-owned `to-tickets` skill to turn
    the PRD into independently-grabbable child slices. Slice authoring is a reasoning
-   task — **never** build or call a CLI slicer. `to-issues` creates each child with
+   task — **never** build or call a CLI slicer. `to-tickets` creates each child with
    an exact `Parent #N` marker and canonical labels (`work:slice`, a `priority:*`,
    and the state it assigns). The state is decided by the **readiness-based
    born-ready rule**, not by provenance (see `docs/labels.md` "Authoring labels at
@@ -36,7 +36,9 @@ by the authorization gates in policy. The single human hand was PRD creation.
    pass: each slice is born `ralph:ready` only if it independently passes the
    born-ready checklist (clear scope, verifiable acceptance criteria tied to a
    test, PR-sized runnable work, an in-body `## Born-ready checklist` evidence
-   section, an explicit `## Blocked by` section saying `None`, not a duplicate) **and** trips no HITL carve-out
+   section, an explicit `## Blocked by` section saying `None` or naming only
+   acyclic dependencies in the same authored frontier, not a duplicate) **and**
+   trips no HITL carve-out
    (destructive/migration/security/credentials/billing/privacy/architecture/owner-
    judgment → `ralph:hitl`). Slices that are underspecified stay `ralph:needs-triage`;
    slices needing a human/product/design decision stay `ralph:hitl`. So most AFK
@@ -55,10 +57,12 @@ by the authorization gates in policy. The single human hand was PRD creation.
 5. **Resolve preflight.** Read the verdict and per-issue findings. Reconcile only the
    auto-resolvable ones via the canonical CLI path (see policy "Auto-resolvable vs
    hard-stop preflight"); re-run `--enqueue-prd` if you fixed a placeholder/priority
-   default. Any label/state/blocker/dirty-tree finding is a **hard stop** → owner
-   brief, then stop. A slice found in a non-runnable state (e.g.
+   default. An open dependency inside the enqueued PRD frontier is expected: the
+   worker loop parks that slice until its queued blocker is delivered. Dependency
+   cycles and unsatisfied blockers outside the frontier remain **hard stops**, as do
+   any label/state/dirty-tree findings → owner brief, then stop. A slice found in a non-runnable state (e.g.
    `not_runnable_state(ralph:needs-triage)`) is today one of these hard stops —
-   though, because `to-issues` now births well-specified AFK slices runnable (step 3,
+   though, because `to-tickets` now births well-specified AFK slices runnable (step 3,
    born-ready rule), it should be rare. (A future deterministic promotion path — the
    lane router / `ralph:evaluated`
    promotion in #106/#109 — may auto-recover this once implemented; until that code
@@ -100,7 +104,7 @@ by the authorization gates in policy. The single human hand was PRD creation.
 ## Dry-run / plan mode (zero mutations)
 
 When the request is a dry run / plan (or any time mutations are not authorized),
-produce the plan **without** executing steps 3, 4, 6 — no `to-issues` issue
+produce the plan **without** executing steps 3, 4, 6 — no `to-tickets` issue
 creation, no `--enqueue*`, no `orchestrateRun`/launch, no `gh` writes, no
 `triage --live`. Use only read-only calls: `triage --dry-run --json`,
 `launch.sh --status`, `gh ... view/list`.
@@ -113,7 +117,7 @@ Emit exactly these sections:
 3. **Triage summary (compact)** — from `triage --dry-run --json`, one line per issue
    per `../references/triage-contract.md` (`#N url — rec/priority/safety — why`). No
    raw dumps.
-4. **Slice plan** — the slices `to-issues` would author (title, one-line scope,
+4. **Slice plan** — the slices `to-tickets` would author (title, one-line scope,
    `Parent #N`, intended `work:slice` + `priority:*`, dependencies). Numbered, not
    created.
 5. **Enqueue plan** — the exact command that *would* run

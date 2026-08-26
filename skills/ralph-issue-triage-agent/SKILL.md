@@ -17,7 +17,7 @@ Do not:
 
 - Comment on, edit, close, reopen, label, assign, milestone, lock, transfer, or otherwise mutate GitHub issues or PRs.
 - Run `gh issue comment`, `gh issue edit`, `gh issue close`, `gh issue reopen`, `gh pr edit`, GraphQL mutations, REST write calls, GitHub issue mutation tools, or scripts that do those writes.
-- Invoke `to-prd`, `to-issues`, `to-ralph`, create PRD/slice issues, or enqueue anything into Ralph.
+- Invoke `to-spec`, `to-tickets`, `to-ralph`, create PRD/slice issues, or enqueue anything into Ralph.
 - Start Ralph workers or call any Ralph enqueue path.
 - Print exact apply commands or mutation plans. Taxonomy changes may be suggested only as advisory classifications.
 - Edit code, run live services, inspect secrets, or broaden the task into implementation design.

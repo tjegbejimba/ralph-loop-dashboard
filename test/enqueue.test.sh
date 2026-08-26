@@ -189,7 +189,7 @@ case "$1 $2" in
     ;;
   "issue list")
     if echo "$@" | grep -qF "label:work:slice"; then
-      echo "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":9,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
+      printf "%s\n" "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":9,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #7\\n\\n## Blocked by\\n- #8\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
     else
       echo "[{\"number\": 10}]"
     fi
@@ -216,6 +216,88 @@ exit 1
   echo "$ralph_content" | grep -qF "{{PRD_REFERENCE}}" \
     && fail "--enqueue-prd leaves {{PRD_REFERENCE}} placeholder in RALPH.md" \
     || pass "--enqueue-prd removes {{PRD_REFERENCE}} from RALPH.md"
+}
+
+# Test 7b: external blockers remove the dependent internal chain from the frontier
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": []}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: {{PRD_REFERENCE}} -->
+EOF
+  bin_dir="$TEST_ROOT/bin-t7b"
+  write_mock_gh "$bin_dir" '
+case "$1 $2" in
+  "issue view")
+    num="$3"
+    if [[ "$num" == "7" ]]; then
+      echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"
+    else
+      [[ "$num" == "99" ]] && echo "$num" >> "$BLOCKER_LOOKUP_LOG"
+      echo "{\"number\":$num,\"state\":\"OPEN\",\"labels\":[],\"body\":\"\"}"
+    fi
+    exit 0
+    ;;
+  "issue list")
+    if echo "$@" | grep -qF "label:work:slice"; then
+      printf "%s\n" "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\\n\\n## Blocked by\\n- #99\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":9,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #7\\n\\n## Blocked by\\n- #8\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":10,\"state\":\"OPEN\",\"title\":\"Slice 3: C\",\"body\":\"Parent #7\\n\\n## Blocked by\\n- #99\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":11,\"state\":\"OPEN\",\"title\":\"Slice 4: D\",\"body\":\"Parent #7\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
+    else
+      echo "[]"
+    fi
+    exit 0
+    ;;
+esac
+exit 1
+'
+  rc=0
+  blocker_lookup_log="$TEST_ROOT/t7b-blocker-lookups.log"
+  out=$(BLOCKER_LOOKUP_LOG="$blocker_lookup_log" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --enqueue-prd 7 2>&1) || rc=$?
+  assert_exit_nonzero "$rc" "--enqueue-prd external blocker chain exits non-zero"
+  assert_contains "$out" "unsatisfied external blockers" "--enqueue-prd reports the externally blocked frontier"
+  assert_json "$repo/.ralph/config.json" '.issue.numbers | length' "0" "--enqueue-prd refuses a partial PRD queue"
+  lookup_count=$(wc -l < "$blocker_lookup_log" | tr -d ' ')
+  [[ "$lookup_count" == "1" ]] \
+    && pass "--enqueue-prd caches shared external blocker satisfaction" \
+    || fail "--enqueue-prd should query shared blocker #99 once, got $lookup_count"
+}
+
+# Test 7c: an internal dependency cycle fails before queue mutation
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": []}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: {{PRD_REFERENCE}} -->
+EOF
+  bin_dir="$TEST_ROOT/bin-t7c"
+  write_mock_gh "$bin_dir" '
+case "$1 $2" in
+  "issue view")
+    echo "{\"number\":7,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"
+    exit 0
+    ;;
+  "issue list")
+    if echo "$@" | grep -qF "label:work:slice"; then
+      printf "%s\n" "[{\"number\":8,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #7\\n\\n## Blocked by\\n- #9\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":9,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #7\\n\\n## Blocked by\\n- #8\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
+    else
+      echo "[]"
+    fi
+    exit 0
+    ;;
+esac
+exit 1
+'
+  rc=0
+  out=$(RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --enqueue-prd 7 2>&1) || rc=$?
+  assert_exit_nonzero "$rc" "--enqueue-prd dependency cycle exits non-zero"
+  assert_contains "$out" "dependency cycle" "--enqueue-prd reports the dependency cycle"
+  assert_json "$repo/.ralph/config.json" '.issue.numbers | length' "0" "--enqueue-prd leaves a cyclic frontier out of config"
 }
 
 # Test 8: --enqueue-prd no children found

@@ -14,9 +14,9 @@ Use `## Blocked by` as the canonical dependency section:
 - #124
 ```
 
-The dashboard dependency parser should also accept `## Depends on` as an alias,
-plus explicit inline phrases such as `Blocked by #123` or `Depends on #123`.
-Ordinary issue references, such as `Related to #123`, must not be treated as
+Both dashboard and shell parsers intentionally require bullets under
+`## Blocked by`. Inline prose such as `Blocked by #123`, `Depends on #123`, or
+`Related to #123` is ignored so parent/footer references cannot become accidental
 dependencies.
 
 `None` and `No blockers` under a dependency heading mean the issue has no

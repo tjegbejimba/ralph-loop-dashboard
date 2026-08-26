@@ -128,21 +128,22 @@ parallel workers and is the most thoroughly tested path.
 
 ## Agent skill workflow
 
-Ralph includes a `to-ralph` skill that closes the loop between planning and execution, and a `ralph-orchestrator` skill that drives the whole pipeline autonomously. The full agent-driven workflow:
+Ralph bundles the planning skills required to close the loop from a shaped idea to
+execution. The full agent-driven workflow:
 
 ```
-grill-me → to-prd → ralph-orchestrator (prd-run) → Ralph workers
-                    └ uses to-issues to author slices, then enqueues + launches (gated)
+grilling (optional) → to-spec → ralph-orchestrator (prd-run) → Ralph workers
+                                └ uses to-tickets to author slices, then enqueues + launches (gated)
 
 repo-maintain (hourly schedule) → ralph-orchestrator → Ralph workers
 ```
 
 | Step | Skill / Command | What it does |
 |------|-----------------|--------------|
-| 1 | `grill-me` | Interview the user until the plan is fully understood |
-| 2 | `to-prd` | Synthesize context into a PRD, publish it as a GitHub issue, and hand the PRD number to the orchestrator |
-| 3 | `ralph-orchestrator` (`prd-run`) | Validate the PRD, author slices via `to-issues`, enqueue, launch behind the gate, monitor, and drain |
-| — | `to-issues` | Invoked by the orchestrator to break the PRD into independently-grabbable slice issues |
+| 1 | `grilling` (optional) | Stress-test the idea until the important decisions are settled |
+| 2 | `to-spec` | Synthesize context into a Ralph PRD/spec issue and hand off when execution was requested |
+| 3 | `ralph-orchestrator` (`prd-run`) | Validate the PRD, author slices via `to-tickets`, enqueue, launch behind the gate, monitor, and drain |
+| — | `to-tickets` | Break the PRD into independently grabbable slice issues with canonical labels and blocking edges |
 | — | Ralph workers | Headless claim → implement → review → merge per `.ralph/RALPH.md` |
 
 `ralph-orchestrator` is a thin control plane: it consumes structured CLI signals, applies authorization gates, builds a bounded queue, launches **only** through `orchestrateRun()` behind `allowAgentLaunch` + preflight, monitors run state, raises owner-decision briefs on hard stops, and keeps a compact ledger at `.ralph/orchestrator/ledger.json`. It never claims, implements, or merges work itself. Its second mode, `repo-maintain`, is TJ's "Ready agent automation" — an hourly scheduled sweep that discovers canonical ready work across an allowlist and launches a bounded run behind the same gates. The two modes are lazy-loaded (`modes/prd-run.md`, `modes/repo-maintain.md`) so only the active one sits in context; shared policy lives in `references/policy.md`.
@@ -151,7 +152,7 @@ repo-maintain (hourly schedule) → ralph-orchestrator → Ralph workers
 
 ### Using to-ralph
 
-After `to-issues` has filed the slice issues, invoke the `to-ralph` skill:
+After `to-tickets` has filed the slice issues, invoke the `to-ralph` skill:
 
 ```
 /to-ralph
@@ -167,7 +168,7 @@ It will **never** start workers — that remains a human decision.
 
 ### Using ralph-orchestrator
 
-For an end-to-end autonomous run, `to-prd` hands the PRD issue number to the `ralph-orchestrator` skill. In `prd-run` mode it validates the PRD (`work:prd` + `ralph:evaluated`), authors slices via `to-issues`, enqueues with `.ralph/launch.sh --enqueue-prd <N>`, and — only when `allowAgentLaunch` is enabled and preflight passes — launches workers through `orchestrateRun()`, then monitors run state and drains. In `repo-maintain` mode (an hourly schedule tick) it discovers canonical ready work across an allowlist and launches a small bounded run behind the same gates.
+For an end-to-end autonomous run, `to-spec` hands the PRD issue number to the `ralph-orchestrator` skill when execution was requested. In `prd-run` mode it validates the PRD (`work:prd` + `ralph:evaluated`), authors slices via `to-tickets`, enqueues with `.ralph/launch.sh --enqueue-prd <N>`, and — only when `allowAgentLaunch` is enabled and preflight passes — launches workers through `orchestrateRun()`, then monitors run state and drains. In `repo-maintain` mode (an hourly schedule tick) it discovers canonical ready work across an allowlist and launches a small bounded run behind the same gates.
 
 Unlike `to-ralph`, the orchestrator *can* launch — but every launch is gated by `allowAgentLaunch: true` in `~/.ralph-dashboard/config.json` (default `false`) plus a passing preflight, both enforced inside `orchestrateRun()`. On any hard stop (gate not met, unresolved preflight, product decision, repeated worker stall, destructive action, missing access) it pauses and sends an owner-decision brief instead of improvising. It never claims, implements, reviews, or merges work itself. A dry-run/plan request performs zero mutations and emits the planned mode detection, triage summary, slice plan, enqueue plan, gated launch decision, and ledger JSON.
 
@@ -201,7 +202,7 @@ The skill is intentionally non-mutating and does not discover live queues by its
 
 ### Installing skills
 
-`install.sh` symlinks bundled skills from `skills/` into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically:
+`install.sh` installs bundled skills from `skills/` into `~/.agents/skills/` so the global Copilot/Claude agent picks them up automatically. POSIX and WSL installs use symlinks; native Windows Git Bash uses refreshable managed copies:
 
 ```bash
 ./install.sh /path/to/your/project      # installs scripts + dashboard/pipeline extensions + skills
@@ -267,7 +268,7 @@ unless `--canonical-labels` is supplied, and prints the exact triage comments
 without posting. Live mode only creates or updates the bot-owned triage opinion
 comment for the authenticated `gh` user (or an explicit `--bot-login`), capped at
 10 changed issues per repo. It never mutates labels, closes issues, creates
-PRDs/slices, invokes `to-prd`/`to-issues`/`to-ralph`, or enqueues Ralph workers.
+PRDs/slices, invokes `to-spec`/`to-tickets`/`to-ralph`, or enqueues Ralph workers.
 `Pursue` means "worth shaping," not "ready for Ralph."
 
 ### Tracking a run from the terminal
@@ -327,10 +328,12 @@ dependency section in the issue body:
 - #124
 ```
 
-`## Blocked by` is the canonical syntax. Dashboard parsing also treats
-`## Depends on` as an alias. A blocker is satisfied only when the blocker issue
-was closed by a merged PR, not merely closed manually. Stale claims (worker
-crashed) are auto-reaped on the next selection round.
+`## Blocked by` with bulleted issue references is the canonical syntax for both
+the dashboard and shell parsers. By default, a blocker is satisfied only when the
+blocker issue was closed by a merged PR; the explicit
+[`acceptManuallyClosed`](docs/manually-closed-blockers.md) opt-in also accepts
+completed manual closures. Stale claims (worker crashed) are auto-reaped on the
+next selection round.
 
 See [Dependency-aware run queues](docs/dependency-aware-run-queues.md) for the
 planned dashboard preflight contract.

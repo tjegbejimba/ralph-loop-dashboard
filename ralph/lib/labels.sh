@@ -161,10 +161,24 @@ _ralph_runnable_blocker_tags_for_states() {
     tags=$(_ralph_append_tag "$tags" "missing_parent")
   fi
 
-  if declare -F parse_blockers >/dev/null 2>&1; then
+  if [[ "${RALPH_SKIP_DEPENDENCY_BLOCKERS:-0}" != "1" ]] \
+    && declare -F parse_blockers >/dev/null 2>&1; then
     local blockers b unresolved=()
     blockers=$(parse_blockers "$body" || true)
     for b in $blockers; do
+      # A queued sibling is not a preflight blocker: the worker loop keeps the
+      # dependent parked until that sibling is delivered. External blockers
+      # still require satisfaction before the queue may start.
+      if [[ " ${RALPH_INTERNAL_BLOCKER_NUMBERS:-} " == *" $b "* ]]; then
+        continue
+      fi
+      if [[ " ${RALPH_SATISFIED_BLOCKER_NUMBERS:-} " == *" $b "* ]]; then
+        continue
+      fi
+      if [[ " ${RALPH_UNSATISFIED_BLOCKER_NUMBERS:-} " == *" $b "* ]]; then
+        unresolved+=("$b")
+        continue
+      fi
       local sat=0
       if declare -F is_issue_satisfied >/dev/null 2>&1; then
         sat=$(is_issue_satisfied "$b" 2>/dev/null || echo 0)

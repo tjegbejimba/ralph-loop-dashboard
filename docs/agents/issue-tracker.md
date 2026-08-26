@@ -53,3 +53,7 @@ GitHub shares one number space across issues and pull requests. If a bare
   follows the repository conventions above.
 - When a skill says **fetch the relevant ticket**, run
   `gh issue view <number> --comments`.
+- `to-spec` publishes a PRD parent with `work:prd`, `ralph:evaluated`, and one
+  `priority:*` label.
+- `to-tickets` publishes child slices with `work:slice`, one `priority:*`, a
+  filing-time state from the born-ready rule, and the exact `Parent #N` marker.

@@ -104,6 +104,13 @@ REPO="${RALPH_REPO:-$(git -C "$MAIN_REPO" config --get remote.origin.url 2>/dev/
 # gh binary — override via RALPH_GH_BIN for tests/CI environments where PATH
 # is manipulated before the script prepends /opt/homebrew/bin.
 GH="${RALPH_GH_BIN:-gh}"
+gh() {
+  if [[ "$GH" == "gh" ]]; then
+    command gh "$@"
+  else
+    "$GH" "$@"
+  fi
+}
 
 # Validate parallelism
 if ! [[ "$PARALLELISM" =~ ^[1-9][0-9]*$ ]]; then
@@ -178,6 +185,18 @@ LOG_DIR="$MAIN_REPO/.ralph/logs"
 mkdir -p "$LOG_DIR" "$MAIN_REPO/.ralph/lock"
 # shellcheck source=lib/state.sh
 . "$MAIN_REPO/.ralph/lib/state.sh"
+
+# Keep launcher/preflight blocker satisfaction aligned with the worker. The env
+# override wins; otherwise use the same opt-in config value ralph.sh reads.
+_cfg_accept_manual=""
+if [[ -f "$MAIN_REPO/.ralph/config.json" ]]; then
+  _cfg_accept_manual=$(jq -r '.worker.acceptManuallyClosed // empty' \
+    "$MAIN_REPO/.ralph/config.json" 2>/dev/null | tr -d '\r' || true)
+fi
+RALPH_ACCEPT_MANUALLY_CLOSED=$(normalize_bool \
+  "${RALPH_ACCEPT_MANUALLY_CLOSED:-${_cfg_accept_manual:-}}") || exit 1
+unset _cfg_accept_manual
+
 # shellcheck source=lib/status.sh
 _status_lib="$MAIN_REPO/.ralph/lib/status.sh"
 if [[ -f "$_status_lib" ]]; then
@@ -833,18 +852,81 @@ if [[ "${1:-}" == "--enqueue-prd" ]]; then
     --json number \
     --limit 100 2>/dev/null | jq 'length' 2>/dev/null || echo 0)
 
-  # Collect enqueueable issue numbers.
-  _runnable_numbers=()
+  # First identify canonical candidates without evaluating dependencies. That
+  # candidate set defines the PRD-internal frontier: open dependencies inside it
+  # are safe to enqueue together because the worker loop enforces their edges.
+  _candidate_numbers=()
   if declare -F ralph_enqueueable_blocker_tags >/dev/null 2>&1; then
-    while IFS= read -r _row; do
-      [[ -z "$_row" ]] && continue
-      _record=$(echo "$_row" | base64 --decode | tr -d '\r')
+    RALPH_SKIP_DEPENDENCY_BLOCKERS=1
+    while IFS= read -r _record; do
+      [[ -z "$_record" ]] && continue
       _num=$(echo "$_record" | jq -r '.number')
       _blockers=$(ralph_enqueueable_blocker_tags "$_record")
-      [[ -z "$_blockers" && -n "$_num" ]] && _runnable_numbers+=("$_num")
-    done < <(echo "$_runnable_json" | jq -r '.[] | @base64' 2>/dev/null || true)
-    unset _row _record _num _blockers
+      [[ -z "$_blockers" && -n "$_num" ]] && _candidate_numbers+=("$_num")
+    done < <(printf '%s\n' "$_runnable_json" | jq -c '.[]' 2>/dev/null | tr -d '\r' || true)
+    unset RALPH_SKIP_DEPENDENCY_BLOCKERS
+
+    # Cache every unique blocker check once for this enqueue pass. The label
+    # classifier may run repeatedly while the frontier reaches a fixed point.
+    RALPH_SATISFIED_BLOCKER_NUMBERS=""
+    RALPH_UNSATISFIED_BLOCKER_NUMBERS=""
+    _all_blocker_numbers=()
+    while IFS= read -r _record; do
+      [[ -z "$_record" ]] && continue
+      _num=$(echo "$_record" | jq -r '.number')
+      [[ " ${_candidate_numbers[*]} " == *" $_num "* ]] || continue
+      _body=$(echo "$_record" | jq -r '.body // ""' | tr -d '\r')
+      while IFS= read -r _blocker_num; do
+        [[ -n "$_blocker_num" ]] && _all_blocker_numbers+=("$_blocker_num")
+      done < <(parse_blockers "$_body")
+    done < <(printf '%s\n' "$_runnable_json" | jq -c '.[]' 2>/dev/null | tr -d '\r' || true)
+    while IFS= read -r _blocker_num; do
+      [[ -z "$_blocker_num" ]] && continue
+      if [[ "$(is_issue_satisfied "$_blocker_num")" == "1" ]]; then
+        RALPH_SATISFIED_BLOCKER_NUMBERS="${RALPH_SATISFIED_BLOCKER_NUMBERS}${_blocker_num} "
+      else
+        RALPH_UNSATISFIED_BLOCKER_NUMBERS="${RALPH_UNSATISFIED_BLOCKER_NUMBERS}${_blocker_num} "
+      fi
+    done < <(printf '%s\n' "${_all_blocker_numbers[@]:-}" | sed '/^$/d' | sort -nu)
+
+    # Reduce to a closed internal frontier. If a candidate is removed because it
+    # has an external blocker, any sibling depending on that candidate must also
+    # be removed on the next pass rather than treating it as internally queued.
+    _runnable_numbers=("${_candidate_numbers[@]}")
+    while true; do
+      RALPH_INTERNAL_BLOCKER_NUMBERS="${_runnable_numbers[*]}"
+      _next_runnable_numbers=()
+      while IFS= read -r _record; do
+        [[ -z "$_record" ]] && continue
+        _num=$(echo "$_record" | jq -r '.number')
+        [[ " ${_runnable_numbers[*]} " == *" $_num "* ]] || continue
+        _blockers=$(ralph_enqueueable_blocker_tags "$_record")
+        [[ -z "$_blockers" && -n "$_num" ]] && _next_runnable_numbers+=("$_num")
+      done < <(printf '%s\n' "$_runnable_json" | jq -c '.[]' 2>/dev/null | tr -d '\r' || true)
+      if [[ "${#_next_runnable_numbers[@]}" -eq "${#_runnable_numbers[@]}" ]]; then
+        _runnable_numbers=("${_next_runnable_numbers[@]}")
+        break
+      fi
+      _runnable_numbers=("${_next_runnable_numbers[@]}")
+    done
+    unset RALPH_INTERNAL_BLOCKER_NUMBERS
+    unset RALPH_SATISFIED_BLOCKER_NUMBERS RALPH_UNSATISFIED_BLOCKER_NUMBERS
+
+    if [[ "${#_runnable_numbers[@]}" -ne "${#_candidate_numbers[@]}" ]]; then
+      _excluded_numbers=()
+      for _candidate_num in "${_candidate_numbers[@]}"; do
+        if [[ " ${_runnable_numbers[*]} " != *" $_candidate_num "* ]]; then
+          _excluded_numbers+=("$_candidate_num")
+        fi
+      done
+      _excluded_display=$(printf '#%s ' "${_excluded_numbers[@]}" | sed 's/ $//')
+      echo "❌ PRD #$_prd_n has slices with unsatisfied external blockers: $_excluded_display" >&2
+      exit 1
+    fi
+    unset _record _num _body _blocker_num _blockers _all_blocker_numbers
+    unset _candidate_numbers _next_runnable_numbers
   else
+    _runnable_numbers=()
     while IFS= read -r _num; do
       [[ -n "$_num" ]] && _runnable_numbers+=("$_num")
     done < <(echo "$_runnable_json" | jq -r '.[].number' 2>/dev/null || true)
@@ -855,39 +937,44 @@ if [[ "${1:-}" == "--enqueue-prd" ]]; then
     exit 1
   fi
 
-  # Topo-sort via dependency parser if available; otherwise preserve gh order.
-  _dep_parser="$MAIN_REPO/extension/lib/dependency-parser.mjs"
-  _blocker_count=0
-  if [[ -f "$_dep_parser" ]]; then
-    _sorted_result=$(
-      RALPH_DEP_PARSER="$_dep_parser" RALPH_RUNNABLE_JSON="$_runnable_json" \
-      node --input-type=module 2>/dev/null <<'NODEEOF' || echo '{"sorted":[],"blockers":0}'
-import { pathToFileURL } from 'node:url';
-const { parseDependencies } = await import(pathToFileURL(process.env.RALPH_DEP_PARSER).href);
-const numbers = JSON.parse(process.env.RALPH_RUNNABLE_JSON || "[]");
-const sorted = parseDependencies(numbers);
-const sortedNums = sorted.map(i => i.number ?? i);
-const blockers = sorted.filter(i => i.blocked === true).length;
-console.log(JSON.stringify({sorted: sortedNums, blockers}));
-NODEEOF
-    )
-    _sorted_json=$(echo "$_sorted_result" | jq '.sorted // []' 2>/dev/null || echo "[]")
-    _runnable_numbers=()
-    while IFS= read -r _num; do
-      [[ -n "$_num" ]] && _runnable_numbers+=("$_num")
-    done < <(echo "$_sorted_json" | jq -r '.[]' 2>/dev/null || true)
-    # Restore original order if parser returned empty (error fallback).
-    if [[ ${#_runnable_numbers[@]} -eq 0 ]]; then
-      echo "⚠️  Warning: dependency parser returned no results — using original order" >&2
-      _runnable_numbers=()
-      while IFS= read -r _num; do
-        [[ -n "$_num" ]] && _runnable_numbers+=("$_num")
-      done < <(echo "$_runnable_json" | jq -r '.[].number' 2>/dev/null || true)
-      _blocker_count=0
-    else
-      _blocker_count=$(echo "$_sorted_result" | jq '.blockers // 0' 2>/dev/null || echo 0)
-    fi
+  # Fail closed on cycles before preflight suppresses internal sequencing edges.
+  if declare -F parse_blockers >/dev/null 2>&1; then
+    _cycle_remaining=("${_runnable_numbers[@]}")
+    while [[ "${#_cycle_remaining[@]}" -gt 0 ]]; do
+      _cycle_next=()
+      _cycle_progress=0
+      for _cycle_num in "${_cycle_remaining[@]}"; do
+        _cycle_body=$(printf '%s\n' "$_runnable_json" \
+          | jq -r --argjson n "$_cycle_num" '.[] | select(.number == $n) | (.body // "")' \
+          | tr -d '\r')
+        _cycle_waits=0
+        while IFS= read -r _cycle_blocker; do
+          [[ -z "$_cycle_blocker" ]] && continue
+          if [[ " ${_cycle_remaining[*]} " == *" $_cycle_blocker "* ]]; then
+            _cycle_waits=1
+            break
+          fi
+        done < <(parse_blockers "$_cycle_body")
+        if [[ "$_cycle_waits" -eq 1 ]]; then
+          _cycle_next+=("$_cycle_num")
+        else
+          _cycle_progress=1
+        fi
+      done
+      if [[ "$_cycle_progress" -eq 0 ]]; then
+        _cycle_display=$(printf '#%s ' "${_cycle_remaining[@]}" | sed 's/ $//')
+        echo "❌ PRD #$_prd_n has a dependency cycle among slices: $_cycle_display" >&2
+        exit 1
+      fi
+      _cycle_remaining=("${_cycle_next[@]}")
+    done
+    unset _cycle_remaining _cycle_next _cycle_num _cycle_body _cycle_blocker _cycle_waits _cycle_progress
   fi
+
+  # The worker loop evaluates dependency edges before every claim, so all
+  # accepted PRD-internal slices stay in the queue while only the current
+  # frontier is claimable.
+  _blocker_count=0
 
   # Write issue numbers to config via shared enqueue function.
   do_enqueue "$MAIN_REPO/.ralph/config.json" "${_runnable_numbers[@]}"

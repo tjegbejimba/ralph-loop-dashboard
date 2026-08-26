@@ -387,6 +387,86 @@ exit 2
   assert_contains "$out" "preflight blockers" "blocker: verdict is blockers"
 }
 
+# ─── closed queued blocker still needs merged-PR satisfaction ─────────────────
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [99, 12]}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+
+  closed=$(issue_json 99 CLOSED 'ralph:queued,priority:P2,work:slice' 'Parent #4')
+  dependent_body=$'Parent #4\n\n## Blocked by\n- #99'
+  dependent=$(issue_json 12 OPEN 'ralph:queued,priority:P2,work:slice' "$dependent_body")
+  blob=$(printf '%s\n%s\n' "$closed" "$dependent")
+  bin_dir="$TEST_ROOT/bin-closed-internal-blocker"
+  write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  assert_contains "$out" "unresolved_blocker(#99)" "closed internal blocker: manual closure remains unresolved"
+  assert_contains "$out" "preflight blockers" "closed internal blocker: verdict is blockers"
+}
+
+# ─── configured manual-close fallback is honored by launcher preflight ─────────
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [99, 12]}, "profile": "default", "worker": {"acceptManuallyClosed": true}}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+
+  closed=$(issue_json 99 CLOSED 'ralph:queued,priority:P2,work:slice' 'Parent #4' \
+    | jq -c '. + {stateReason:"COMPLETED", closedByPullRequestsReferences:[]}')
+  dependent_body=$'Parent #4\n\n## Blocked by\n- #99'
+  dependent=$(issue_json 12 OPEN 'ralph:queued,priority:P2,work:slice' "$dependent_body")
+  blob=$(printf '%s\n%s\n' "$closed" "$dependent")
+  bin_dir="$TEST_ROOT/bin-accepted-manual-blocker"
+  write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  assert_not_contains "$out" "unresolved_blocker" "manual-close config: completed blocker is satisfied"
+  assert_contains "$out" "Ready to launch" "manual-close config: frontier passes preflight"
+}
+
+# ─── dependency cycles block direct-number queues ──────────────────────────────
+{
+  repo=$(new_repo)
+  cat > "$repo/.ralph/config.json" <<'EOF'
+{"issue": {"numbers": [8, 9]}, "profile": "default"}
+EOF
+  cat > "$repo/.ralph/RALPH.md" <<'EOF'
+<!-- RALPH_PRD_REF: #4 -->
+EOF
+
+  body8=$'Parent #4\n\n## Blocked by\n- #9'
+  body9=$'Parent #4\n\n## Blocked by\n- #8'
+  issue8=$(issue_json 8 OPEN 'ralph:queued,priority:P2,work:slice' "$body8")
+  issue9=$(issue_json 9 OPEN 'ralph:queued,priority:P2,work:slice' "$body9")
+  blob=$(printf '%s\n%s\n' "$issue8" "$issue9")
+  bin_dir="$TEST_ROOT/bin-cycle"
+  write_mock_gh "$bin_dir" "$GH_MOCK_PREFLIGHT"
+
+  rc=0
+  out=$(ISSUE_BLOB="$blob" \
+    RALPH_MAIN_REPO="$repo" RALPH_GH_BIN="$bin_dir/gh" \
+    "$repo/.ralph/launch.sh" --status 2>&1) || rc=$?
+
+  assert_contains "$out" "Dependency cycle: #8 #9" "cycle: issue numbers surfaced"
+  assert_contains "$out" "preflight blockers" "cycle: verdict is blockers"
+}
+
 # ─── --enqueue-prd also runs preflight ────────────────────────────────────────
 {
   repo=$(new_repo)
@@ -408,13 +488,15 @@ case "$1 $2" in
       echo "{\"number\":20,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:evaluated\"},{\"name\":\"priority:P2\"},{\"name\":\"work:prd\"}],\"body\":\"PRD\"}"
       exit 0
     fi
-    # Preflight per-issue lookup.
-    echo "{\"number\":$num,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"body\":\"Parent #20\"}"
+    # Preflight per-issue lookup. #22 depends on queued sibling #21.
+    body="Parent #20"
+    [[ "$num" == "22" ]] && body="Parent #20\n\n## Blocked by\n- #21"
+    printf "%s\n" "{\"number\":$num,\"state\":\"OPEN\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"body\":\"$body\"}"
     exit 0
     ;;
   "issue list")
     if echo "$@" | grep -qF "label:work:slice"; then
-      echo "[{\"number\":21,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #20\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":22,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #20\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
+      printf "%s\n" "[{\"number\":21,\"state\":\"OPEN\",\"title\":\"Slice 1: A\",\"body\":\"Parent #20\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]},{\"number\":22,\"state\":\"OPEN\",\"title\":\"Slice 2: B\",\"body\":\"Parent #20\\n\\n## Blocked by\\n- #21\",\"labels\":[{\"name\":\"ralph:ready\"},{\"name\":\"priority:P2\"},{\"name\":\"work:slice\"}],\"assignees\":[]}]"
     else
       echo "[]"
     fi
@@ -433,6 +515,8 @@ exit 2
   assert_contains "$out" "#21"                "enqueue-prd: preflight lists #21"
   assert_contains "$out" "#22"                "enqueue-prd: preflight lists #22"
   assert_contains "$out" "ref #20"            "enqueue-prd: RALPH.md updated, preflight shows ref #20"
+  assert_not_contains "$out" "unresolved_blocker" "enqueue-prd: queued sibling dependency is not a start blocker"
+  assert_contains "$out" "Ready to launch"    "enqueue-prd: internal dependency frontier passes preflight"
 }
 
 # ─── --status also runs preflight ────────────────────────────────────────────

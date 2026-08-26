@@ -3,7 +3,7 @@
 #
 # Regression coverage for issue #73: when "## Blocked by" is the last `##`
 # section of an issue body, the old awk-based extractor over-matched trailing
-# `#N` refs (e.g. the `Part of #<parent>` footer the `to-issues` skill emits),
+# `#N` refs (e.g. the `Part of #<parent>` footer the `to-tickets` skill emits),
 # permanently stalling slices whose parent PRD stays OPEN.
 
 set -euo pipefail
@@ -79,18 +79,24 @@ Closes #999
 EOF
 )" "322"
 
-# 4. Bug repro #3 — canonical to-issues shape: blank line separates the
-#    bullet list from the `Part of #320` footer.
-assert_blockers "blocked-by last + blank + Part of footer (canonical)" "$(cat <<'EOF'
+# 4. Canonical to-tickets body shape: the parent marker and born-ready evidence
+#    must not contaminate the bulleted dependency section.
+assert_blockers "canonical to-tickets dependency shape" "$(cat <<'EOF'
+## Parent
+Parent #320
+
 ## Acceptance criteria
 - [ ] Foo
 
 ## Blocked by
 - #322
+- #323
 
-Part of #320
+## Born-ready checklist
+- Parent #320
+- Blocked by: #322 and #323
 EOF
-)" "322"
+)" "322 323"
 
 # 5. None short-circuit.
 assert_blockers "None short-circuit" "$(cat <<'EOF'
