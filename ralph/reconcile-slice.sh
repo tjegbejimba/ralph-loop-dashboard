@@ -179,6 +179,136 @@ reconcile_assert_unmodified_graph() {
     || { error "legacy grafts are not permitted during reconciliation"; return 1; }
 }
 
+reconcile_closing_directives() {
+  local allow_qualified="${1:-0}"
+  local issue_only="${2:-0}"
+  LC_ALL=C awk \
+    -v allow_qualified="$allow_qualified" \
+    -v issue_only="$issue_only" \
+    -v repository="$REPO" '
+    function prefix_length(value, character, count) {
+      count = 0
+      while (substr(value, count + 1, 1) == character) count++
+      return count
+    }
+    function directive_issue(value, lower_value, reference, prefix, issue) {
+      lower_value = tolower(value)
+      if (lower_value !~ /^(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)[[:space:]]*:?[[:space:]]+/) {
+        return 0
+      }
+      reference = value
+      sub(/^[^[:space:]:]+[[:space:]]*:?[[:space:]]+/, "", reference)
+      sub(/[[:space:]]+$/, "", reference)
+      if (reference ~ /^#[1-9][0-9]*$/) {
+        return substr(reference, 2) + 0
+      }
+      if (!allow_qualified) return 0
+      prefix = repository "#"
+      if (index(tolower(reference), tolower(prefix)) == 1) {
+        issue = substr(reference, length(prefix) + 1)
+        return issue ~ /^[1-9][0-9]*$/ ? issue + 0 : 0
+      }
+      prefix = "https://github.com/" repository "/issues/"
+      if (index(tolower(reference), tolower(prefix)) == 1) {
+        issue = substr(reference, length(prefix) + 1)
+        return issue ~ /^[1-9][0-9]*$/ ? issue + 0 : 0
+      }
+      return 0
+    }
+    function whitespace_only(value) {
+      return value ~ /^[[:space:]]*$/
+    }
+    BEGIN {
+      fenced = 0
+      fence_character = ""
+      fence_length = 0
+      html_comment = 0
+    }
+    {
+      sub(/\r$/, "")
+      lines[++line_count] = $0
+    }
+    END {
+      for (line_number = 1; line_number <= line_count; line_number++) {
+        line = lines[line_number]
+        remaining = line
+        clean = ""
+        saw_comment = 0
+        while (1) {
+          if (html_comment) {
+            comment_end = index(remaining, "-->")
+            saw_comment = 1
+            if (comment_end == 0) {
+              remaining = ""
+              break
+            }
+            remaining = substr(remaining, comment_end + 3)
+            html_comment = 0
+          } else {
+            comment_start = index(remaining, "<!--")
+            if (comment_start == 0) {
+              clean = clean remaining
+              break
+            }
+            clean = clean substr(remaining, 1, comment_start - 1)
+            remaining = substr(remaining, comment_start + 4)
+            html_comment = 1
+            saw_comment = 1
+          }
+        }
+        if (saw_comment && clean !~ /^[[:space:]]*$/) exit 2
+        if (saw_comment) continue
+        line = clean
+        if (index(line, "<") > 0) exit 2
+
+        indent = 0
+        while (indent < 4 && substr(line, indent + 1, 1) == " ") indent++
+        content = substr(line, indent + 1)
+        first = substr(content, 1, 1)
+        run_length = (first == "`" || first == "~") \
+          ? prefix_length(content, first) \
+          : 0
+        if (fenced) {
+          if (indent <= 3 && first == fence_character && run_length >= fence_length && whitespace_only(substr(content, run_length + 1))) {
+            fenced = 0
+            fence_character = ""
+            fence_length = 0
+          }
+          continue
+        }
+        if (indent <= 3 && (first == "`" || first == "~") && run_length >= 3) {
+          fenced = 1
+          fence_character = first
+          fence_length = run_length
+          continue
+        }
+        if (line ~ /^(\t| )/ || line ~ /^[>|*+-][[:space:]]/) continue
+
+        issue = directive_issue(line)
+        if (allow_qualified && issue == 0 \
+          && tolower(line) ~ /^(close|closes|closed|fix|fixes|fixed|resolve|resolves|resolved)([[:space:]]|:)/) {
+          exit 2
+        }
+        if (issue > 0) {
+          previous_is_blank = line_number == 1 \
+            || lines[line_number - 1] ~ /^[[:space:]]*$/
+          next_is_blank = line_number == line_count \
+            || lines[line_number + 1] ~ /^[[:space:]]*$/
+          if (previous_is_blank && next_is_blank) {
+            sub(/[[:space:]]+$/, "", line)
+            print issue_only ? issue : line
+          }
+        }
+      }
+    }
+  '
+}
+
+reconcile_directive_issues_json() {
+  sed -E 's/^.*#([1-9][0-9]*)[[:space:]]*$/\1/' \
+    | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)'
+}
+
 reconcile_scoped_processes() {
   local ps_out pid_col=1 ppid_col=2 command_col=3
   case "$(uname -s)" in
@@ -479,43 +609,74 @@ reconcile_build_proof() {
   remote_url=$(reconcile_remote_repository "$remote") || return 1
   reconcile_assert_unmodified_graph || return 1
 
-  local issue_json pr_json open_pr_pages operator_login
+  local repository_json issue_json issue_rest_json pr_json related_prs
+  local open_pr_pages operator_login
   operator_login=$("$GH" api user --jq .login) \
     || { error "GitHub operator identity lookup failed"; return 1; }
   [[ "$operator_login" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] \
     || { error "GitHub operator identity lookup returned invalid evidence"; return 1; }
+  repository_json=$("$GH" api "repos/$REPO" --jq .) \
+    || { error "GitHub repository lookup failed"; return 1; }
+  printf '%s\n' "$repository_json" | jq -e --arg repo "$REPO" '
+    type == "object"
+    and .full_name == $repo
+    and (.default_branch | type == "string" and length > 0)
+  ' >/dev/null 2>&1 \
+    || { error "GitHub repository lookup returned invalid evidence"; return 1; }
+  local default_branch
+  default_branch=$(printf '%s\n' "$repository_json" | jq -r '.default_branch')
+  git -C "$MAIN_REPO" check-ref-format --branch "$default_branch" >/dev/null 2>&1 \
+    || { error "GitHub repository default branch is invalid"; return 1; }
   issue_json=$("$GH" issue view "$ISSUE_NUMBER" --repo "$REPO" \
-    --json number,state,stateReason,closedAt,closedByPullRequestsReferences,comments,url) \
+    --json number,state,stateReason,closedAt,url) \
     || { error "GitHub issue lookup failed"; return 1; }
   printf '%s\n' "$issue_json" | jq -e \
-    --argjson issue "$ISSUE_NUMBER" '
+    --argjson issue "$ISSUE_NUMBER" \
+    --arg repo "$REPO" '
       type == "object"
       and .number == $issue
       and .state == "CLOSED"
       and (.closedAt
         | type == "string"
           and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
-      and ((.closedByPullRequestsReferences // []) | type == "array")
-      and ((.comments // []) | type == "array")
+      and .url == ("https://github.com/" + $repo + "/issues/" + ($issue | tostring))
     ' >/dev/null 2>&1 \
     || { error "issue #$ISSUE_NUMBER is not closed or returned invalid evidence"; return 1; }
+  issue_rest_json=$("$GH" api "repos/$REPO/issues/$ISSUE_NUMBER" --jq .) \
+    || { error "GitHub issue closure lookup failed"; return 1; }
+  printf '%s\n' "$issue_rest_json" | jq -e \
+    --argjson issue "$ISSUE_NUMBER" \
+    --arg repo "$REPO" \
+    --arg closed_at "$(printf '%s\n' "$issue_json" | jq -r '.closedAt')" '
+      type == "object"
+      and .number == $issue
+      and .state == "closed"
+      and .closed_at == $closed_at
+      and (.closed_by.login | type == "string" and length > 0)
+      and .html_url == ("https://github.com/" + $repo + "/issues/" + ($issue | tostring))
+      and .repository_url == ("https://api.github.com/repos/" + $repo)
+    ' >/dev/null 2>&1 \
+    || { error "GitHub issue closure lookup returned invalid evidence"; return 1; }
 
   pr_json=$("$GH" pr view "$PR_NUMBER" --repo "$REPO" \
     --json number,state,mergedAt,baseRefName,headRefName,headRepository,mergeCommit,closingIssuesReferences,body,url) \
     || { error "GitHub pull request lookup failed"; return 1; }
   printf '%s\n' "$pr_json" | jq -e \
     --argjson pr "$PR_NUMBER" \
-    '
+    --arg repo "$REPO" \
+    --arg issue_closed_at "$(printf '%s\n' "$issue_json" | jq -r '.closedAt')" '
       type == "object"
       and .number == $pr
       and .state == "MERGED"
       and (.mergedAt
         | type == "string"
           and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+      and .mergedAt <= $issue_closed_at
       and (.mergeCommit.oid
         | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
       and ((.closingIssuesReferences // []) | type == "array")
       and ((.body // "") | type == "string")
+      and .url == ("https://github.com/" + $repo + "/pull/" + ($pr | tostring))
     ' >/dev/null 2>&1 \
     || { error "PR #$PR_NUMBER is not merged or returned invalid evidence"; return 1; }
   printf '%s\n' "$pr_json" | jq -e --arg branch "$branch" \
@@ -534,61 +695,241 @@ reconcile_build_proof() {
     ' >/dev/null 2>&1 \
     || { error "PR #$PR_NUMBER does not use canonical issue head '${RECONCILE_CONFIGURED_PREFIX}${ISSUE_NUMBER}-*'"; return 1; }
 
-  local pr_issue_link
-  pr_issue_link=$(printf '%s\n' "$pr_json" | jq -r \
+  local pr_issue_link="github-closing-reference"
+  local closing_refs_json pr_body pr_body_oid closing_directive=""
+  local directive_lines directive_issues_json closure_json
+  local integration_comment_json='null' actor_authorization_json='null'
+  closing_refs_json=$(printf '%s\n' "$pr_json" | jq -c '.closingIssuesReferences')
+  pr_body=$(printf '%s\n' "$pr_json" | jq -r '.body // ""')
+  pr_body_oid=$(printf '%s\n' "$pr_json" \
+    | jq -j '.body // ""' \
+    | git_proof hash-object --stdin) \
+    || { error "could not content-address PR body evidence"; return 1; }
+  if ! printf '%s\n' "$closing_refs_json" | jq -e \
     --argjson issue "$ISSUE_NUMBER" \
-    --arg issue_text "$ISSUE_NUMBER" '
-      if any((.closingIssuesReferences // [])[]?; .number == $issue) then
-        "github-closing-reference"
-      elif ((.body // "")
-        | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#"
-          + $issue_text + "\\b")) then
-        "closing-keyword"
-      else
-        empty
-      end
-    ') || { error "could not inspect PR issue linkage"; return 1; }
-  [[ -n "$pr_issue_link" ]] \
-    || { error "PR #$PR_NUMBER is not linked to issue #$ISSUE_NUMBER"; return 1; }
+    --arg repo "$REPO" '
+      any(.[];
+        .number == $issue
+        and .url == ("https://github.com/" + $repo + "/issues/" + ($issue | tostring))
+        and ((.repository.owner.login + "/" + .repository.name) == $repo)
+      )
+      and all(.[];
+        if .number == $issue
+        then
+          .url == ("https://github.com/" + $repo + "/issues/" + ($issue | tostring))
+          and ((.repository.owner.login + "/" + .repository.name) == $repo)
+        else true
+        end
+      )
+    ' >/dev/null 2>&1; then
+    [[ "$(printf '%s\n' "$closing_refs_json" | jq 'length')" -eq 0 ]] \
+      || { error "PR #$PR_NUMBER has conflicting GitHub closing-reference evidence"; return 1; }
+    if ! directive_lines=$(printf '%s' "$pr_body" \
+      | reconcile_closing_directives); then
+      error "PR #$PR_NUMBER lacks one unambiguous literal closing directive for issue #$ISSUE_NUMBER"
+      return 1
+    fi
+    directive_issues_json=$(printf '%s\n' "$directive_lines" \
+      | reconcile_directive_issues_json) \
+      || { error "could not parse PR closing directives"; return 1; }
+    printf '%s\n' "$directive_issues_json" | jq -e \
+      --argjson issue "$ISSUE_NUMBER" \
+      'length == 1 and .[0] == $issue' >/dev/null 2>&1 \
+      || { error "PR #$PR_NUMBER lacks one unambiguous literal closing directive for issue #$ISSUE_NUMBER"; return 1; }
+    closing_directive="$directive_lines"
+    pr_issue_link="non-default-owned-branch-bundle"
+    [[ "$branch" != "$default_branch" ]] \
+      || { error "fallback linkage is only valid for a non-default owned branch"; return 1; }
 
-  local closure_json
-  closure_json=$(printf '%s\n' "$issue_json" | jq -c \
+    local issue_closed_at issue_closed_by expected_comment comment_pages comments_json
+    local comment_author comment_permission_json
+    issue_closed_at=$(printf '%s\n' "$issue_rest_json" | jq -r '.closed_at')
+    issue_closed_by=$(printf '%s\n' "$issue_rest_json" | jq -r '.closed_by.login')
+    expected_comment="Merged via PR #$PR_NUMBER into \`$branch\`."
+    comment_pages=$("$GH" api \
+      "repos/$REPO/issues/$ISSUE_NUMBER/comments?per_page=100" \
+      --paginate --slurp) \
+      || { error "GitHub issue comment lookup failed"; return 1; }
+    comments_json=$(printf '%s\n' "$comment_pages" | jq -c '
+      if type == "array" and all(.[]; type == "array")
+      then flatten
+      else error("invalid comment pages")
+      end
+    ') || { error "GitHub issue comment lookup returned invalid evidence"; return 1; }
+    printf '%s\n' "$comments_json" | jq -e '
+      type == "array"
+      and all(.[];
+        type == "object"
+        and (.id | type == "number")
+        and (.html_url | type == "string")
+        and (.body | type == "string")
+        and (.user.login | type == "string")
+        and (.author_association | type == "string")
+        and (.created_at | type == "string")
+        and (.updated_at | type == "string")
+      )
+    ' >/dev/null 2>&1 \
+      || { error "GitHub issue comments contain malformed evidence"; return 1; }
+    integration_comment_json=$(printf '%s\n' "$comments_json" | jq -c \
+      --arg body "$expected_comment" \
+      --arg closed_at "$issue_closed_at" \
+      --arg closed_by "$issue_closed_by" '
+        [
+          .[]
+          | select(
+              .body
+              | test("^Merged via PR #[1-9][0-9]* into `[^`\\r\\n]+`\\.$")
+            )
+        ]
+        | if length == 1
+            and .[0].body == $body
+            and .[0].created_at == $closed_at
+            and .[0].updated_at == .[0].created_at
+            and .[0].user.login == $closed_by
+            and (.[0].author_association
+              | IN("OWNER", "MEMBER", "COLLABORATOR"))
+          then .[0]
+          else empty
+          end
+      ') || { error "could not inspect Ralph integration closure comments"; return 1; }
+    [[ -n "$integration_comment_json" ]] \
+      || { error "exact unedited Ralph integration closure comment is missing or ambiguous"; return 1; }
+    comment_author=$(printf '%s\n' "$integration_comment_json" | jq -r '.user.login')
+    [[ "$comment_author" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}$ ]] \
+      || { error "integration comment actor identity is invalid"; return 1; }
+    comment_permission_json=$("$GH" api \
+      "repos/$REPO/collaborators/$comment_author/permission" --jq .) \
+      || { error "integration comment actor authorization lookup failed"; return 1; }
+    printf '%s\n' "$comment_permission_json" | jq -e \
+      --arg login "$comment_author" '
+        type == "object"
+        and .user.login == $login
+        and (.permission | IN("admin", "maintain", "write"))
+      ' >/dev/null 2>&1 \
+      || { error "integration comment actor is not authorized by repository policy"; return 1; }
+    actor_authorization_json=$(printf '%s\n' "$comment_permission_json" | jq -c '{
+      login: .user.login,
+      permission: .permission,
+      role_name: (.role_name // null)
+    }')
+    integration_comment_json=$(printf '%s\n' "$integration_comment_json" | jq -c '{
+      id,
+      url: .html_url,
+      body,
+      author: .user.login,
+      author_association,
+      created_at,
+      updated_at
+    }')
+    closure_json=$(jq -cn \
+      --argjson comment "$integration_comment_json" \
+      --argjson authorization "$actor_authorization_json" '
+        {
+          kind: "trusted-explicit-comment",
+          comment: $comment,
+          actor_authorization: $authorization
+        }
+      ')
+  else
+    closure_json='{"kind":"github-closing-reference"}'
+  fi
+
+  related_prs=$("$GH" pr list --repo "$REPO" --state all \
+    --base "$branch" --limit 1000 \
+    --json number,state,baseRefName,mergeCommit,closingIssuesReferences,body) \
+    || { error "GitHub related pull request lookup failed"; return 1; }
+  printf '%s\n' "$related_prs" | jq -e '
+    type == "array"
+    and length < 1000
+    and all(.[];
+      type == "object"
+      and (.number | type == "number")
+      and (.closingIssuesReferences | type == "array")
+      and (.body == null or (.body | type == "string"))
+    )
+  ' >/dev/null 2>&1 \
+    || { error "related pull request evidence is invalid, truncated, or ambiguous"; return 1; }
+  local candidate_prs_json='[]' candidate_pr_evidence_json related_pr related_refs related_body
+  local related_directives related_issues_json related_has_target
+  local candidate_pr_record candidate_body_oid
+  while IFS= read -r related_pr; do
+    related_refs=$(printf '%s\n' "$related_pr" | jq -c '.closingIssuesReferences')
+    related_body=$(printf '%s\n' "$related_pr" | jq -r '.body // ""')
+    related_has_target=0
+    if printf '%s\n' "$related_refs" | jq -e \
+      --argjson issue "$ISSUE_NUMBER" \
+      --arg repo "$REPO" '
+        any(.[];
+          .number == $issue
+          and .url == ("https://github.com/" + $repo + "/issues/" + ($issue | tostring))
+          and ((.repository.owner.login + "/" + .repository.name) == $repo)
+        )
+        and all(.[];
+          if .number == $issue
+          then
+            .url == ("https://github.com/" + $repo + "/issues/" + ($issue | tostring))
+            and ((.repository.owner.login + "/" + .repository.name) == $repo)
+          else true
+          end
+        )
+      ' >/dev/null 2>&1; then
+      related_has_target=1
+    else
+      if [[ "$related_body" != *"#$ISSUE_NUMBER"* \
+        && "$related_body" != *"/issues/$ISSUE_NUMBER"* ]]; then
+        continue
+      fi
+      if ! related_directives=$(printf '%s' "$related_body" \
+        | reconcile_closing_directives 1 1); then
+        error "related PR has unsafe or ambiguous linkage evidence for issue #$ISSUE_NUMBER"
+        return 1
+      fi
+      related_issues_json=$(printf '%s\n' "$related_directives" \
+        | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)') \
+        || { error "could not parse related PR closing directives"; return 1; }
+      if printf '%s\n' "$related_issues_json" | jq -e \
+        --argjson issue "$ISSUE_NUMBER" \
+        'any(.[]; . == $issue)' >/dev/null 2>&1; then
+        [[ "$(printf '%s\n' "$related_refs" | jq 'length')" -eq 0 \
+          && "$(printf '%s\n' "$related_issues_json" | jq 'length')" -eq 1 ]] \
+          || { error "related PR has conflicting linkage evidence for issue #$ISSUE_NUMBER"; return 1; }
+        related_has_target=1
+      fi
+    fi
+    if [[ "$related_has_target" -eq 1 ]]; then
+      candidate_prs_json=$(printf '%s\n' "$candidate_prs_json" | jq -c \
+        --argjson pr "$(printf '%s\n' "$related_pr" | jq '.number')" \
+        '. + [$pr]')
+    fi
+  done < <(printf '%s\n' "$related_prs" | jq -c '.[]')
+  printf '%s\n' "$related_prs" | jq -e \
+    --argjson candidates "$candidate_prs_json" \
     --argjson pr "$PR_NUMBER" \
     --arg branch "$branch" \
-    --arg pr_merged_at "$(printf '%s\n' "$pr_json" | jq -r '.mergedAt')" '
-      .closedAt as $issue_closed_at
-      | if any((.closedByPullRequestsReferences // [])[]?; .number == $pr) then
-        {kind: "github-closing-reference"}
-      else
-        [
-          (.comments // [])[]
-          | (.authorAssociation // "") as $association
-          | select(
-              ((["OWNER", "MEMBER", "COLLABORATOR"]
-                | index($association)) != null)
-              and (.createdAt >= $pr_merged_at)
-              and (.createdAt <= $issue_closed_at)
-              and (
-                .body == ("Integrated via PR #" + ($pr | tostring)
-                  + " into PRD integration branch."
-                  + " (Ralph explicit closure for non-default-base PR.)")
-                or .body == ("Merged via PR #" + ($pr | tostring)
-                  + " into `" + $branch + "`.")
-              )
-            )
-          | {
-              kind: "trusted-explicit-comment",
-              author: (.author.login // ""),
-              author_association: .authorAssociation,
-              created_at: .createdAt,
-              body: .body
-            }
-        ]
-        | if length == 1 and (.[0].author | length > 0) then .[0] else empty end
-      end
-    ') || { error "could not inspect issue closure provenance"; return 1; }
-  [[ -n "$closure_json" ]] \
-    || { error "issue #$ISSUE_NUMBER lacks canonical closure provenance for PR #$PR_NUMBER"; return 1; }
+    --arg merge_commit "$(printf '%s\n' "$pr_json" | jq -r '.mergeCommit.oid')" '
+      $candidates == [$pr]
+      and ([.[] | select(.number == $pr)] | length) == 1
+      and (
+        ([.[] | select(.number == $pr)][0]) as $linked
+        | $linked.state == "MERGED"
+          and $linked.baseRefName == $branch
+          and $linked.mergeCommit.oid == $merge_commit
+      )
+    ' >/dev/null 2>&1 \
+    || { error "linked pull request evidence is missing or conflicting"; return 1; }
+  candidate_pr_record=$(printf '%s\n' "$related_prs" | jq -c \
+    --argjson pr "$PR_NUMBER" '.[] | select(.number == $pr)')
+  candidate_body_oid=$(printf '%s\n' "$candidate_pr_record" \
+    | jq -j '.body // ""' \
+    | git_proof hash-object --stdin) \
+    || { error "could not content-address candidate PR body evidence"; return 1; }
+  [[ "$candidate_body_oid" == "$pr_body_oid" ]] \
+    || { error "PR body evidence changed or conflicts across GitHub lookups"; return 1; }
+  candidate_pr_evidence_json=$(printf '%s\n' "$candidate_pr_record" | jq -c \
+    --arg body_oid "$candidate_body_oid" '
+      del(.body) + {body_oid: $body_oid}
+    ')
+  candidate_pr_evidence_json="[$candidate_pr_evidence_json]"
 
   open_pr_pages=$("$GH" api --paginate --slurp \
     -H "Accept: application/vnd.github+json" \
@@ -619,29 +960,70 @@ reconcile_build_proof() {
     return 1
   fi
   if printf '%s\n' "$open_pr_pages" | jq -e \
-    --arg issue "$ISSUE_NUMBER" \
     --arg head_prefix "${RECONCILE_CONFIGURED_PREFIX}${ISSUE_NUMBER}-" '
-      any(.[][];
-        ((.body // "")
-          | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#"
-            + $issue + "\\b"))
-        or (.head.ref | startswith($head_prefix)))
+      any(.[][]; .head.ref | startswith($head_prefix))
     ' >/dev/null 2>&1; then
     error "issue #$ISSUE_NUMBER has another open delivery PR"
     return 1
   fi
+  local open_pr open_body open_directives open_issues_json
+  while IFS= read -r open_pr; do
+    open_body=$(printf '%s\n' "$open_pr" | jq -r '.body // ""')
+    if [[ "$open_body" != *"#$ISSUE_NUMBER"* \
+      && "$open_body" != *"/issues/$ISSUE_NUMBER"* ]]; then
+      continue
+    fi
+    if ! open_directives=$(printf '%s' "$open_body" \
+      | reconcile_closing_directives 1 1); then
+      error "open PR has unsafe or ambiguous linkage evidence for issue #$ISSUE_NUMBER"
+      return 1
+    fi
+    open_issues_json=$(printf '%s\n' "$open_directives" \
+      | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)') \
+      || { error "could not parse open PR closing directives"; return 1; }
+    if printf '%s\n' "$open_issues_json" | jq -e \
+      --argjson issue "$ISSUE_NUMBER" \
+      'any(.[]; . == $issue)' >/dev/null 2>&1; then
+      error "issue #$ISSUE_NUMBER has another open delivery PR"
+      return 1
+    fi
+  done < <(printf '%s\n' "$open_pr_pages" | jq -c '.[][]')
 
-  local merge_commit remote_tip remote_rc=0
+  local merge_commit remote_tip remote_ref_json rechecked_remote_ref_json
   merge_commit=$(printf '%s\n' "$pr_json" | jq -r '.mergeCommit.oid')
-  remote_tip=$(prd_remote_branch_tip "$remote" "$branch") || remote_rc=$?
-  [[ "$remote_rc" -eq 0 ]] \
-    || { error "could not resolve exact remote integration-branch tip"; return 1; }
+  remote_ref_json=$("$GH" api "repos/$REPO/git/ref/heads/$branch" --jq .) \
+    || { error "GitHub integration-branch ref lookup failed"; return 1; }
+  printf '%s\n' "$remote_ref_json" | jq -e \
+    --arg ref "refs/heads/$branch" '
+      type == "object"
+      and .ref == $ref
+      and .object.type == "commit"
+      and (.object.sha
+        | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+    ' >/dev/null 2>&1 \
+    || { error "GitHub integration-branch ref lookup returned invalid evidence"; return 1; }
+  remote_tip=$(printf '%s\n' "$remote_ref_json" | jq -r '.object.sha')
   git -C "$MAIN_REPO" fetch --quiet --no-tags --no-write-fetch-head \
     "$remote" "$remote_tip" \
     || { error "could not fetch remote integration-branch tip"; return 1; }
+  rechecked_remote_ref_json=$("$GH" api \
+    "repos/$REPO/git/ref/heads/$branch" --jq .) \
+    || { error "could not recheck GitHub integration-branch ref"; return 1; }
   local rechecked_remote_tip
-  rechecked_remote_tip=$(prd_remote_branch_tip "$remote" "$branch") \
-    || { error "could not recheck remote integration-branch tip"; return 1; }
+  rechecked_remote_tip=$(printf '%s\n' "$rechecked_remote_ref_json" | jq -r \
+    --arg ref "refs/heads/$branch" '
+      select(
+        type == "object"
+        and .ref == $ref
+        and .object.type == "commit"
+        and (.object.sha
+          | type == "string"
+            and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+      )
+      | .object.sha
+    ') || { error "could not recheck GitHub integration-branch ref"; return 1; }
+  [[ -n "$rechecked_remote_tip" ]] \
+    || { error "GitHub integration-branch ref recheck returned invalid evidence"; return 1; }
   [[ "$rechecked_remote_tip" == "$remote_tip" ]] \
     || { error "remote integration-branch tip moved during proof"; return 1; }
   git_proof cat-file -e "${initial_base}^{commit}" 2>/dev/null \
@@ -680,6 +1062,7 @@ reconcile_build_proof() {
     --argjson issue "$ISSUE_NUMBER" \
     --arg issue_state "$(printf '%s\n' "$issue_json" | jq -r '.state')" \
     --arg issue_closed_at "$(printf '%s\n' "$issue_json" | jq -r '.closedAt')" \
+    --arg issue_closed_by "$(printf '%s\n' "$issue_rest_json" | jq -r '.closed_by.login')" \
     --arg issue_url "$(printf '%s\n' "$issue_json" | jq -r '.url')" \
     --argjson closure "$closure_json" \
     --argjson pr "$PR_NUMBER" \
@@ -688,14 +1071,21 @@ reconcile_build_proof() {
     --arg pr_url "$(printf '%s\n' "$pr_json" | jq -r '.url')" \
     --arg pr_head "$(printf '%s\n' "$pr_json" | jq -r '.headRefName')" \
     --arg pr_head_repository "$(printf '%s\n' "$pr_json" | jq -r '.headRepository.nameWithOwner')" \
-    --arg pr_body "$(printf '%s\n' "$pr_json" | jq -r '.body // ""')" \
+    --arg pr_body_oid "$pr_body_oid" \
     --arg pr_issue_link "$pr_issue_link" \
+    --arg closing_directive "$closing_directive" \
+    --argjson closing_refs "$closing_refs_json" \
+    --argjson candidate_prs "$candidate_prs_json" \
+    --argjson candidate_pr_evidence "$candidate_pr_evidence_json" \
+    --argjson integration_comment "$integration_comment_json" \
+    --argjson actor_authorization "$actor_authorization_json" \
     --arg branch "$branch" \
     --arg remote "$remote" \
     --arg remote_url "$remote_url" \
     --arg configured_remote "$RECONCILE_CONFIGURED_REMOTE" \
     --arg configured_delivery "$RECONCILE_CONFIGURED_DELIVERY" \
     --arg configured_prefix "$RECONCILE_CONFIGURED_PREFIX" \
+    --arg default_branch "$default_branch" \
     --arg metadata_root "$RECONCILE_METADATA_ROOT" \
     --arg initial_base "$initial_base" \
     --arg owned_tip "$owned_tip" \
@@ -719,6 +1109,7 @@ reconcile_build_proof() {
           number: $issue,
           state: $issue_state,
           closed_at: $issue_closed_at,
+          closed_by: $issue_closed_by,
           url: $issue_url,
           closure: $closure
         },
@@ -731,8 +1122,17 @@ reconcile_build_proof() {
           head: $pr_head,
           head_repository: $pr_head_repository,
           issue_link: $pr_issue_link,
-          body: $pr_body,
+          body_oid: $pr_body_oid,
           merge_commit: $merge_commit
+        },
+        linkage: {
+          policy: $pr_issue_link,
+          closing_directive: (if $closing_directive == "" then null else $closing_directive end),
+          closing_issues_references: $closing_refs,
+          candidate_prs: $candidate_prs,
+          candidate_pr_evidence: $candidate_pr_evidence,
+          integration_comment: $integration_comment,
+          actor_authorization: $actor_authorization
         },
         ownership: {
           branch: $branch,
@@ -743,9 +1143,12 @@ reconcile_build_proof() {
           run_metadata_repo_root: $metadata_root,
           configured_remote: $configured_remote,
           configured_delivery_branch: $configured_delivery,
-          configured_issue_branch_prefix: $configured_prefix
+          configured_issue_branch_prefix: $configured_prefix,
+          repository_default_branch: $default_branch
         },
         remote: {
+          source: "github-api",
+          ref: ("refs/heads/" + $branch),
           tip: $remote_tip,
           policy: $tip_policy
         },

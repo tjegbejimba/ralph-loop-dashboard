@@ -123,7 +123,7 @@ record_slice_integrated() {
   }
 }
 
-# close_slice_issue ISSUE_NUMBER PR_NUMBER REPO
+# close_slice_issue ISSUE_NUMBER PR_NUMBER REPO INTEGRATION_BRANCH
 # Explicitly closes a slice issue after integration.
 # Required because GitHub doesn't auto-close from non-default-branch PRs.
 #
@@ -131,17 +131,47 @@ record_slice_integrated() {
 #   ISSUE_NUMBER — slice issue number
 #   PR_NUMBER    — pull request number
 #   REPO         — repository in owner/repo format
+#   INTEGRATION_BRANCH — exact owned non-default PRD branch
 #
 # Returns: 0 on success, 1 on failure
 close_slice_issue() {
   local issue="$1"
   local pr_number="$2"
   local repo="$3"
+  local integration_branch="$4"
+
+  if [[ -z "$integration_branch" \
+    || "$integration_branch" == *'`'* \
+    || "$integration_branch" == *$'\r'* \
+    || "$integration_branch" == *$'\n'* ]]; then
+    return 1
+  fi
   
   local comment
-  comment="Integrated via PR #$pr_number into PRD integration branch. (Ralph explicit closure for non-default-base PR.)"
+  comment="Merged via PR #$pr_number into \`$integration_branch\`."
   
   gh issue close "$issue" --repo "$repo" --reason completed --comment "$comment"
+}
+
+# close_and_record_slice_integration ISSUE_NUMBER PR_NUMBER MERGE_COMMIT RUN_ID REPO INTEGRATION_BRANCH
+# Closes the issue first, then records canonical local evidence under the state lock.
+close_and_record_slice_integration() {
+  local issue="$1"
+  local pr_number="$2"
+  local merge_commit="$3"
+  local run_id="$4"
+  local repo="$5"
+  local integration_branch="$6"
+
+  close_slice_issue \
+    "$issue" "$pr_number" "$repo" "$integration_branch" || return 1
+  state_lock || return 1
+
+  local result=0
+  record_slice_integrated \
+    "$issue" "$pr_number" "$merge_commit" "$run_id" || result=1
+  state_unlock || result=1
+  return "$result"
 }
 
 # is_slice_dependency_satisfied BLOCKER_ISSUE_NUMBER DEPENDENT_RUN_ID

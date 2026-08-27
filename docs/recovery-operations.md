@@ -119,6 +119,10 @@ JSON proof. Apply requires that reviewed proof, acquires both launcher setup
 locks and the shared state lock, then repeats every proof while locked before
 atomically replacing `status.json`.
 
+This recovery command is distributed with Ralph's repository scripts. Refresh a
+target checkout with `./install.sh <target-repository> --scripts-only`; no
+dashboard extension refresh is required.
+
 ```bash
 # Run from the target repository in Bash (including Git Bash on Windows).
 proof_file="$(mktemp "${TMPDIR:-/tmp}/ralph-reconcile-507.XXXXXX.json")"
@@ -152,21 +156,45 @@ The dry-run succeeds only when all of these facts are unambiguous:
 - `state.json` is valid, has no claims, and does not name another active run.
 - Strict process inspection finds no scoped launcher or worker; no launcher
   pidfile, launcher/worker lock, or linked worktree exists.
-- The issue is closed with a closure timestamp. The exact PR exists, is merged,
-  targets the owned integration branch, comes from the same repository, and
-  uses the configured `<prefix><issue>-...` head. Its GitHub closing references
-  or body closing keyword must name the issue.
-- Issue closure must independently point to that PR, either through GitHub's
-  closing-PR references or one exact OWNER/MEMBER/COLLABORATOR closure comment
-  written between PR merge and issue closure. This supports non-default-base
-  integration PRs such as `Closes #507`, which GitHub does not auto-close.
+- The issue is closed with an exact closure timestamp and closing actor. The
+  exact PR exists, is merged with a merge commit, targets the exact owned
+  integration branch, comes from the same repository, and uses the configured
+  `<prefix><issue>-...` head. Its merge timestamp cannot postdate issue closure.
+- An exact same-repository `closingIssuesReferences` entry for the issue remains
+  sufficient linkage. If GitHub returns no closing references, as it does for
+  non-default-base integration PRs, every part of the independent fallback
+  bundle below is mandatory, and the owned base must differ from the
+  repository's current GitHub default branch.
+- The PR body contains exactly one isolated, unindented closing directive for
+  the exact issue, such as `Closes #507`. Directives embedded in prose,
+  blockquotes, lists, fenced or indented code, raw HTML, or HTML comments are
+  not accepted. GitHub-compatible keyword casing and an optional colon are
+  recognized. Another directive, another issue, unsafe markup, or ambiguous
+  parsing fails closed.
+- The issue has exactly one Ralph-shaped integration comment with byte-exact
+  text ``Merged via PR #<pr> into `<owned-branch>`.`` The comment must have been
+  created exactly at issue closure, never edited, and authored by the issue's
+  closing actor. Its GitHub author association must be `OWNER`, `MEMBER`, or
+  `COLLABORATOR`, and a separate current repository-permission lookup must
+  return `admin`, `maintain`, or `write`. Missing, edited, duplicate,
+  conflicting, mismatched, or unauthorized comments fail closed.
+  Normal PRD integration emits this same branch-bound comment and records
+  canonical local status only after explicit issue closure succeeds.
+- An all-state PR query for the owned branch must identify the supplied PR as
+  the only candidate linked to the issue. The body is streamed and
+  content-addressed from both PR lookups; the byte-exact body OIDs must agree,
+  including trailing newlines. Competing bare, same-repository qualified, and
+  canonical issue-URL directives are all treated as linkage conflicts.
 - Exhaustive paginated inspection finds no live PR from the integration branch
   and no other open PR whose body or canonical issue head claims the slice.
 - The configured Git remote is a network URL for the same GitHub `owner/repo`
   returned by the API. Local and path-like remotes are rejected.
-- The remote branch exists at one exact tip, descends from both frozen ownership
-  commits, and does not conflict with a local branch tip. The target merge must
-  be a strict descendant of the run's frozen owned tip, so a historical merge
+- GitHub's repository API identifies the default branch, and its Git-ref API
+  supplies the owned branch's exact tip. This prevents local Git URL rewrite
+  configuration from substituting a mirror as branch-tip authority. The
+  verified commit is then fetched and must descend from both frozen ownership
+  commits without conflicting with a local branch tip. The target merge must be
+  a strict descendant of the run's frozen owned tip, so a historical merge
   cannot be attributed to a later run.
 - Git replacement refs and legacy grafts must be absent. Ancestry checks also
   disable replacement objects explicitly.
@@ -177,10 +205,12 @@ The dry-run succeeds only when all of these facts are unambiguous:
   canonical evidence. Conflicting PR, commit, or provenance fails closed.
 
 The proof records the authenticated GitHub operator, repository, run/PRD/issue/
-PR identities, issue closure source and time, exact PR body linkage, head and
-head repository, URLs, merge time and commit, config and run-metadata binding,
-ownership branch and remote, exact remote tip, prior status evidence, and proof
-timestamp. Apply stores that reviewed proof under
+PR identities, issue closure source, time, and actor, the exact integration
+comment and actor authorization, closing-reference evidence, the parsed body
+directive, byte-exact body OIDs and all-state candidate set, head and head
+repository, URLs, merge time and commit, config and run-metadata binding,
+ownership branch and remote, repository default branch, GitHub ref and exact
+tip, prior status evidence, and proof timestamp. Apply stores that reviewed proof under
 `items["<issue>"].reconciliation`, adds its own apply timestamp and source
 `operator-guarded-reconciliation`, then invokes the normal slice-integration
 lifecycle helper to atomically replace the item with canonical fields:
@@ -195,10 +225,12 @@ lifecycle helper to atomically replace the item with canonical fields:
 ```
 
 If any API call, JSON parse, process inspection, fetch, lock, atomic rename, or
-revalidation fails, no canonical evidence is written. If evidence changes after
-dry-run, discard the proof and start again. Reapplying the same proof, or
-applying a fresh proof to identical canonical evidence, returns `unchanged`
-without rewriting status.
+revalidation fails, no canonical evidence is written. Apply rebuilds the
+complete proof while holding the state lock, so issue, comment, permission, PR
+body, candidate, branch-tip, or local-state changes invalidate the reviewed
+proof. Discard it and start again. Reapplying the same proof, or applying a
+fresh proof to identical canonical evidence, returns `unchanged` without
+rewriting status.
 
 ## Stale Worker Reconciliation
 
