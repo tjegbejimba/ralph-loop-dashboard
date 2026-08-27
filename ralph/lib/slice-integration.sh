@@ -59,15 +59,16 @@ verify_slice_pr_base() {
   fi
 }
 
-# record_slice_integrated ISSUE_NUMBER PR_NUMBER COMMIT_SHA [RUN_ID]
+# record_slice_integrated ISSUE_NUMBER PR_NUMBER COMMIT_SHA [RUN_ID] [RECONCILIATION_JSON]
 # Records that a slice has been integrated into the PRD branch.
-# Updates status.json with slice-integrated status, PR number, and commit SHA.
+# Atomically replaces its status item with canonical integration evidence.
 #
 # Args:
 #   ISSUE_NUMBER — slice issue number
 #   PR_NUMBER    — pull request number
 #   COMMIT_SHA   — merge commit SHA
 #   RUN_ID       — run identifier (optional, uses $RUN_ID if not provided)
+#   RECONCILIATION_JSON — optional guarded-recovery provenance object
 #
 # Returns: 0 on success, 1 on failure
 record_slice_integrated() {
@@ -75,33 +76,54 @@ record_slice_integrated() {
   local pr_number="$2"
   local commit_sha="$3"
   local run_id="${4:-$RUN_ID}"
+  local reconciliation_json="${5:-null}"
+
+  if ! printf '%s\n' "$reconciliation_json" \
+    | jq -e 'type == "object" or . == null' >/dev/null 2>&1; then
+    echo "ERROR: Slice integration reconciliation provenance must be an object" >&2
+    return 1
+  fi
   
-  local file
+  local file timestamp
   file=$(status_file "$run_id")
+  timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
   local tmp
-  tmp=$(status_mktemp "$run_id")
+  tmp=$(status_mktemp "$run_id") || return 1
   
   [[ ! -f "$file" ]] && printf '%s\n' '{"items":{}}' >"$file"
   
   jq --arg issue "$issue" \
      --arg pr "$pr_number" \
      --arg commit "$commit_sha" \
-     --arg timestamp "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '
-    .items[$issue] = {
-      status: "slice-integrated",
-      pr_number: $pr,
-      integrated_commit: $commit,
-      integrated_at: $timestamp,
-      workerId: null,
-      pid: null,
-      logFile: null,
-      startedAt: null,
-      error: null
-    }
-  ' "$file" >"$tmp" && mv "$tmp" "$file"
+     --arg timestamp "$timestamp" \
+     --argjson reconciliation "$reconciliation_json" '
+    .items[$issue] = (
+      {
+        status: "slice-integrated",
+        pr_number: $pr,
+        integrated_commit: $commit,
+        integrated_at: $timestamp,
+        workerId: null,
+        pid: null,
+        logFile: null,
+        startedAt: null,
+        error: null
+      }
+      + if $reconciliation == null then {}
+        else {
+          reconciliation: (
+            $reconciliation + {applied_at: $timestamp}
+          )
+        }
+        end
+    )
+  ' "$file" >"$tmp" && mv "$tmp" "$file" || {
+    rm -f "$tmp"
+    return 1
+  }
 }
 
-# close_slice_issue ISSUE_NUMBER PR_NUMBER REPO
+# close_slice_issue ISSUE_NUMBER PR_NUMBER REPO INTEGRATION_BRANCH
 # Explicitly closes a slice issue after integration.
 # Required because GitHub doesn't auto-close from non-default-branch PRs.
 #
@@ -109,17 +131,47 @@ record_slice_integrated() {
 #   ISSUE_NUMBER — slice issue number
 #   PR_NUMBER    — pull request number
 #   REPO         — repository in owner/repo format
+#   INTEGRATION_BRANCH — exact owned non-default PRD branch
 #
 # Returns: 0 on success, 1 on failure
 close_slice_issue() {
   local issue="$1"
   local pr_number="$2"
   local repo="$3"
+  local integration_branch="$4"
+
+  if [[ -z "$integration_branch" \
+    || "$integration_branch" == *'`'* \
+    || "$integration_branch" == *$'\r'* \
+    || "$integration_branch" == *$'\n'* ]]; then
+    return 1
+  fi
   
   local comment
-  comment="Integrated via PR #$pr_number into PRD integration branch. (Ralph explicit closure for non-default-base PR.)"
+  comment="Merged via PR #$pr_number into \`$integration_branch\`."
   
   gh issue close "$issue" --repo "$repo" --reason completed --comment "$comment"
+}
+
+# close_and_record_slice_integration ISSUE_NUMBER PR_NUMBER MERGE_COMMIT RUN_ID REPO INTEGRATION_BRANCH
+# Closes the issue first, then records canonical local evidence under the state lock.
+close_and_record_slice_integration() {
+  local issue="$1"
+  local pr_number="$2"
+  local merge_commit="$3"
+  local run_id="$4"
+  local repo="$5"
+  local integration_branch="$6"
+
+  close_slice_issue \
+    "$issue" "$pr_number" "$repo" "$integration_branch" || return 1
+  state_lock || return 1
+
+  local result=0
+  record_slice_integrated \
+    "$issue" "$pr_number" "$merge_commit" "$run_id" || result=1
+  state_unlock || result=1
+  return "$result"
 }
 
 # is_slice_dependency_satisfied BLOCKER_ISSUE_NUMBER DEPENDENT_RUN_ID

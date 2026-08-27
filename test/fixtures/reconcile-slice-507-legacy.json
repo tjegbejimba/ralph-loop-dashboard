@@ -7,15 +7,22 @@
     "state": "CLOSED",
     "closed_at": "2026-08-25T23:05:34Z",
     "closed_by": "tjegbejimba",
+    "closure_comment": {
+      "author_association": "OWNER",
+      "body": "Merged via PR #533 into `ralph/prd/prd-parent-tasks-hierarchy-and-leaf-first-execution-505`."
+    },
     "ralph_status": "merged",
     "integrated_commit": null
   },
   "pull_request": {
     "number": 533,
     "state": "MERGED",
+    "merged_at": "2026-08-25T23:04:39Z",
     "base": "ralph/prd/prd-parent-tasks-hierarchy-and-leaf-first-execution-505",
-    "body_closing_directive": "Closes #507",
-    "closing_issues_references": [],
+    "head": "slice-507-safe-canonical-parent-hierarchy",
+    "head_repository": "tjegbejimba/Glasswork",
+    "body_link": "Closes #507",
+    "closing_issue_references": [],
     "merge_commit": "f1d5213c3e07148afa508b044ea630406ad98422"
   },
   "integration_comment": {

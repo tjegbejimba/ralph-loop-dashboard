@@ -119,6 +119,10 @@ JSON proof. Apply requires that reviewed proof, acquires both launcher setup
 locks and the shared state lock, then repeats every proof while locked before
 atomically replacing `status.json`.
 
+This recovery command is distributed with Ralph's repository scripts. Refresh a
+target checkout with `./install.sh <target-repository> --scripts-only`; no
+dashboard extension refresh is required.
+
 ```bash
 # Run from the target repository in Bash (including Git Bash on Windows).
 proof_file="$(mktemp "${TMPDIR:-/tmp}/ralph-reconcile-507.XXXXXX.json")"
@@ -144,64 +148,72 @@ jq . "$proof_file"
 
 The dry-run succeeds only when all of these facts are unambiguous:
 
-- The run ID, PRD, queue, status, and one active ownership record agree; the run
-  is terminal and the ownership record is neither transferring nor retiring.
+- The run ID, PRD, queue, status, run metadata, Ralph config, and one active
+  ownership record agree. The metadata resolves to the current repository
+  (including native Windows paths), the run is terminal, and ownership is
+  neither transferring nor retiring. Configured repository, remote, delivery
+  branch, and issue-branch prefix must match the ownership evidence.
 - `state.json` is valid, has no claims, and does not name another active run.
 - Strict process inspection finds no scoped launcher or worker; no launcher
   pidfile, launcher/worker lock, or linked worktree exists.
-- The issue is closed. The exact PR exists, is merged, targets the owned
-  integration branch, and is the only PR linked to that issue and base.
-- A GitHub `closingIssuesReferences` entry for the exact issue remains
-  sufficient linkage evidence when present.
-- When that array is empty because the PR targets a non-default owned PRD
-  branch, Ralph requires the complete fallback bundle below. It never mixes a
-  non-matching or partially populated GitHub reference with fallback evidence.
-  - The PR body has exactly one isolated, unindented closing-directive line and it names
-    the exact issue, for example `Closes #507`. Ralph accepts only `Close`,
-    `Fix`, or `Resolve` keyword forms on their own Markdown line. It ignores
-    variable-length fenced and indented code, raw HTML, HTML comments, block
-    quotes, list items and continuations,
-    prose/examples, cross-repository references, and malformed directives.
-  - The closed issue has exactly one comment whose complete body is
-    ``Merged via PR #<pr> into `<owned-branch>`.`` The comment must have been
-    created at the issue's closure timestamp by the issue's recorded closing
-    actor, and it must never have been edited. Missing, duplicate, edited,
-    wrong-PR, or wrong-branch comments are rejected.
-  - **Authorized integration-comment actor policy:** the actor must have
-    `OWNER`, `MEMBER`, or `COLLABORATOR` author association on the comment and
-    GitHub must currently report `admin`, `maintain`, or `write` repository
-    permission for that same login. Authentication or permission lookup errors,
-    identity disagreement, and weaker roles fail closed.
-  - Listing every PR for the owned base must yield exactly one candidate for the
-    issue. Ralph binds the full target PR body, closing-reference array,
-    candidate numbers, content-addressed PR-body OIDs, candidate-list records,
-    exact closure comment, and actor authorization result into the reviewed
-    proof. Content addressing avoids placing large PR bodies on the Windows
-    command line while still making any body change invalidate apply.
+- The issue is closed with an exact closure timestamp and closing actor. The
+  exact PR exists, is merged with a merge commit, targets the exact owned
+  integration branch, comes from the same repository, and uses the configured
+  `<prefix><issue>-...` head. Its merge timestamp cannot postdate issue closure.
+- An exact same-repository `closingIssuesReferences` entry for the issue remains
+  sufficient linkage. If GitHub returns no closing references, as it does for
+  non-default-base integration PRs, every part of the independent fallback
+  bundle below is mandatory, and the owned base must differ from the
+  repository's current GitHub default branch.
+- The PR body contains exactly one isolated, unindented closing directive for
+  the exact issue, such as `Closes #507`. Directives embedded in prose,
+  blockquotes, lists, fenced or indented code, raw HTML, or HTML comments are
+  not accepted. GitHub-compatible keyword casing and an optional colon are
+  recognized. Another directive, another issue, unsafe markup, or ambiguous
+  parsing fails closed.
+- The issue has exactly one Ralph-shaped integration comment with byte-exact
+  text ``Merged via PR #<pr> into `<owned-branch>`.`` The comment must have been
+  created exactly at issue closure, never edited, and authored by the issue's
+  closing actor. Its GitHub author association must be `OWNER`, `MEMBER`, or
+  `COLLABORATOR`, and a separate current repository-permission lookup must
+  return `admin`, `maintain`, or `write`. Missing, edited, duplicate,
+  conflicting, mismatched, or unauthorized comments fail closed.
+  Normal PRD integration emits this same branch-bound comment and records
+  canonical local status only after explicit issue closure succeeds.
+- An all-state PR query for the owned branch must identify the supplied PR as
+  the only candidate linked to the issue. The body is streamed and
+  content-addressed from both PR lookups; the byte-exact body OIDs must agree,
+  including trailing newlines. Competing bare, same-repository qualified, and
+  canonical issue-URL directives are all treated as linkage conflicts.
+- Exhaustive paginated inspection finds no live PR from the integration branch
+  and no other open PR whose body or canonical issue head claims the slice.
 - The configured Git remote is a network URL for the same GitHub `owner/repo`
   returned by the API. Local and path-like remotes are rejected.
-- The remote branch exists at one exact tip, descends from both frozen ownership
-  commits, and does not conflict with a local branch tip. The target merge must
-  be a strict descendant of the run's frozen owned tip, so a historical merge
+- GitHub's repository API identifies the default branch, and its Git-ref API
+  supplies the owned branch's exact tip. This prevents local Git URL rewrite
+  configuration from substituting a mirror as branch-tip authority. The
+  verified commit is then fetched and must descend from both frozen ownership
+  commits without conflicting with a local branch tip. The target merge must be
+  a strict descendant of the run's frozen owned tip, so a historical merge
   cannot be attributed to a later run.
 - Git replacement refs and legacy grafts must be absent. Ancestry checks also
   disable replacement objects explicitly.
-- The PR merge commit is either the exact remote tip or lies on its first-parent
-  history. In the latter case, every later first-parent commit must have exactly
-  one different `slice-integrated` status item with a valid PR number and
-  integration timestamp. Ralph independently verifies each accounted issue and
-  PR through GitHub, including its closing reference, merged state, branch base,
-  and merge commit. Direct or otherwise unaccounted branch movement is rejected.
+- The PR merge commit equals the current remote integration-branch tip exactly.
+  Descendant commits are rejected even if they have other canonical status
+  evidence; an operator must reconcile against an unambiguous exact tip.
 - Existing evidence is either the expected legacy `merged` item, or identical
   canonical evidence. Conflicting PR, commit, or provenance fails closed.
 
 The proof records the authenticated GitHub operator, repository, run/PRD/issue/
-PR identities, URLs, merge time and commit, linkage policy and its complete
-evidence, ownership branch and remote, exact remote tip, tip-accounting policy,
-later accounted commits, prior status evidence, and proof timestamp. Apply
-stores that reviewed proof under
+PR identities, issue closure source, time, and actor, the exact integration
+comment and actor authorization, closing-reference evidence, the parsed body
+directive, byte-exact body OIDs and all-state candidate set, head and head
+repository, URLs, merge time and commit, config and run-metadata binding,
+ownership branch and remote, repository default branch, GitHub ref and exact
+tip, prior status evidence, and proof timestamp. Apply stores that reviewed proof under
 `items["<issue>"].reconciliation`, adds its own apply timestamp and source
-`operator-guarded-reconciliation`, and writes the canonical top-level fields:
+`operator-guarded-reconciliation`, then invokes the normal slice-integration
+lifecycle helper to atomically replace the item with canonical fields:
 
 ```json
 {
@@ -213,20 +225,12 @@ stores that reviewed proof under
 ```
 
 If any API call, JSON parse, process inspection, fetch, lock, atomic rename, or
-revalidation fails, no canonical evidence is written. If evidence changes after
-dry-run, discard the proof and start again. Reapplying the same proof, or
-applying a fresh proof to identical canonical evidence, returns `unchanged`
-without rewriting status.
-
-Because this command is part of the installed Ralph script surface, target
-repositories need a scripts-only refresh after a canonical change lands:
-
-```bash
-# Run from the canonical ralph-loop-dashboard checkout.
-./install.sh /path/to/target-repository --scripts-only
-```
-
-No dashboard-extension refresh is required for reconciliation-only changes.
+revalidation fails, no canonical evidence is written. Apply rebuilds the
+complete proof while holding the state lock, so issue, comment, permission, PR
+body, candidate, branch-tip, or local-state changes invalidate the reviewed
+proof. Discard it and start again. Reapplying the same proof, or applying a
+fresh proof to identical canonical evidence, returns `unchanged` without
+rewriting status.
 
 ## Stale Worker Reconciliation
 

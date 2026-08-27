@@ -39,7 +39,7 @@ create_fixture() {
   local origin="$root/origin.git"
   local bin="$root/bin"
   local run_id="20260825-184631-43b25623"
-  local branch="ralph/prd/glasswork-505"
+  local branch="ralph/prd/prd-parent-tasks-hierarchy-and-leaf-first-execution-505"
 
   mkdir -p "$repo" "$bin"
   git init -q --bare "$origin"
@@ -69,12 +69,20 @@ create_fixture() {
   git -C "$repo" checkout -q main
 
   mkdir -p "$repo/.ralph/logs" "$repo/.ralph/runs/$run_id"
+  jq -n '{
+    repo: "test/example",
+    prd: {remote: "origin", deliveryBranch: "main"},
+    issue: {branchPrefix: "slice-"}
+  }' >"$repo/.ralph/config.json"
   printf '{"claims":{},"active_prd":"505","active_run_id":"%s"}\n' "$run_id" \
     >"$repo/.ralph/state.json"
   printf '[{"number":507,"title":"Legacy integrated slice"}]\n' \
     >"$repo/.ralph/runs/$run_id/queue.json"
-  printf '{"items":{"507":{"status":"merged","pr_number":"533","pid":null}}}\n' \
+  printf '{"items":{"507":{"status":"merged","pr_number":"533","pid":null,"legacy_marker":"remove-me"}}}\n' \
     >"$repo/.ralph/runs/$run_id/status.json"
+  jq -n --arg root "$(cd "$repo" && pwd -P)" \
+    '{repoRoot:$root,runMode:"until-empty",createdAt:"2026-08-25T18:46:31Z"}' \
+    >"$repo/.ralph/runs/$run_id/metadata.json"
   jq -n \
     --arg run "$run_id" \
     --arg branch "$branch" \
@@ -93,10 +101,33 @@ create_fixture() {
   cat >"$bin/gh" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+pr_body=\$'Implements the slice.\n\nCloses #507'
+case "\${GH_PR_BODY_MODE:-valid}" in
+  valid) ;;
+  lowercase) pr_body=\$'Implements the slice.\n\ncloses #507' ;;
+  colon) pr_body=\$'Implements the slice.\n\nCloses: #507' ;;
+  wrong-issue) pr_body=\$'Implements the slice.\n\nCloses #508' ;;
+  duplicate) pr_body=\$'Closes #507\n\nFixes #507' ;;
+  inline-example) pr_body='Example: Closes #507' ;;
+  blockquote) pr_body='> Closes #507' ;;
+  list) pr_body='- Closes #507' ;;
+  fenced) pr_body=\$'~~~text\nCloses #507\n~~~' ;;
+  indented) pr_body='    Closes #507' ;;
+  raw-html) pr_body=\$'<details>\n\nCloses #507\n\n</details>' ;;
+  html-comment) pr_body=\$'<!-- Closes #507 -->\n\nNo directive.' ;;
+  large) pr_body="\$(head -c 131072 /dev/zero | tr '\\0' x)"\$'\n\nCloses #507' ;;
+esac
+merged_at="2026-08-25T20:00:00Z"
+[[ "\${GH_PR_TIME_MODE:-valid}" == "future" ]] \
+  && merged_at="2026-08-25T21:00:00Z"
 if [[ "\$1 \$2 \$3" == "issue view 507" ]]; then
   case "\${GH_ISSUE_MODE:-closed}" in
-    closed) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","url":"https://github.com/test/example/issues/507"}\n' ;;
-    open) printf '{"number":507,"state":"OPEN","stateReason":null,"url":"https://github.com/test/example/issues/507"}\n' ;;
+    closed) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"test-owner"},"authorAssociation":"OWNER","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T20:01:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    closed-by-pr) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[{"number":533}],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    no-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    untrusted-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"outside-user"},"authorAssociation":"CONTRIBUTOR","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T20:01:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    stale-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"test-owner"},"authorAssociation":"OWNER","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T19:59:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    open) printf '{"number":507,"state":"OPEN","stateReason":null,"closedAt":null,"closedByPullRequestsReferences":[],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
     malformed) printf '{not-json\n' ;;
     fail) echo "simulated issue API failure" >&2; exit 1 ;;
   esac
@@ -108,29 +139,33 @@ if [[ "\$1 \$2 \$3" == "issue view 508" ]]; then
 fi
 if [[ "\$1 \$2 \$3" == "pr view 533" ]]; then
   case "\${GH_PR_MODE:-merged}" in
-    merged) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}],"url":"https://github.com/test/example/pull/533"}\n' ;;
-    nondefault-body) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
-    nondefault-large-body)
-      padding=\$(printf '%20000s' '')
-      padding=\${padding// /a}
-      printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Intro %s\\\\n\\\\nCloses #507","url":"https://github.com/test/example/pull/533"}\n' "\$padding"
+    merged)
+      if [[ "\${GH_PR_BODY_MODE:-valid}" == "large" ]]; then
+        printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"'
+        head -c 131072 /dev/zero | tr '\\0' x
+        printf '\\\\n\\\\nCloses #507","url":"https://github.com/test/example/pull/533"}\n'
+      else
+        jq -cn \
+          --arg branch "$branch" \
+          --arg commit "$merge_commit" \
+          --arg body "\$pr_body" \
+          --arg merged_at "\$merged_at" \
+          '{number:533,state:"MERGED",mergedAt:\$merged_at,
+            baseRefName:\$branch,
+            headRefName:"slice-507-safe-canonical-parent-hierarchy",
+            headRepository:{nameWithOwner:"test/example"},
+            mergeCommit:{oid:\$commit},
+            closingIssuesReferences:[],
+            body:\$body,
+            url:"https://github.com/test/example/pull/533"}'
+      fi
       ;;
-    nondefault-body-modified) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Intro\\\\n\\\\nCloses #507","url":"https://github.com/test/example/pull/533"}\n' ;;
-    nondefault-trailing-body) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507\\\\n\\\\n","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-example) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Example: Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-quote) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"> Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-code) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"    Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-list) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"- Example:\\\\n  Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-long-fence) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"\`\`\`\`text\\\\n\`\`\`\\\\nCloses #507\\\\n\`\`\`\`","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-fence-info) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"\`\`\`text\\\\n\`\`\`not-a-close\\\\nCloses #507\\\\n\`\`\`","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-html) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"<pre>\\\\nCloses #507\\\\n</pre>","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-html-blank) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"<pre>\\\\n\\\\nCloses #507\\\\n\\\\n</pre>","url":"https://github.com/test/example/pull/533"}\n' ;;
-    spoof-html-comment-adjacent) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"<!--x--><pre>\\\\n\\\\nCloses #507\\\\n\\\\n</pre><!--y-->","url":"https://github.com/test/example/pull/533"}\n' ;;
-    wrong-body-issue) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #508","url":"https://github.com/test/example/pull/533"}\n' ;;
-    ambiguous-body) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507\\\\nCloses #508","url":"https://github.com/test/example/pull/533"}\n' ;;
-    wrong-base) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"main","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}],"url":"https://github.com/test/example/pull/533"}\n' ;;
-    wrong-link) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":999,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/999"}],"url":"https://github.com/test/example/pull/533"}\n' ;;
-    cross-repo-link) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"mirror","owner":{"login":"attacker"}},"url":"https://github.com/attacker/mirror/issues/507"}],"url":"https://github.com/test/example/pull/533"}\n' ;;
+    closing-ref) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}],"body":"","url":"https://github.com/test/example/pull/533"}\n' ;;
+    cross-repo-ref) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"attacker"}},"url":"https://github.com/attacker/example/issues/507"}],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-base) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"main","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-link) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":999,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/999"}],"body":"Closes #999","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-head) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"feature-unrelated","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-head-repo) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"attacker/fork"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
     open) printf '{"number":533,"state":"OPEN","mergedAt":null,"baseRefName":"$branch","headRefName":"slice-507","mergeCommit":null,"url":"https://github.com/test/example/pull/533"}\n' ;;
     malformed) printf '{not-json\n' ;;
     fail) echo "simulated PR API failure" >&2; exit 1 ;;
@@ -138,33 +173,77 @@ if [[ "\$1 \$2 \$3" == "pr view 533" ]]; then
   exit 0
 fi
 if [[ "\$1 \$2 \$3" == "pr view 534" && -n "\${GH_DESCENDANT_COMMIT:-}" ]]; then
-  printf '{"number":534,"state":"MERGED","mergedAt":"2026-08-25T21:00:00Z","baseRefName":"$branch","headRefName":"slice-508","mergeCommit":{"oid":"%s"},"closingIssuesReferences":[{"number":508,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/508"}],"url":"https://github.com/test/example/pull/534"}\n' "\$GH_DESCENDANT_COMMIT"
+  printf '{"number":534,"state":"MERGED","mergedAt":"2026-08-25T21:00:00Z","baseRefName":"$branch","headRefName":"slice-508","mergeCommit":{"oid":"%s"},"closingIssuesReferences":[{"number":508}],"url":"https://github.com/test/example/pull/534"}\n' "\$GH_DESCENDANT_COMMIT"
   exit 0
 fi
 if [[ "\$1 \$2" == "pr list" ]]; then
-  case "\${GH_LIST_MODE:-exact}" in
-    exact)
-      if [[ "\${GH_PR_MODE:-merged}" == "nondefault-body" ]]; then
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507"}]\n'
-      elif [[ "\${GH_PR_MODE:-merged}" == "nondefault-large-body" ]]; then
-        padding=\$(printf '%20000s' '')
-        padding=\${padding// /a}
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Intro %s\\\\n\\\\nCloses #507"}]\n' "\$padding"
-      elif [[ "\${GH_PR_MODE:-merged}" == "nondefault-body-modified" ]]; then
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Intro\\\\n\\\\nCloses #507"}]\n'
-      elif [[ "\${GH_PR_MODE:-merged}" == "nondefault-trailing-body" ]]; then
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507\\\\n\\\\n"}]\n'
-      elif [[ -n "\${GH_DESCENDANT_COMMIT:-}" ]]; then
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}]},{"number":534,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"%s"},"closingIssuesReferences":[{"number":508,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/508"}]}]\n' "\$GH_DESCENDANT_COMMIT"
-      else
-        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}]}]\n'
-      fi
+  case "\${GH_PR_MODE:-merged}" in
+    closing-ref)
+      printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}],"body":""}]\n'
       ;;
-    conflict) printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}]},{"number":534,"state":"OPEN","baseRefName":"$branch","mergeCommit":null,"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}]}]\n' ;;
-    fallback-conflict) printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507"},{"number":534,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507"}]\n' ;;
-    empty) printf '[]\n' ;;
+    *)
+      if [[ "\${GH_PR_BODY_MODE:-valid}" == "large" ]]; then
+        printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"'
+        head -c 131072 /dev/zero | tr '\\0' x
+        printf '\\\\n\\\\nCloses #507"}]\n'
+        exit 0
+      fi
+      list_body="\$pr_body"
+      if [[ "\${GH_PR_BODY_MODE:-valid}" == "trailing-newline-race" ]]; then
+        list_body=\$'Implements the slice.\n\nCloses #507\n'
+      fi
+      jq -cn \
+        --arg branch "$branch" \
+        --arg commit "$merge_commit" \
+        --arg body "\$list_body" \
+        --arg duplicate "\${GH_CANDIDATE_MODE:-single}" '
+          [{
+            number:533,
+            state:"MERGED",
+            baseRefName:\$branch,
+            mergeCommit:{oid:\$commit},
+            closingIssuesReferences:[],
+            body:\$body
+          }]
+          + (if (\$duplicate | startswith("multiple"))
+             then [{
+               number:534,
+               state:"MERGED",
+               baseRefName:\$branch,
+               mergeCommit:{oid:\$commit},
+               closingIssuesReferences:[],
+               body:(
+                 if \$duplicate == "multiple-qualified"
+                 then "Closes test/example#507"
+                 elif \$duplicate == "multiple-case"
+                 then "cLoSeS TEST/EXAMPLE#507"
+                 elif \$duplicate == "multiple-colon"
+                 then "Closes: #507"
+                 elif \$duplicate == "multiple-url"
+                 then "Closes https://github.com/test/example/issues/507"
+                 else "Closes #507"
+                 end
+               )
+             }]
+             else []
+             end)'
+      ;;
+  esac
+  exit 0
+fi
+if [[ "\$1 \$2" == "api --paginate" ]]; then
+  case "\${GH_OPEN_PRS_MODE:-empty}" in
+    empty) printf '[[]]\n' ;;
+    body-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"other","repo":{"full_name":"test/example"}},"body":"Fixes #507"}]]\n' ;;
+    qualified-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"other","repo":{"full_name":"test/example"}},"body":"Closes test/example#507"}]]\n' ;;
+    case-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"other","repo":{"full_name":"test/example"}},"body":"cLoSeS: TEST/EXAMPLE#507"}]]\n' ;;
+    url-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"other","repo":{"full_name":"test/example"}},"body":"Closes https://github.com/test/example/issues/507"}]]\n' ;;
+    head-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"slice-507-competing","repo":{"full_name":"test/example"}},"body":""}]]\n' ;;
+    branch-pr) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"$branch","repo":{"full_name":"test/example"}},"body":""}]]\n' ;;
+    page-two-conflict) printf '[[{"number":534,"state":"open","base":{"ref":"main"},"head":{"ref":"unrelated","repo":{"full_name":"test/example"}},"body":""}],[{"number":535,"state":"open","base":{"ref":"main"},"head":{"ref":"slice-507-page-two","repo":{"full_name":"test/example"}},"body":""}]]\n' ;;
     malformed) printf '{not-json\n' ;;
-    fail) echo "simulated PR list API failure" >&2; exit 1 ;;
+    malformed-page) printf '[{"number":534}]\n' ;;
+    fail) echo "simulated open PR API failure" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -176,37 +255,64 @@ if [[ "\$1 \$2" == "api user" ]]; then
   esac
   exit 0
 fi
+if [[ "\$1" == "api" && "\$2" == "repos/test/example" ]]; then
+  case "\${GH_REPO_MODE:-valid}" in
+    valid) printf '{"full_name":"test/example","default_branch":"main"}\n' ;;
+    default-owned) printf '{"full_name":"test/example","default_branch":"$branch"}\n' ;;
+    malformed) printf '{"full_name":"attacker/example"}\n' ;;
+    fail) echo "simulated repository API failure" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
+if [[ "\$1" == "api" \
+  && "\$2" == "repos/test/example/git/ref/heads/$branch" ]]; then
+  case "\${GH_REF_MODE:-valid}" in
+    valid)
+      ref_tip=\$(git --git-dir="$origin" rev-parse "refs/heads/$branch")
+      printf '{"ref":"refs/heads/$branch","object":{"type":"commit","sha":"%s"}}\n' "\$ref_tip"
+      ;;
+    mismatch) printf '{"ref":"refs/heads/$branch","object":{"type":"commit","sha":"$base"}}\n' ;;
+    wrong-ref) printf '{"ref":"refs/heads/main","object":{"type":"commit","sha":"$merge_commit"}}\n' ;;
+    malformed) printf '{"ref":"refs/heads/$branch","object":{}}\n' ;;
+    fail) echo "simulated ref API failure" >&2; exit 1 ;;
+  esac
+  exit 0
+fi
 if [[ "\$1" == "api" && "\$2" == "repos/test/example/issues/507" ]]; then
-  case "\${GH_ISSUE_MODE:-closed}" in
-    closed) printf '{"number":507,"state":"closed","state_reason":"completed","closed_at":"2026-08-25T20:00:00Z","closed_by":{"login":"ralph-owner"},"html_url":"https://github.com/test/example/issues/507","repository_url":"https://api.github.com/repos/test/example"}\n' ;;
-    open) printf '{"number":507,"state":"open","state_reason":null,"closed_at":null,"closed_by":null,"html_url":"https://github.com/test/example/issues/507","repository_url":"https://api.github.com/repos/test/example"}\n' ;;
-    malformed) printf '{not-json\n' ;;
-    fail) echo "simulated issue API failure" >&2; exit 1 ;;
+  case "\${GH_REST_ISSUE_MODE:-valid}" in
+    valid) printf '{"number":507,"state":"closed","state_reason":"completed","closed_at":"2026-08-25T20:05:00Z","closed_by":{"login":"test-owner"},"html_url":"https://github.com/test/example/issues/507","repository_url":"https://api.github.com/repos/test/example"}\n' ;;
+    actor-mismatch) printf '{"number":507,"state":"closed","state_reason":"completed","closed_at":"2026-08-25T20:05:00Z","closed_by":{"login":"different-owner"},"html_url":"https://github.com/test/example/issues/507","repository_url":"https://api.github.com/repos/test/example"}\n' ;;
+    invalid-actor) printf '{"number":507,"state":"closed","state_reason":"completed","closed_at":"2026-08-25T20:05:00Z","closed_by":{"login":"bad/name"},"html_url":"https://github.com/test/example/issues/507","repository_url":"https://api.github.com/repos/test/example"}\n' ;;
+    malformed) printf '{"number":507}\n' ;;
+    fail) echo "simulated issue REST API failure" >&2; exit 1 ;;
   esac
   exit 0
 fi
 if [[ "\$1" == "api" && "\$2" == "repos/test/example/issues/507/comments?per_page=100" ]]; then
-  case "\${GH_COMMENT_MODE:-valid}" in
-    valid) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
-    missing) printf '[[]]\n' ;;
-    edited) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:01:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
-    valid-plus-edited) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"},{"id":7002,"html_url":"https://github.com/test/example/issues/507#issuecomment-7002","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:01:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" "$branch" ;;
-    valid-plus-conflict) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"},{"id":7002,"html_url":"https://github.com/test/example/issues/507#issuecomment-7002","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #999 into \`ralph/prd/other\`.","author_association":"OWNER"}]]\n' "$branch" ;;
-    ambiguous) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"},{"id":7002,"html_url":"https://github.com/test/example/issues/507#issuecomment-7002","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" "$branch" ;;
-    wrong-pr) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #999 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
-    wrong-branch) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"ralph-owner"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #533 into \`ralph/prd/other\`.","author_association":"OWNER"}]]\n' ;;
-    actor-mismatch) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"intruder"},"created_at":"2026-08-25T20:00:00Z","updated_at":"2026-08-25T20:00:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"NONE"}]]\n' "$branch" ;;
-    malformed) printf '{"not":"pages"}\n' ;;
-    fail) echo "simulated comment API failure" >&2; exit 1 ;;
+  comment_mode="\${GH_COMMENT_MODE:-\${GH_ISSUE_MODE:-closed}}"
+  case "\$comment_mode" in
+    closed|valid) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    no-closure|missing) printf '[[]]\n' ;;
+    untrusted-closure|association-mismatch) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"CONTRIBUTOR"}]]\n' "$branch" ;;
+    stale-closure) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:01:00Z","updated_at":"2026-08-25T20:01:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    edited) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:06:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    duplicate) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"},{"id":7002,"html_url":"https://github.com/test/example/issues/507#issuecomment-7002","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" "$branch" ;;
+    conflicting) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"},{"id":7002,"html_url":"https://github.com/test/example/issues/507#issuecomment-7002","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #999 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" "$branch" ;;
+    wrong-pr) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #999 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    wrong-branch) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`ralph/prd/wrong-505\`.","author_association":"OWNER"}]]\n' ;;
+    invalid-actor) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"bad/name"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    malformed) printf '{"unexpected":"shape"}\n' ;;
+    fail) echo "simulated comments API failure" >&2; exit 1 ;;
+    *) printf '[[]]\n' ;;
   esac
   exit 0
 fi
-if [[ "\$1" == "api" && "\$2" == "repos/test/example/collaborators/ralph-owner/permission" ]]; then
-  case "\${GH_PERMISSION_MODE:-allowed}" in
-    allowed) printf '{"permission":"admin","role_name":"admin","user":{"login":"ralph-owner"}}\n' ;;
-    denied) printf '{"permission":"read","role_name":"read","user":{"login":"ralph-owner"}}\n' ;;
-    mismatch) printf '{"permission":"admin","role_name":"admin","user":{"login":"different-user"}}\n' ;;
-    malformed) printf '{not-json\n' ;;
+if [[ "\$1" == "api" && "\$2" == "repos/test/example/collaborators/test-owner/permission" ]]; then
+  case "\${GH_PERMISSION_MODE:-valid}" in
+    valid) printf '{"permission":"admin","role_name":"admin","user":{"login":"test-owner"}}\n' ;;
+    read) printf '{"permission":"read","role_name":"read","user":{"login":"test-owner"}}\n' ;;
+    actor-mismatch) printf '{"permission":"admin","role_name":"admin","user":{"login":"different-owner"}}\n' ;;
+    malformed) printf '{"permission":"admin"}\n' ;;
     fail) echo "simulated permission API failure" >&2; exit 1 ;;
   esac
   exit 0
@@ -228,23 +334,28 @@ jq -e '
   and .issue.state == "CLOSED"
   and .issue.closed_at == "2026-08-25T23:05:34Z"
   and .issue.closed_by == "tjegbejimba"
+  and .issue.closure_comment.author_association == "OWNER"
+  and .issue.closure_comment.body
+    == "Merged via PR #533 into `ralph/prd/prd-parent-tasks-hierarchy-and-leaf-first-execution-505`."
+  and .integration_comment.author == .issue.closed_by
+  and .integration_comment.created_at == .issue.closed_at
+  and .integration_comment.updated_at == .issue.closed_at
+  and .integration_comment.body == .issue.closure_comment.body
+  and .integration_comment.author_permission == "admin"
   and .issue.ralph_status == "merged"
   and .issue.integrated_commit == null
   and .pull_request.number == 533
   and .pull_request.state == "MERGED"
+  and .pull_request.merged_at == "2026-08-25T23:04:39Z"
   and .pull_request.base
     == "ralph/prd/prd-parent-tasks-hierarchy-and-leaf-first-execution-505"
-  and .pull_request.body_closing_directive == "Closes #507"
-  and .pull_request.closing_issues_references == []
+  and .pull_request.head == "slice-507-safe-canonical-parent-hierarchy"
+  and .pull_request.head_repository == "tjegbejimba/Glasswork"
+  and .pull_request.body_link == "Closes #507"
+  and .pull_request.closing_issue_references == []
   and .pull_request.merge_commit
     == "f1d5213c3e07148afa508b044ea630406ad98422"
   and .remote_integration_tip == .pull_request.merge_commit
-  and .integration_comment.id == 5418101322
-  and .integration_comment.author == "tjegbejimba"
-  and .integration_comment.author_association == "OWNER"
-  and .integration_comment.created_at == .issue.closed_at
-  and .integration_comment.updated_at == .integration_comment.created_at
-  and .integration_comment.author_permission == "admin"
 ' "$INCIDENT_FIXTURE" >/dev/null \
   || fail "exact incident fixture is incomplete"
 echo "PASS: exact Glasswork #507 incident evidence is frozen"
@@ -272,12 +383,37 @@ printf '%s\n' "$proof" | jq -e \
     and .prd_number == "505"
     and .issue.number == 507
     and .issue.state == "CLOSED"
+    and .issue.closed_at == "2026-08-25T20:05:00Z"
+    and .issue.closure.kind == "trusted-explicit-comment"
+    and .issue.closed_by == "test-owner"
+    and .issue.closure.comment.author == "test-owner"
+    and .issue.closure.comment.author_association == "OWNER"
+    and .issue.closure.comment.created_at == "2026-08-25T20:05:00Z"
     and .pull_request.number == 533
     and .pull_request.state == "MERGED"
     and .pull_request.base == $branch
+    and .pull_request.head == "slice-507-safe-canonical-parent-hierarchy"
+    and .pull_request.head_repository == "test/example"
+    and .pull_request.issue_link == "non-default-owned-branch-bundle"
+    and (.pull_request.body_oid | length) >= 40
+    and .linkage.closing_directive == "Closes #507"
+    and .linkage.candidate_prs == [533]
+    and .linkage.candidate_pr_evidence[0].number == 533
+    and .linkage.candidate_pr_evidence[0].body_oid == .pull_request.body_oid
+    and .linkage.integration_comment.author == "test-owner"
+    and .linkage.integration_comment.id == 7001
+    and .linkage.integration_comment.updated_at
+      == .linkage.integration_comment.created_at
+    and .linkage.actor_authorization.permission == "admin"
+    and .issue.closure.comment == .linkage.integration_comment
+    and .issue.closure.actor_authorization
+      == .linkage.actor_authorization
     and .pull_request.merge_commit == $commit
     and .remote.tip == $commit
+    and .remote.source == "github-api"
+    and .remote.ref == ("refs/heads/" + $branch)
     and .remote.policy == "exact-tip"
+    and .ownership.repository_default_branch == "main"
     and .operator.login == "test-operator"
     and .prior_evidence.status == "merged"
     and .prior_evidence.pr_number == "533"
@@ -312,6 +448,19 @@ jq -e \
     and (.items["507"].integrated_at | type == "string" and length > 0)
     and .items["507"].workerId == null
     and .items["507"].pid == null
+    and .items["507"].legacy_marker == null
+    and ((.items["507"] | keys | sort) == [
+      "error",
+      "integrated_at",
+      "integrated_commit",
+      "logFile",
+      "pid",
+      "pr_number",
+      "reconciliation",
+      "startedAt",
+      "status",
+      "workerId"
+    ])
     and .items["507"].reconciliation.schema_version == 1
     and .items["507"].reconciliation.source
       == "operator-guarded-reconciliation"
@@ -366,12 +515,16 @@ echo "Test 5: dry-run rejects a merged PR with the wrong base or issue link"
 IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture wrong-base)
 assert_dry_run_rejected "$repo" "$bin" "$run_id" "not merged into owned branch" \
   GH_PR_MODE=wrong-base
-assert_dry_run_rejected "$repo" "$bin" "$run_id" "conflicting GitHub closing-reference" \
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "conflicting GitHub closing-reference evidence" \
   GH_PR_MODE=wrong-link
-echo "PASS: wrong PR base and issue link are rejected"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "does not use canonical issue head" \
+  GH_PR_MODE=wrong-head
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "head repository does not match" \
+  GH_PR_MODE=wrong-head-repo
+echo "PASS: wrong PR base, linkage, head, and head repository are rejected"
 
 echo ""
-echo "Test 6: dry-run accepts only fully accounted descendants of the target merge"
+echo "Test 6: exact-tip policy rejects even fully accounted descendants"
 IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture accounted-descendant)
 git -C "$repo" checkout -qb slice-508 "$branch"
 printf 'second integrated slice\n' >>"$repo/README.md"
@@ -398,30 +551,44 @@ jq '. + [{"number":508,"title":"Later integrated slice"}]' \
   >"$repo/.ralph/runs/$run_id/queue.tmp"
 mv "$repo/.ralph/runs/$run_id/queue.tmp" \
   "$repo/.ralph/runs/$run_id/queue.json"
-descendant_proof=$(
-  GH_DESCENDANT_COMMIT="$descendant_tip" \
-  RALPH_MAIN_REPO="$repo" \
-  RALPH_REPO="test/example" \
-  RALPH_GH_BIN="$bin/gh" \
-    "$REPO_ROOT/ralph/reconcile-slice.sh" \
-      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
-) || fail "fully accounted descendant history should be accepted"
-printf '%s\n' "$descendant_proof" | jq -e \
-  --arg tip "$descendant_tip" '
-    .remote.tip == $tip
-    and .remote.policy == "accounted-first-parent-descendant"
-    and .remote.accounted_commits == [$tip]
-  ' >/dev/null || fail "descendant proof should identify the exact accounted commits"
-echo "PASS: fully accounted first-parent descendant history is proven"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not equal current remote integration tip"
+echo "PASS: accounted descendants cannot weaken exact-tip recovery"
 
 echo ""
 echo "Test 7: dry-run rejects open issues and open pull requests"
 IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture open-state)
 assert_dry_run_rejected "$repo" "$bin" "$run_id" "not closed" \
   GH_ISSUE_MODE=open
-assert_dry_run_rejected "$repo" "$bin" "$run_id" "not merged into owned branch" \
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "not merged" \
   GH_PR_MODE=open
 echo "PASS: open issue and PR evidence are rejected"
+
+echo ""
+echo "Test 7a: issue closure provenance is mandatory and independently trusted"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture closure-provenance)
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "closure comment is missing or ambiguous" \
+  GH_ISSUE_MODE=no-closure
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "closure comment is missing or ambiguous" \
+  GH_ISSUE_MODE=untrusted-closure
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "closure comment is missing or ambiguous" \
+  GH_ISSUE_MODE=stale-closure
+closing_ref_proof=$(
+  GH_ISSUE_MODE=closed-by-pr \
+  GH_PR_MODE=closing-ref \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
+) || fail "GitHub closing-reference provenance should be accepted"
+printf '%s\n' "$closing_ref_proof" \
+  | jq -e '
+      .issue.closure.kind == "github-closing-reference"
+      and .pull_request.issue_link == "github-closing-reference"
+    ' >/dev/null \
+  || fail "closing-reference proof should preserve exact provenance"
+echo "PASS: missing, untrusted, and stale closure evidence fail closed"
 
 echo ""
 echo "Test 8: unaccounted remote descendants fail closed"
@@ -432,7 +599,7 @@ git -C "$repo" commit -qam "unaccounted branch movement"
 git -C "$repo" push -q origin "$branch"
 git -C "$repo" checkout -q main
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "lacks unique canonical slice evidence"
+  "does not equal current remote integration tip"
 echo "PASS: descendant branch ambiguity is rejected"
 
 echo ""
@@ -524,7 +691,19 @@ assert_dry_run_rejected "$repo" "$bin" "$run_id" \
 
 IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture conflicting-pr)
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "missing or conflicting" GH_LIST_MODE=conflict
+  "another open delivery PR" GH_OPEN_PRS_MODE=body-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=qualified-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=case-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=url-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=head-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=page-two-conflict
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "integration branch has a live pull request" GH_OPEN_PRS_MODE=branch-pr
 echo "PASS: ownership and pull request conflicts are rejected"
 
 echo ""
@@ -538,6 +717,9 @@ jq '.remote = "evil"' "$repo/.ralph/runs/$run_id/ownership.json" \
   >"$repo/.ralph/runs/$run_id/ownership.tmp"
 mv "$repo/.ralph/runs/$run_id/ownership.tmp" \
   "$repo/.ralph/runs/$run_id/ownership.json"
+jq '.prd.remote = "evil"' "$repo/.ralph/config.json" \
+  >"$repo/.ralph/config.tmp"
+mv "$repo/.ralph/config.tmp" "$repo/.ralph/config.json"
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "does not match GitHub repository"
 echo "PASS: mismatched Git remote is rejected"
@@ -602,6 +784,12 @@ assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "GitHub issue lookup failed" GH_ISSUE_MODE=fail
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "returned invalid evidence" GH_ISSUE_MODE=malformed
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "conflicting open pull request lookup failed" GH_OPEN_PRS_MODE=fail
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "returned malformed evidence" GH_OPEN_PRS_MODE=malformed
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "returned malformed evidence" GH_OPEN_PRS_MODE=malformed-page
 printf '{not-json\n' >"$repo/.ralph/runs/$run_id/status.json"
 assert_dry_run_rejected "$repo" "$bin" "$run_id" \
   "not a valid terminal prior run"
@@ -699,134 +887,186 @@ identical_after=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
 echo "PASS: identical canonical evidence remains unchanged"
 
 echo ""
-echo "Test 22: non-default PRD linkage uses the complete #507 evidence bundle"
-IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture nondefault-linkage)
-nondefault_proof=$(
-  GH_PR_MODE=nondefault-body \
-  RALPH_MAIN_REPO="$repo" \
-  RALPH_REPO="test/example" \
-  RALPH_GH_BIN="$bin/gh" \
-    "$REPO_ROOT/ralph/reconcile-slice.sh" \
-      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
-) || fail "complete non-default linkage bundle should succeed"
-printf '%s\n' "$nondefault_proof" | jq -e \
-  --arg branch "$branch" '
-    .linkage.policy == "non-default-owned-branch-bundle"
-    and .linkage.closing_directive == "Closes #507"
-    and .linkage.closing_issues_references == []
-    and .linkage.candidate_prs == [533]
-    and (.linkage.candidate_pr_evidence | length) == 1
-    and .linkage.candidate_pr_evidence[0].number == 533
-    and (.linkage.pull_request_body_oid
-      | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
-    and .linkage.candidate_pr_evidence[0].body_oid
-      == .linkage.pull_request_body_oid
-    and .linkage.integration_comment.id == 7001
-    and .linkage.integration_comment.author == "ralph-owner"
-    and .linkage.integration_comment.author_association == "OWNER"
-    and .linkage.integration_comment.created_at == .issue.closed_at
-    and .linkage.integration_comment.updated_at
-      == .linkage.integration_comment.created_at
-    and .linkage.integration_comment.body
-      == ("Merged via PR #533 into `" + $branch + "`.")
-    and .linkage.actor_authorization.login == "ralph-owner"
-    and .linkage.actor_authorization.permission == "admin"
-  ' >/dev/null || fail "proof should bind the complete non-default linkage evidence"
-echo "PASS: complete non-default linkage bundle proves the exact intended workflow"
+echo "Test 22: config and run metadata must bind to this repository and ownership"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture config-repo)
+jq '.repo = "attacker/mirror"' "$repo/.ralph/config.json" \
+  >"$repo/.ralph/config.tmp"
+mv "$repo/.ralph/config.tmp" "$repo/.ralph/config.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not match canonical Ralph config"
 
-IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture large-body-linkage)
-large_body_proof=$(
-  GH_PR_MODE=nondefault-large-body \
-  RALPH_MAIN_REPO="$repo" \
-  RALPH_REPO="test/example" \
-  RALPH_GH_BIN="$bin/gh" \
-    "$REPO_ROOT/ralph/reconcile-slice.sh" \
-      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
-) || fail "large valid PR bodies should not exceed Windows command-line limits"
-printf '%s\n' "$large_body_proof" | jq -e '
-  .linkage.policy == "non-default-owned-branch-bundle"
-  and (.linkage.pull_request_body_oid | length) >= 40
-' >/dev/null || fail "large PR body should be content-addressed in the proof"
-echo "PASS: large PR body evidence is bound without command-line duplication"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture config-remote)
+jq '.prd.remote = "upstream"' "$repo/.ralph/config.json" \
+  >"$repo/.ralph/config.tmp"
+mv "$repo/.ralph/config.tmp" "$repo/.ralph/config.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not match configured PRD remote"
+
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture metadata-root)
+mkdir -p "$TEST_ROOT/metadata-root/other"
+jq --arg root "$TEST_ROOT/metadata-root/other" '.repoRoot = $root' \
+  "$repo/.ralph/runs/$run_id/metadata.json" \
+  >"$repo/.ralph/runs/$run_id/metadata.tmp"
+mv "$repo/.ralph/runs/$run_id/metadata.tmp" \
+  "$repo/.ralph/runs/$run_id/metadata.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not belong to this repository"
+echo "PASS: configuration and run metadata are canonical ownership evidence"
 
 echo ""
-echo "Test 23: incomplete, spoofed, conflicting, or changed linkage evidence fails closed"
-for mode in spoof-example spoof-quote spoof-code spoof-list spoof-long-fence \
-  spoof-fence-info spoof-html spoof-html-blank spoof-html-comment-adjacent \
-  wrong-body-issue ambiguous-body; do
-  IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture "reject-$mode")
+echo "Test 23: native Windows metadata resolves to the same repository"
+if command -v cygpath >/dev/null 2>&1; then
+  IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture windows-metadata)
+  native_root=$(cygpath -w "$repo")
+  jq --arg root "$native_root" '.repoRoot = $root' \
+    "$repo/.ralph/runs/$run_id/metadata.json" \
+    >"$repo/.ralph/runs/$run_id/metadata.tmp"
+  mv "$repo/.ralph/runs/$run_id/metadata.tmp" \
+    "$repo/.ralph/runs/$run_id/metadata.json"
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >/dev/null \
+    || fail "native Windows metadata path should normalize to the active repository"
+  echo "PASS: native Windows metadata path is canonicalized"
+else
+  echo "SKIP: native Windows metadata path requires cygpath"
+fi
+
+echo ""
+echo "Test 24: PR body linkage rejects spoofed, ambiguous, and wrong-issue directives"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture body-linkage)
+for body_mode in \
+  wrong-issue duplicate inline-example blockquote list fenced indented raw-html html-comment; do
   assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-    "unambiguous literal closing directive" GH_PR_MODE="$mode"
+    "unambiguous literal closing directive" \
+    GH_PR_BODY_MODE="$body_mode"
 done
-
-for mode in missing edited valid-plus-edited valid-plus-conflict ambiguous \
-  wrong-pr wrong-branch actor-mismatch; do
-  IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture "reject-comment-$mode")
-  assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-    "integration closure comment is missing or ambiguous" \
-    GH_PR_MODE=nondefault-body GH_COMMENT_MODE="$mode"
+for body_mode in lowercase colon; do
+  GH_PR_BODY_MODE="$body_mode" \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >/dev/null \
+    || fail "GitHub-compatible $body_mode closing syntax should be accepted"
 done
+echo "PASS: only one isolated literal target-issue directive is accepted"
 
-for mode in denied mismatch; do
-  IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture "reject-permission-$mode")
-  assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-    "not authorized" GH_PR_MODE=nondefault-body GH_PERMISSION_MODE="$mode"
-done
-
-IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture reject-comment-api)
-assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "comment lookup failed" GH_PR_MODE=nondefault-body GH_COMMENT_MODE=fail
-assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "invalid evidence" GH_PR_MODE=nondefault-body GH_COMMENT_MODE=malformed
-assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "authorization lookup failed" GH_PR_MODE=nondefault-body GH_PERMISSION_MODE=fail
-assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "not authorized" GH_PR_MODE=nondefault-body GH_PERMISSION_MODE=malformed
-
-IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture reject-candidate-conflict)
-assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "missing or conflicting" GH_PR_MODE=nondefault-body GH_LIST_MODE=fallback-conflict
-
-IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture reject-cross-repo-link)
-assert_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "conflicting GitHub closing-reference" GH_PR_MODE=cross-repo-link
-
-IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture default-linkage)
-default_proof=$(
-  GH_COMMENT_MODE=fail \
-  GH_PERMISSION_MODE=fail \
+echo ""
+echo "Test 25: large PR bodies are streamed and content-addressed without truncation"
+large_proof=$(
+  GH_PR_BODY_MODE=large \
   RALPH_MAIN_REPO="$repo" \
   RALPH_REPO="test/example" \
   RALPH_GH_BIN="$bin/gh" \
     "$REPO_ROOT/ralph/reconcile-slice.sh" \
       --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
-) || fail "GitHub closing references should remain sufficient when present"
-printf '%s\n' "$default_proof" | jq -e '
-  .linkage.policy == "github-closing-reference"
-  and .linkage.integration_comment == null
-  and .linkage.actor_authorization == null
-  and (.linkage.candidate_pr_evidence | length) == 1
-' >/dev/null || fail "default linkage proof should preserve the GitHub reference policy"
+) || fail "large PR body should be proven without command-line argument truncation"
+printf '%s\n' "$large_proof" | jq -e '
+  .pull_request.body_oid == .linkage.candidate_pr_evidence[0].body_oid
+  and (.pull_request.body_oid | test("^[0-9a-f]{40}$"))
+' >/dev/null || fail "large PR body must be bound identically across API lookups"
+echo "PASS: large body proof is streamed and hash-bound"
 
-IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture external-race)
-external_proof="$TEST_ROOT/external-race/proof.json"
-GH_PR_MODE=nondefault-body \
+echo ""
+echo "Test 26: closure comments must be exact, unique, unedited, and actor-bound"
+for comment_mode in \
+  missing edited duplicate conflicting wrong-pr wrong-branch association-mismatch; do
+  assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+    "closure comment is missing or ambiguous" \
+    GH_COMMENT_MODE="$comment_mode"
+done
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "closure comment is missing or ambiguous" \
+  GH_REST_ISSUE_MODE=actor-mismatch
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "actor identity is invalid" \
+  GH_REST_ISSUE_MODE=invalid-actor GH_COMMENT_MODE=invalid-actor
+echo "PASS: altered, ambiguous, mismatched, and unauthorized-shaped comments fail closed"
+
+echo ""
+echo "Test 27: actor authorization and supporting API evidence fail closed"
+for permission_mode in read actor-mismatch malformed; do
+  assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+    "actor is not authorized" \
+    GH_PERMISSION_MODE="$permission_mode"
+done
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "actor authorization lookup failed" GH_PERMISSION_MODE=fail
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "issue closure lookup failed" GH_REST_ISSUE_MODE=fail
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "issue closure lookup returned invalid evidence" GH_REST_ISSUE_MODE=malformed
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "issue comment lookup failed" GH_COMMENT_MODE=fail
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "issue comment lookup returned invalid evidence" GH_COMMENT_MODE=malformed
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "repository lookup failed" GH_REPO_MODE=fail
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "repository lookup returned invalid evidence" GH_REPO_MODE=malformed
+echo "PASS: permission, closure, and comment API errors cannot produce proof"
+
+echo ""
+echo "Test 28: repository identity, candidate uniqueness, and body consistency are mandatory"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "conflicting GitHub closing-reference evidence" GH_PR_MODE=cross-repo-ref
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "linked pull request evidence is missing or conflicting" \
+  GH_CANDIDATE_MODE=multiple
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "linked pull request evidence is missing or conflicting" \
+  GH_CANDIDATE_MODE=multiple-qualified
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "linked pull request evidence is missing or conflicting" \
+  GH_CANDIDATE_MODE=multiple-case
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "linked pull request evidence is missing or conflicting" \
+  GH_CANDIDATE_MODE=multiple-colon
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "linked pull request evidence is missing or conflicting" \
+  GH_CANDIDATE_MODE=multiple-url
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "PR body evidence changed or conflicts" \
+  GH_PR_BODY_MODE=trailing-newline-race
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "not merged or returned invalid evidence" GH_PR_TIME_MODE=future
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "only valid for a non-default owned branch" GH_REPO_MODE=default-owned
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "does not equal current remote integration tip" GH_REF_MODE=mismatch
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "ref lookup returned invalid evidence" GH_REF_MODE=wrong-ref
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "ref lookup failed" GH_REF_MODE=fail
+echo "PASS: repository, candidate, body, default-branch, and GitHub-ref conflicts fail closed"
+
+echo ""
+echo "Test 29: apply revalidates external linkage evidence under the state lock"
+race_proof="$TEST_ROOT/body-linkage/race-proof.json"
 RALPH_MAIN_REPO="$repo" \
 RALPH_REPO="test/example" \
 RALPH_GH_BIN="$bin/gh" \
   "$REPO_ROOT/ralph/reconcile-slice.sh" \
-    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$external_proof"
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$race_proof"
+race_before=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
 if race_output=$(
-  GH_PR_MODE=nondefault-trailing-body \
+  GH_COMMENT_MODE=edited \
   RALPH_MAIN_REPO="$repo" \
   RALPH_REPO="test/example" \
   RALPH_GH_BIN="$bin/gh" \
     "$REPO_ROOT/ralph/reconcile-slice.sh" \
       --run "$run_id" --prd 505 --issue 507 --pr 533 \
-      --apply --proof "$external_proof" 2>&1
+      --apply --proof "$race_proof" 2>&1
 ); then
-  fail "trailing-newline PR body changes should block apply"
+  fail "changed external closure evidence should be rejected during apply"
 fi
-grep -Fqi "live evidence changed" <<<"$race_output" \
-  || fail "external evidence race should be rejected after lock-time revalidation"
-echo "PASS: adversarial linkage evidence and concurrent changes are rejected"
+grep -Fqi "closure comment is missing or ambiguous" <<<"$race_output" \
+  || fail "apply should report changed external evidence (got: $race_output)"
+race_after=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
+[[ "$race_after" == "$race_before" ]] \
+  || fail "failed lock-time revalidation must not mutate canonical state"
+echo "PASS: apply cannot consume proof after external linkage evidence changes"

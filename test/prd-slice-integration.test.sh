@@ -150,6 +150,7 @@ CLOSE_CALLS=()
 gh() {
   if [[ "$1 $2" == "issue close" ]]; then
     CLOSE_CALLS+=("$*")
+    [[ "${CLOSE_SHOULD_FAIL:-0}" == "0" ]] || return 1
     return 0
   fi
   command gh "$@"
@@ -158,9 +159,14 @@ export -f gh
 
 if command -v close_slice_issue >/dev/null 2>&1; then
   CLOSE_CALLS=()
-  if close_slice_issue "201" "123" "origin/user/repo" 2>/dev/null; then
-    if [[ ${#CLOSE_CALLS[@]} -eq 1 ]] && [[ "${CLOSE_CALLS[0]}" =~ "201" ]] && [[ "${CLOSE_CALLS[0]}" =~ "--repo origin/user/repo" ]]; then
-      pass "close_slice_issue calls gh issue close with issue number and repo"
+  integration_branch="ralph/prd/example-200"
+  if close_slice_issue \
+      "201" "123" "origin/user/repo" "$integration_branch" 2>/dev/null; then
+    if [[ ${#CLOSE_CALLS[@]} -eq 1 ]] \
+      && [[ "${CLOSE_CALLS[0]}" =~ "201" ]] \
+      && [[ "${CLOSE_CALLS[0]}" =~ "--repo origin/user/repo" ]] \
+      && [[ "${CLOSE_CALLS[0]}" == *"Merged via PR #123 into \`$integration_branch\`."* ]]; then
+      pass "close_slice_issue emits the exact branch-bound closure comment"
     else
       fail "close_slice_issue made unexpected gh calls: ${CLOSE_CALLS[*]}"
     fi
@@ -169,6 +175,38 @@ if command -v close_slice_issue >/dev/null 2>&1; then
   fi
 else
   fail "close_slice_issue function not found"
+fi
+
+# Test 6a: closure failure must not record canonical integration
+if command -v close_and_record_slice_integration >/dev/null 2>&1; then
+  CLOSE_SHOULD_FAIL=1
+  if close_and_record_slice_integration \
+      "204" "126" "failed-close-commit" "$RUN_ID" \
+      "origin/user/repo" "ralph/prd/example-200" 2>/dev/null; then
+    fail "close_and_record_slice_integration accepted failed issue closure"
+  elif jq -e '.items["204"] == null' \
+      "$STATE_DIR/runs/$RUN_ID/status.json" >/dev/null; then
+    pass "failed issue closure cannot record canonical integration"
+  else
+    fail "failed issue closure mutated canonical integration status"
+  fi
+  CLOSE_SHOULD_FAIL=0
+else
+  fail "close_and_record_slice_integration function not found"
+fi
+
+# Test 6b: successful closure records canonical integration under lock
+if close_and_record_slice_integration \
+    "205" "127" "closed-and-recorded" "$RUN_ID" \
+    "origin/user/repo" "ralph/prd/example-200" 2>/dev/null; then
+  status=$(status_load_item "205" "status" "$RUN_ID")
+  if [[ "$status" == "slice-integrated" ]]; then
+    pass "successful issue closure records canonical integration"
+  else
+    fail "successful closure did not record canonical integration"
+  fi
+else
+  fail "close_and_record_slice_integration failed after successful closure"
 fi
 
 # ===========================================================================

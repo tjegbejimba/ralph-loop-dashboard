@@ -1333,20 +1333,15 @@ DO NOT re-plan or open a new branch. Instead:
           "$num" "$integration_base" "$expected_pr_head" "$expected_pr_sha" "$expected_pr_author" body; then
         pr="$RALPH_MERGED_PR"
         merge_commit=$(gh pr view "$pr" --repo "$REPO" --json mergeCommit -q '.mergeCommit.oid' 2>/dev/null || echo "")
-
-        if declare -F record_slice_integrated >/dev/null 2>&1; then
-          state_lock || true
-          record_slice_integrated "$num" "$pr" "$merge_commit" "$RUN_ID"
-          state_unlock || true
-        fi
-
-        if declare -F close_slice_issue >/dev/null 2>&1; then
-          close_slice_issue "$num" "$pr" "$REPO" || true
-        fi
-
-        state="CLOSED"
-        merged_count=1
         prd_merge_result=1
+        if declare -F close_and_record_slice_integration >/dev/null 2>&1 \
+          && close_and_record_slice_integration \
+            "$num" "$pr" "$merge_commit" "$RUN_ID" "$REPO" "$integration_base"; then
+          state="CLOSED"
+          merged_count=1
+        else
+          echo "⚠️  PR #$pr merged, but explicit issue closure or canonical recording failed; Ralph will retry." >&2
+        fi
       fi
       
       # If no open PR was merged, check for recently merged PRs
@@ -1362,32 +1357,23 @@ DO NOT re-plan or open a new branch. Instead:
           merge_commit=$(echo "$prd_pr" | jq -r '.mergeCommit')
           echo "✅ Found merged PR #$pr_number into integration branch '$integration_base' referencing #$num — recording slice-integrated." >&2
           
-          # Record slice-integrated lifecycle
-          if declare -F record_slice_integrated >/dev/null 2>&1; then
-            state_lock || true
-            record_slice_integrated "$num" "$pr_number" "$merge_commit" "$RUN_ID"
-            state_unlock || true
-          fi
-          
           # Verify base branch before accepting
           if declare -F verify_slice_pr_base >/dev/null 2>&1; then
             if verify_slice_pr_base "$RUN_ID" "$integration_base"; then
-              # Explicitly close the issue
-              if declare -F close_slice_issue >/dev/null 2>&1; then
-                close_slice_issue "$num" "$pr_number" "$REPO" || true
+              if declare -F close_and_record_slice_integration >/dev/null 2>&1 \
+                && close_and_record_slice_integration \
+                  "$num" "$pr_number" "$merge_commit" "$RUN_ID" \
+                  "$REPO" "$integration_base"; then
+                state="CLOSED"
+                merged_count=1
+              else
+                echo "⚠️  PR #$pr_number merged, but explicit issue closure or canonical recording failed; Ralph will retry." >&2
               fi
-              state="CLOSED"
-              merged_count=1
             else
               echo "⚠️  PR #$pr_number merged to wrong base; not accepting as slice-integrated." >&2
             fi
           else
-            # No verification function available, accept anyway
-            if declare -F close_slice_issue >/dev/null 2>&1; then
-              close_slice_issue "$num" "$pr_number" "$REPO" || true
-            fi
-            state="CLOSED"
-            merged_count=1
+            echo "⚠️  PR #$pr_number base cannot be verified; not accepting as slice-integrated." >&2
           fi
         fi
       fi
