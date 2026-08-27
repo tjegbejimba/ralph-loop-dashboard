@@ -150,8 +150,34 @@ The dry-run succeeds only when all of these facts are unambiguous:
 - Strict process inspection finds no scoped launcher or worker; no launcher
   pidfile, launcher/worker lock, or linked worktree exists.
 - The issue is closed. The exact PR exists, is merged, targets the owned
-  integration branch, names that issue in its closing references, and is the
-  only PR linked to that issue and base.
+  integration branch, and is the only PR linked to that issue and base.
+- A GitHub `closingIssuesReferences` entry for the exact issue remains
+  sufficient linkage evidence when present.
+- When that array is empty because the PR targets a non-default owned PRD
+  branch, Ralph requires the complete fallback bundle below. It never mixes a
+  non-matching or partially populated GitHub reference with fallback evidence.
+  - The PR body has exactly one isolated, unindented closing-directive line and it names
+    the exact issue, for example `Closes #507`. Ralph accepts only `Close`,
+    `Fix`, or `Resolve` keyword forms on their own Markdown line. It ignores
+    variable-length fenced and indented code, raw HTML, HTML comments, block
+    quotes, list items and continuations,
+    prose/examples, cross-repository references, and malformed directives.
+  - The closed issue has exactly one comment whose complete body is
+    ``Merged via PR #<pr> into `<owned-branch>`.`` The comment must have been
+    created at the issue's closure timestamp by the issue's recorded closing
+    actor, and it must never have been edited. Missing, duplicate, edited,
+    wrong-PR, or wrong-branch comments are rejected.
+  - **Authorized integration-comment actor policy:** the actor must have
+    `OWNER`, `MEMBER`, or `COLLABORATOR` author association on the comment and
+    GitHub must currently report `admin`, `maintain`, or `write` repository
+    permission for that same login. Authentication or permission lookup errors,
+    identity disagreement, and weaker roles fail closed.
+  - Listing every PR for the owned base must yield exactly one candidate for the
+    issue. Ralph binds the full target PR body, closing-reference array,
+    candidate numbers, content-addressed PR-body OIDs, candidate-list records,
+    exact closure comment, and actor authorization result into the reviewed
+    proof. Content addressing avoids placing large PR bodies on the Windows
+    command line while still making any body change invalidate apply.
 - The configured Git remote is a network URL for the same GitHub `owner/repo`
   returned by the API. Local and path-like remotes are rejected.
 - The remote branch exists at one exact tip, descends from both frozen ownership
@@ -170,9 +196,10 @@ The dry-run succeeds only when all of these facts are unambiguous:
   canonical evidence. Conflicting PR, commit, or provenance fails closed.
 
 The proof records the authenticated GitHub operator, repository, run/PRD/issue/
-PR identities, URLs, merge time and commit, ownership branch and remote, exact
-remote tip, tip-accounting policy, later accounted commits, prior status
-evidence, and proof timestamp. Apply stores that reviewed proof under
+PR identities, URLs, merge time and commit, linkage policy and its complete
+evidence, ownership branch and remote, exact remote tip, tip-accounting policy,
+later accounted commits, prior status evidence, and proof timestamp. Apply
+stores that reviewed proof under
 `items["<issue>"].reconciliation`, adds its own apply timestamp and source
 `operator-guarded-reconciliation`, and writes the canonical top-level fields:
 
@@ -190,6 +217,16 @@ revalidation fails, no canonical evidence is written. If evidence changes after
 dry-run, discard the proof and start again. Reapplying the same proof, or
 applying a fresh proof to identical canonical evidence, returns `unchanged`
 without rewriting status.
+
+Because this command is part of the installed Ralph script surface, target
+repositories need a scripts-only refresh after a canonical change lands:
+
+```bash
+# Run from the canonical ralph-loop-dashboard checkout.
+./install.sh /path/to/target-repository --scripts-only
+```
+
+No dashboard-extension refresh is required for reconciliation-only changes.
 
 ## Stale Worker Reconciliation
 
