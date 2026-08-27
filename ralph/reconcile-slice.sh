@@ -495,6 +495,34 @@ reconcile_validate_local_evidence() {
         and ($reconciliation.proof.pull_request.number | tostring) == $pr
         and ($reconciliation.proof.pull_request.merge_commit
           == .items[$issue].integrated_commit)
+        and (
+          ($reconciliation.local_ref_update // null) == null
+          or (
+            ($reconciliation.local_ref_update | type == "object")
+            and ($reconciliation.local_ref_update.status
+              | . == "pending" or . == "completed")
+            and $reconciliation.local_ref_update.ref
+              == ("refs/heads/" + $reconciliation.proof.ownership.branch)
+            and ($reconciliation.local_ref_update.expected_old
+              | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+            and $reconciliation.local_ref_update.expected_old
+              == $reconciliation.proof.local_ref.expected_old
+            and $reconciliation.local_ref_update.target
+              == $reconciliation.proof.local_ref.target
+            and $reconciliation.local_ref_update.target
+              == $reconciliation.proof.remote.tip
+            and (
+              if $reconciliation.local_ref_update.status == "completed"
+              then
+                ($reconciliation.local_ref_update.completed_at
+                  | type == "string"
+                    and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+              else
+                ($reconciliation.local_ref_update.completed_at // null) == null
+              end
+            )
+          )
+        )
       )
   ' --arg RUN_ID "$RUN_ID" "$status_file" >/dev/null 2>&1; then
     error "existing reconciliation provenance is malformed or conflicts with canonical evidence"
@@ -990,7 +1018,13 @@ reconcile_build_proof() {
   done < <(printf '%s\n' "$open_pr_pages" | jq -c '.[][]')
 
   local merge_commit remote_tip remote_ref_json rechecked_remote_ref_json
+  local local_ref_present=false local_tip="" rechecked_local_tip=""
   merge_commit=$(printf '%s\n' "$pr_json" | jq -r '.mergeCommit.oid')
+  if git -C "$MAIN_REPO" show-ref --verify --quiet "refs/heads/$branch"; then
+    local_ref_present=true
+    local_tip=$(git_proof rev-parse "refs/heads/$branch") \
+      || { error "could not resolve local integration branch tip"; return 1; }
+  fi
   remote_ref_json=$("$GH" api "repos/$REPO/git/ref/heads/$branch" --jq .) \
     || { error "GitHub integration-branch ref lookup failed"; return 1; }
   printf '%s\n' "$remote_ref_json" | jq -e \
@@ -1034,17 +1068,159 @@ reconcile_build_proof() {
   git_proof merge-base --is-ancestor "$initial_base" "$remote_tip" \
     && git_proof merge-base --is-ancestor "$owned_tip" "$remote_tip" \
     || { error "remote integration history does not descend from owned history"; return 1; }
-  [[ "$merge_commit" == "$remote_tip" ]] \
-    || { error "PR merge commit does not equal current remote integration tip"; return 1; }
+  local settled_accounted_tip=0 settled_accounted_status=""
+  local stored_reconciliation_proof=""
+  if [[ "$local_ref_present" == true && "$local_tip" == "$remote_tip" ]]; then
+    settled_accounted_status=$(jq -r \
+      --arg issue "$ISSUE_NUMBER" \
+      --arg merge "$merge_commit" \
+      --arg tip "$remote_tip" \
+      --arg ref "refs/heads/$branch" '
+        if (
+          .items[$issue].status == "slice-integrated"
+          and .items[$issue].integrated_commit == $merge
+          and .items[$issue].reconciliation.proof.pull_request.merge_commit == $merge
+          and .items[$issue].reconciliation.proof.remote.tip == $tip
+          and .items[$issue].reconciliation.proof.local_ref.target == $tip
+          and .items[$issue].reconciliation.proof.local_ref.update
+            == "compare-and-swap-fast-forward"
+          and .items[$issue].reconciliation.local_ref_update.ref == $ref
+          and .items[$issue].reconciliation.local_ref_update.target == $tip
+          and (.items[$issue].reconciliation.local_ref_update.status
+            | . == "pending" or . == "completed")
+        ) then .items[$issue].reconciliation.local_ref_update.status
+        else empty
+        end
+      ' "$status_file" 2>/dev/null) \
+      || { error "canonical reconciliation evidence is malformed"; return 1; }
+    if [[ -n "$settled_accounted_status" ]]; then
+      if [[ "$settled_accounted_status" == "completed" ]]; then
+        settled_accounted_tip=1
+      elif [[ "$settled_accounted_status" == "pending" ]]; then
+        stored_reconciliation_proof=$(jq -cS \
+          --arg issue "$ISSUE_NUMBER" \
+          '.items[$issue].reconciliation.proof' "$status_file")
+        if [[ "$MODE" == "apply" \
+          && -n "${supplied_proof:-}" \
+          && "$stored_reconciliation_proof" == "$supplied_proof" ]]; then
+          settled_accounted_tip=1
+        else
+          error "pending local ref update requires the original reviewed proof stored in canonical reconciliation evidence"
+          return 1
+        fi
+      else
+        error "PR merge commit does not equal current remote integration tip"
+        return 1
+      fi
+    elif [[ "$merge_commit" != "$remote_tip" ]]; then
+      error "PR merge commit does not equal current remote integration tip"
+      return 1
+    fi
+  elif [[ "$merge_commit" != "$remote_tip" ]] \
+    && { [[ "$local_ref_present" != true ]] \
+      || ! git_proof merge-base --is-ancestor "$local_tip" "$remote_tip" \
+      || ! git_proof merge-base --is-ancestor "$merge_commit" "$remote_tip"; }; then
+    error "PR merge commit does not equal current remote integration tip"
+    return 1
+  fi
   if [[ "$owned_tip" == "$merge_commit" ]] \
     || ! git_proof merge-base --is-ancestor "$owned_tip" "$merge_commit"; then
     error "PR merge commit is not a strict descendant of the owned tip"
     return 1
   fi
   local tip_policy="exact-tip"
-  if git -C "$MAIN_REPO" show-ref --verify --quiet "refs/heads/$branch"; then
-    [[ "$(git -C "$MAIN_REPO" rev-parse "refs/heads/$branch")" == "$remote_tip" ]] \
-      || { error "local integration branch tip conflicts with the remote tip"; return 1; }
+  local local_relation="absent" local_update="none"
+  local remote_only_commits_json='[]' pr_commits_pages pr_commits_json
+  if [[ "$local_ref_present" == true ]]; then
+    rechecked_local_tip=$(git_proof rev-parse "refs/heads/$branch") \
+      || { error "could not recheck local integration branch tip"; return 1; }
+    [[ "$rechecked_local_tip" == "$local_tip" ]] \
+      || { error "local integration branch tip moved during proof"; return 1; }
+    if [[ "$local_tip" == "$remote_tip" ]]; then
+      local_relation="equal"
+      if [[ "$settled_accounted_tip" -eq 1 ]]; then
+        tip_policy="accounted-stale-local-fast-forward"
+      fi
+    else
+      git_proof merge-base --is-ancestor "$local_tip" "$remote_tip" \
+        || { error "local integration branch does not fast-forward to the remote tip"; return 1; }
+      local_relation="ancestor"
+      local_update="compare-and-swap-fast-forward"
+      tip_policy="accounted-stale-local-fast-forward"
+
+      pr_commits_pages=$("$GH" api \
+        "repos/$REPO/pulls/$PR_NUMBER/commits?per_page=100" \
+        --paginate --slurp) \
+        || { error "GitHub pull request commit lookup failed"; return 1; }
+      pr_commits_json=$(printf '%s\n' "$pr_commits_pages" | jq -c '
+        if type == "array" and length > 0 and all(.[]; type == "array")
+        then [flatten[] | .sha]
+        else error("invalid commit pages")
+        end
+      ') || { error "GitHub pull request commit evidence is invalid"; return 1; }
+      printf '%s\n' "$pr_commits_json" | jq -e '
+        all(.[]; type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and (length == (unique | length))
+      ' >/dev/null 2>&1 \
+        || { error "GitHub pull request commit evidence is invalid"; return 1; }
+
+      local remote_only_commit attribution_json attribution_count
+      while IFS= read -r remote_only_commit; do
+        [[ -n "$remote_only_commit" ]] || continue
+        attribution_json=$(jq -cn \
+          --arg sha "$remote_only_commit" \
+          --arg merge "$merge_commit" \
+          --argjson pr_commits "$pr_commits_json" \
+          --arg issue "$ISSUE_NUMBER" \
+          --arg pr "$PR_NUMBER" \
+          --arg status_file "$status_file" '
+            [
+              if $sha == $merge or ($pr_commits | index($sha)) != null then {
+                kind: "reconciled-pull-request",
+                issue_number: ($issue | tonumber),
+                pr_number: ($pr | tonumber)
+              } else empty end
+            ]
+          ') || { error "could not attribute remote-only integration commit"; return 1; }
+        local canonical_attributions
+        canonical_attributions=$(jq -c \
+          --arg sha "$remote_only_commit" \
+          --arg issue "$ISSUE_NUMBER" '
+            [
+              .items
+              | to_entries[]
+              | select(.key != $issue)
+              | select(
+                  .value.status == "slice-integrated"
+                  and .value.integrated_commit == $sha
+                  and (.value.pr_number | tostring | test("^[1-9][0-9]*$"))
+                )
+              | {
+                  kind: "canonical-slice-integrated",
+                  issue_number: (.key | tonumber),
+                  pr_number: (.value.pr_number | tonumber)
+                }
+            ]
+          ' "$status_file") \
+          || { error "could not inspect canonical integrated commit evidence"; return 1; }
+        attribution_json=$(jq -cn \
+          --argjson target "$attribution_json" \
+          --argjson canonical "$canonical_attributions" \
+          '$target + $canonical') \
+          || { error "could not combine remote-only commit attribution"; return 1; }
+        attribution_count=$(printf '%s\n' "$attribution_json" | jq 'length')
+        [[ "$attribution_count" -eq 1 ]] \
+          || { error "remote-only commit is not uniquely attributed: $remote_only_commit"; return 1; }
+        remote_only_commits_json=$(jq -cn \
+          --argjson commits "$remote_only_commits_json" \
+          --arg sha "$remote_only_commit" \
+          --argjson attribution "$(printf '%s\n' "$attribution_json" | jq '.[0]')" \
+          '$commits + [{sha: $sha, attribution: $attribution}]') \
+          || { error "could not record remote-only commit attribution"; return 1; }
+      done < <(git_proof rev-list --reverse "$local_tip..$remote_tip")
+      [[ "$(printf '%s\n' "$remote_only_commits_json" | jq 'length')" -gt 0 ]] \
+        || { error "stale local integration branch has no attributable remote-only commits"; return 1; }
+    fi
   fi
 
   local prior_status prior_pr prior_commit integrated_at
@@ -1092,6 +1268,11 @@ reconcile_build_proof() {
     --arg merge_commit "$merge_commit" \
     --arg remote_tip "$remote_tip" \
     --arg tip_policy "$tip_policy" \
+    --argjson local_ref_present "$local_ref_present" \
+    --arg local_tip "$local_tip" \
+    --arg local_relation "$local_relation" \
+    --arg local_update "$local_update" \
+    --argjson remote_only_commits "$remote_only_commits_json" \
     --arg prior_status "$prior_status" \
     --arg prior_pr "$prior_pr" \
     --arg prior_commit "$prior_commit" \
@@ -1152,6 +1333,15 @@ reconcile_build_proof() {
           tip: $remote_tip,
           policy: $tip_policy
         },
+        local_ref: {
+          present: $local_ref_present,
+          tip: (if $local_ref_present then $local_tip else null end),
+          expected_old: (if $local_update == "compare-and-swap-fast-forward" then $local_tip else null end),
+          target: $remote_tip,
+          relation: $local_relation,
+          update: $local_update
+        },
+        remote_only_commits: $remote_only_commits,
         operator: {
           login: $operator_login
         },
@@ -1212,9 +1402,44 @@ current_proof=$(reconcile_build_proof) \
   || { error "evidence revalidation failed under the state lock"; exit 1; }
 current_fingerprint=$(printf '%s\n' "$current_proof" \
   | jq -cS 'del(.mode, .proof_generated_at, .prior_evidence)')
+resume_bound_ref_update=0
+bound_ref_update_status=""
 if [[ "$current_fingerprint" != "$supplied_fingerprint" ]]; then
-  error "live evidence changed after dry-run; generate and review a new proof"
-  exit 1
+  status_path=$(status_file "$RUN_ID")
+  bound_ref_update_status=$(jq -r \
+    --arg issue "$ISSUE_NUMBER" \
+    --argjson proof "$supplied_proof" \
+    --arg merge "$(printf '%s\n' "$supplied_proof" | jq -r '.pull_request.merge_commit')" '
+      select(
+        .items[$issue].status == "slice-integrated"
+        and .items[$issue].integrated_commit == $merge
+        and .items[$issue].reconciliation.proof == $proof
+        and (.items[$issue].reconciliation.local_ref_update.status
+          | . == "pending" or . == "completed")
+      )
+      | .items[$issue].reconciliation.local_ref_update.status
+    ' "$status_path") || {
+      error "could not inspect bound local ref recovery evidence"
+      exit 1
+    }
+  supplied_target=$(printf '%s\n' "$supplied_proof" | jq -r '.local_ref.target')
+  supplied_branch=$(printf '%s\n' "$supplied_proof" | jq -r '.ownership.branch')
+  current_target=$(printf '%s\n' "$current_proof" | jq -r '.local_ref.target')
+  current_branch=$(printf '%s\n' "$current_proof" | jq -r '.ownership.branch')
+  current_local_tip=$(git_proof rev-parse "refs/heads/$supplied_branch" 2>/dev/null || true)
+  if [[ -n "$bound_ref_update_status" \
+    && "$current_local_tip" == "$supplied_target" \
+    && "$current_target" == "$supplied_target" \
+    && "$current_branch" == "$supplied_branch" ]] \
+    && [[ "$(printf '%s\n' "$current_proof" \
+      | jq -cS 'del(.mode, .proof_generated_at, .prior_evidence, .local_ref, .remote_only_commits, .remote.policy)')" \
+      == "$(printf '%s\n' "$supplied_proof" \
+      | jq -cS 'del(.mode, .proof_generated_at, .prior_evidence, .local_ref, .remote_only_commits, .remote.policy)')" ]]; then
+    resume_bound_ref_update=1
+  else
+    error "live evidence changed after dry-run; generate and review a new proof"
+    exit 1
+  fi
 fi
 
 status_path=$(status_file "$RUN_ID")
@@ -1226,9 +1451,39 @@ existing_commit=$(jq -r \
   '.items[$issue].integrated_commit // empty' "$status_path")
 merge_commit=$(printf '%s\n' "$current_proof" \
   | jq -r '.pull_request.merge_commit')
+proof_for_ref_update="$current_proof"
+if [[ "$resume_bound_ref_update" -eq 1 ]]; then
+  proof_for_ref_update="$supplied_proof"
+fi
+branch=$(printf '%s\n' "$proof_for_ref_update" | jq -r '.ownership.branch')
+expected_local_tip=$(printf '%s\n' "$proof_for_ref_update" | jq -r '.local_ref.expected_old // empty')
+local_ref_target=$(printf '%s\n' "$proof_for_ref_update" | jq -r '.local_ref.target')
+local_ref_action=$(printf '%s\n' "$proof_for_ref_update" | jq -r '.local_ref.update')
+if [[ -z "$bound_ref_update_status" ]]; then
+  bound_ref_update_status=$(jq -r \
+    --arg issue "$ISSUE_NUMBER" \
+    --argjson proof "$supplied_proof" \
+    --arg ref "refs/heads/$branch" \
+    --arg expected_old "$expected_local_tip" \
+    --arg target "$local_ref_target" '
+      select(
+        .items[$issue].reconciliation.proof == $proof
+        and .items[$issue].reconciliation.local_ref_update.ref == $ref
+        and .items[$issue].reconciliation.local_ref_update.expected_old == $expected_old
+        and .items[$issue].reconciliation.local_ref_update.target == $target
+        and (.items[$issue].reconciliation.local_ref_update.status
+          | . == "pending" or . == "completed")
+      )
+      | .items[$issue].reconciliation.local_ref_update.status
+    ' \
+    "$status_path")
+fi
+local_ref_result="unchanged"
 result="recorded"
+canonical_match=0
 if [[ "$previous_status" == "slice-integrated" \
   && "$existing_commit" == "$merge_commit" ]]; then
+  canonical_match=1
   supplied_prior_status=$(printf '%s\n' "$supplied_proof" \
     | jq -r '.prior_evidence.status')
   if [[ "$supplied_prior_status" != "slice-integrated" ]] \
@@ -1240,6 +1495,13 @@ if [[ "$previous_status" == "slice-integrated" \
     error "canonical evidence changed after dry-run without matching reconciliation provenance"
     exit 1
   fi
+fi
+needs_ref_intent=0
+if [[ "$local_ref_action" == "compare-and-swap-fast-forward" \
+  && -z "$bound_ref_update_status" ]]; then
+  needs_ref_intent=1
+fi
+if [[ "$canonical_match" -eq 1 && "$needs_ref_intent" -eq 0 ]]; then
   result="unchanged"
 else
   supplied_prior=$(printf '%s\n' "$supplied_proof" \
@@ -1254,7 +1516,11 @@ else
     --arg previous_status "$previous_status" \
     --arg proof_generated_at \
       "$(printf '%s\n' "$supplied_proof" | jq -r '.proof_generated_at')" \
-    --argjson proof "$supplied_proof" '
+    --argjson proof "$supplied_proof" \
+    --arg local_ref_action "$local_ref_action" \
+    --arg branch "$branch" \
+    --arg expected_old "$expected_local_tip" \
+    --arg target "$local_ref_target" '
       {
         schema_version: 1,
         source: "operator-guarded-reconciliation",
@@ -1262,6 +1528,14 @@ else
         proof_generated_at: $proof_generated_at,
         proof: $proof
       }
+      + if $local_ref_action == "compare-and-swap-fast-forward" then {
+          local_ref_update: {
+            status: "pending",
+            ref: ("refs/heads/" + $branch),
+            expected_old: $expected_old,
+            target: $target
+          }
+        } else {} end
     ') || {
     error "could not prepare reconciliation provenance"
     exit 1
@@ -1273,12 +1547,108 @@ else
   fi
 fi
 
+if [[ "$local_ref_action" == "compare-and-swap-fast-forward" \
+  && "$bound_ref_update_status" != "completed" ]]; then
+  if [[ "${RALPH_RECONCILE_TEST_FAIL_AFTER_STATE_WRITE:-0}" == "1" \
+    && "$result" == "recorded" ]]; then
+    error "injected interruption after state write"
+    exit 1
+  fi
+
+  if ! jq -e \
+    --arg issue "$ISSUE_NUMBER" \
+    --argjson proof "$supplied_proof" \
+    --arg ref "refs/heads/$branch" \
+    --arg expected_old "$expected_local_tip" \
+    --arg target "$local_ref_target" '
+      .items[$issue].reconciliation.proof == $proof
+      and .items[$issue].reconciliation.local_ref_update.status == "pending"
+      and .items[$issue].reconciliation.local_ref_update.ref == $ref
+      and .items[$issue].reconciliation.local_ref_update.expected_old == $expected_old
+      and .items[$issue].reconciliation.local_ref_update.target == $target
+    ' "$status_path" >/dev/null 2>&1; then
+    error "proof-bound pending local ref reconciliation intent is missing or changed"
+    exit 1
+  fi
+
+  latest_remote_ref=$("$GH" api \
+    "repos/$REPO/git/ref/heads/$branch" --jq .) \
+    || { error "could not recheck remote integration branch before local ref update"; exit 1; }
+  latest_remote_tip=$(printf '%s\n' "$latest_remote_ref" | jq -r \
+    --arg ref "refs/heads/$branch" '
+      select(
+        type == "object"
+        and .ref == $ref
+        and .object.type == "commit"
+        and (.object.sha | type == "string")
+      )
+      | .object.sha
+    ')
+  [[ "$latest_remote_tip" == "$local_ref_target" ]] \
+    || { error "remote integration branch moved before local ref update"; exit 1; }
+
+  current_local_tip=$(git_proof rev-parse "refs/heads/$branch" 2>/dev/null) \
+    || { error "local integration branch disappeared before compare-and-swap"; exit 1; }
+  if [[ "$current_local_tip" == "$local_ref_target" ]]; then
+    local_ref_result="already-fast-forwarded"
+  elif [[ "$current_local_tip" == "$expected_local_tip" ]]; then
+    git -C "$MAIN_REPO" update-ref \
+      "refs/heads/$branch" "$local_ref_target" "$expected_local_tip" \
+      || { error "local integration branch compare-and-swap failed"; exit 1; }
+    local_ref_result="fast-forwarded"
+  else
+    error "local integration branch changed before compare-and-swap"
+    exit 1
+  fi
+
+  if [[ "${RALPH_RECONCILE_TEST_FAIL_AFTER_REF_UPDATE:-0}" == "1" \
+    && "$local_ref_result" == "fast-forwarded" ]]; then
+    error "injected interruption after local ref update"
+    exit 1
+  fi
+
+  status_tmp=$(status_mktemp "$RUN_ID") || {
+    error "could not stage completed local ref reconciliation"
+    exit 1
+  }
+  if ! jq \
+    --arg issue "$ISSUE_NUMBER" \
+    --arg ref "refs/heads/$branch" \
+    --arg expected_old "$expected_local_tip" \
+    --arg target "$local_ref_target" \
+    --arg completed_at "$(date -u +%FT%TZ)" '
+      if (
+        .items[$issue].reconciliation.local_ref_update.status == "pending"
+        and .items[$issue].reconciliation.local_ref_update.ref == $ref
+        and .items[$issue].reconciliation.local_ref_update.expected_old == $expected_old
+        and .items[$issue].reconciliation.local_ref_update.target == $target
+      )
+      then
+        .items[$issue].reconciliation.local_ref_update.status = "completed"
+        | .items[$issue].reconciliation.local_ref_update.completed_at = $completed_at
+      else
+        error("pending local ref reconciliation intent is missing or changed")
+      end
+    ' "$status_path" >"$status_tmp"; then
+    rm -f "$status_tmp"
+    error "could not finalize local ref reconciliation"
+    exit 1
+  fi
+  mv "$status_tmp" "$status_path" || {
+    rm -f "$status_tmp"
+    error "could not atomically finalize local ref reconciliation"
+    exit 1
+  }
+  [[ "$result" == "unchanged" ]] && result="recovered"
+fi
+
 jq -n \
   --arg result "$result" \
   --arg run "$RUN_ID" \
   --argjson issue "$ISSUE_NUMBER" \
   --argjson pr "$PR_NUMBER" \
-  --arg commit "$merge_commit" '
+  --arg commit "$merge_commit" \
+  --arg local_ref_result "$local_ref_result" '
     {
       schema_version: 1,
       action: "reconcile-slice-integrated",
@@ -1288,6 +1658,9 @@ jq -n \
       issue_number: $issue,
       pr_number: $pr,
       status: "slice-integrated",
-      integrated_commit: $commit
+      integrated_commit: $commit,
+      local_ref: {
+        result: $local_ref_result
+      }
     }
   '

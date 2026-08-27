@@ -193,14 +193,25 @@ The dry-run succeeds only when all of these facts are unambiguous:
   supplies the owned branch's exact tip. This prevents local Git URL rewrite
   configuration from substituting a mirror as branch-tip authority. The
   verified commit is then fetched and must descend from both frozen ownership
-  commits without conflicting with a local branch tip. The target merge must be
-  a strict descendant of the run's frozen owned tip, so a historical merge
-  cannot be attributed to a later run.
+  commits. The target merge must be a strict descendant of the run's frozen
+  owned tip, so a historical merge cannot be attributed to a later run.
 - Git replacement refs and legacy grafts must be absent. Ancestry checks also
   disable replacement objects explicitly.
-- The PR merge commit equals the current remote integration-branch tip exactly.
-  Descendant commits are rejected even if they have other canonical status
-  evidence; an operator must reconcile against an unambiguous exact tip.
+- A current local integration ref must equal the remote tip. The only exception
+  is a stable local ref that is a verified ancestor of the stable remote tip.
+  Diverged, missing-object, deleted, or concurrently moving local refs fail
+  closed.
+- For that stale-local exception, every commit in the complete local-to-remote
+  range must have exactly one attribution. A commit is attributable only when
+  it is the supplied PR's merge commit, appears in the exhaustive GitHub commit
+  list for that exact PR, or equals one other canonical `slice-integrated`
+  commit in the same run. Missing, malformed, duplicate, ambiguous, or
+  unattributed commit evidence rejects the proof. When the local ref already
+  equals the remote ref, the original exact-tip policy remains in force and a
+  historical target PR is rejected, unless canonical reconciliation provenance
+  already binds that exact PR merge, remote tip, branch, and pending or
+  completed compare-and-swap. That narrow exception lets a post-CAS restart
+  finalize without reopening historical attribution.
 - Existing evidence is either the expected legacy `merged` item, or identical
   canonical evidence. Conflicting PR, commit, or provenance fails closed.
 
@@ -210,7 +221,8 @@ comment and actor authorization, closing-reference evidence, the parsed body
 directive, byte-exact body OIDs and all-state candidate set, head and head
 repository, URLs, merge time and commit, config and run-metadata binding,
 ownership branch and remote, repository default branch, GitHub ref and exact
-tip, prior status evidence, and proof timestamp. Apply stores that reviewed proof under
+tip, local ref and expected old object, remote-only commit attributions, prior
+status evidence, and proof timestamp. Apply stores that reviewed proof under
 `items["<issue>"].reconciliation`, adds its own apply timestamp and source
 `operator-guarded-reconciliation`, then invokes the normal slice-integration
 lifecycle helper to atomically replace the item with canonical fields:
@@ -224,13 +236,25 @@ lifecycle helper to atomically replace the item with canonical fields:
 }
 ```
 
-If any API call, JSON parse, process inspection, fetch, lock, atomic rename, or
-revalidation fails, no canonical evidence is written. Apply rebuilds the
-complete proof while holding the state lock, so issue, comment, permission, PR
-body, candidate, branch-tip, or local-state changes invalidate the reviewed
-proof. Discard it and start again. Reapplying the same proof, or applying a
-fresh proof to identical canonical evidence, returns `unchanged` without
-rewriting status.
+For an equal local ref, this status replacement completes the transaction. For
+a stale local ref, the same atomic replacement also stages
+`reconciliation.local_ref_update` with `pending`, the exact ref name, expected
+old SHA, and target SHA. Only after that durable intent exists does apply
+recheck the GitHub remote ref and run `git update-ref <ref> <target>
+<expected-old>`. A successful compare-and-swap is followed by a second atomic
+status replacement that marks the intent `completed`.
+
+Failures before the canonical status write leave no new evidence. Failures
+after that write retain a valid pending intent and never roll the local ref
+back. Reapplying the same reviewed proof resumes the exact pending operation:
+if the local ref still equals the expected old SHA, apply retries the
+compare-and-swap; if it already equals the target SHA, apply finalizes the
+intent without moving it again. Any third value, remote movement, malformed
+pending evidence, or changed external proof fails closed. A retry after
+completion returns `unchanged` without rewriting status. While the intent is
+pending, a new dry-run also fails closed and directs the operator to reapply the
+original reviewed proof stored in canonical reconciliation evidence; it cannot
+produce a no-op proof that leaves the pending intent unresolved.
 
 ## Stale Worker Reconciliation
 

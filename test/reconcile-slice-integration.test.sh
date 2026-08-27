@@ -55,11 +55,12 @@ create_fixture() {
     "https://github.com/test/example.git"
   git -C "$repo" push -q -u origin main
 
-  local base merge_commit
+  local base slice_commit merge_commit
   base=$(git -C "$repo" rev-parse HEAD)
   git -C "$repo" checkout -qb slice-507
   printf 'integrated\n' >>"$repo/README.md"
   git -C "$repo" commit -qam "slice 507"
+  slice_commit=$(git -C "$repo" rev-parse HEAD)
   git -C "$repo" checkout -q main
   git -C "$repo" branch "$branch" "$base"
   git -C "$repo" checkout -q "$branch"
@@ -272,6 +273,22 @@ if [[ "\$1" == "api" \
       printf '{"ref":"refs/heads/$branch","object":{"type":"commit","sha":"%s"}}\n' "\$ref_tip"
       ;;
     mismatch) printf '{"ref":"refs/heads/$branch","object":{"type":"commit","sha":"$base"}}\n' ;;
+    move-before-cas|move-local-before-cas)
+      ref_count_file="$root/ref-call-count"
+      ref_count=0
+      [[ ! -f "\$ref_count_file" ]] || ref_count=\$(cat "\$ref_count_file")
+      ref_count=\$((ref_count + 1))
+      printf '%s\n' "\$ref_count" >"\$ref_count_file"
+      if [[ "\$ref_count" -ge 3 && "\${GH_REF_MODE}" == "move-before-cas" ]]; then
+        printf '{"ref":"refs/heads/$branch","object":{"type":"commit","sha":"$base"}}\n'
+      else
+        if [[ "\$ref_count" -ge 3 && "\${GH_REF_MODE}" == "move-local-before-cas" ]]; then
+          git -C "$repo" update-ref "refs/heads/$branch" "\${GH_MOVE_LOCAL_SHA:?}"
+        fi
+        ref_tip=\$(git --git-dir="$origin" rev-parse "refs/heads/$branch")
+        printf '{"ref":"refs/heads/$branch","object":{"type":"commit","sha":"%s"}}\n' "\$ref_tip"
+      fi
+      ;;
     wrong-ref) printf '{"ref":"refs/heads/main","object":{"type":"commit","sha":"$merge_commit"}}\n' ;;
     malformed) printf '{"ref":"refs/heads/$branch","object":{}}\n' ;;
     fail) echo "simulated ref API failure" >&2; exit 1 ;;
@@ -304,6 +321,16 @@ if [[ "\$1" == "api" && "\$2" == "repos/test/example/issues/507/comments?per_pag
     malformed) printf '{"unexpected":"shape"}\n' ;;
     fail) echo "simulated comments API failure" >&2; exit 1 ;;
     *) printf '[[]]\n' ;;
+  esac
+  exit 0
+fi
+if [[ "\$1" == "api" && "\$2" == "repos/test/example/pulls/533/commits?per_page=100" ]]; then
+  case "\${GH_PR_COMMITS_MODE:-valid}" in
+    valid) printf '[[{"sha":"$slice_commit"}]]\n' ;;
+    empty) printf '[[]]\n' ;;
+    duplicate) printf '[[{"sha":"$slice_commit"},{"sha":"$slice_commit"}]]\n' ;;
+    malformed) printf '{"unexpected":"shape"}\n' ;;
+    fail) echo "simulated PR commits API failure" >&2; exit 1 ;;
   esac
   exit 0
 fi
@@ -356,6 +383,14 @@ jq -e '
   and .pull_request.merge_commit
     == "f1d5213c3e07148afa508b044ea630406ad98422"
   and .remote_integration_tip == .pull_request.merge_commit
+  and .local_integration_tip
+    == "564815515e4cc5cb4cfc9d0cd4d0f07cf58d016a"
+  and .local_tip_is_ancestor == true
+  and .remote_only_commits == [{
+    sha: "f1d5213c3e07148afa508b044ea630406ad98422",
+    pull_request: 533,
+    issue: 507
+  }]
 ' "$INCIDENT_FIXTURE" >/dev/null \
   || fail "exact incident fixture is incomplete"
 echo "PASS: exact Glasswork #507 incident evidence is frozen"
@@ -1070,3 +1105,607 @@ race_after=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
 [[ "$race_after" == "$race_before" ]] \
   || fail "failed lock-time revalidation must not mutate canonical state"
 echo "PASS: apply cannot consume proof after external linkage evidence changes"
+
+echo ""
+echo "Test 30: stale local ancestor is proven with unique remote-only commit attribution"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture stale-local-proof)
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$merge_commit"
+stale_before=$(git -C "$repo" rev-parse "refs/heads/$branch")
+stale_proof=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
+) || fail "stale local ancestor dry-run should succeed"
+printf '%s\n' "$stale_proof" | jq -e \
+  --arg local "$base" \
+  --arg remote "$merge_commit" '
+    .local_ref.present == true
+    and .local_ref.tip == $local
+    and .local_ref.expected_old == $local
+    and .local_ref.target == $remote
+    and .local_ref.relation == "ancestor"
+    and .local_ref.update == "compare-and-swap-fast-forward"
+    and (.remote_only_commits | length) == 2
+    and all(.remote_only_commits[];
+      .attribution.kind == "reconciled-pull-request"
+      and .attribution.issue_number == 507
+      and .attribution.pr_number == 533)
+  ' >/dev/null || fail "dry-run should bind stale local ref and every remote-only commit"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$stale_before" ]] \
+  || fail "stale local dry-run must not update the local ref"
+echo "PASS: stale local proof binds ancestry and unique commit attribution"
+
+echo ""
+echo "Test 31: interrupted apply resumes canonical state before CAS fast-forward"
+stale_proof_file="$TEST_ROOT/stale-local-proof/proof.json"
+printf '%s\n' "$stale_proof" >"$stale_proof_file"
+if interrupted_output=$(
+  RALPH_RECONCILE_TEST_FAIL_AFTER_STATE_WRITE=1 \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$stale_proof_file" 2>&1
+); then
+  fail "injected post-state interruption should fail apply"
+fi
+grep -Fqi "injected interruption after state write" <<<"$interrupted_output" \
+  || fail "interruption should identify the durable recovery point"
+jq -e \
+  --arg old "$base" \
+  --arg target "$merge_commit" '
+    .items["507"].status == "slice-integrated"
+    and .items["507"].reconciliation.local_ref_update.status == "pending"
+    and .items["507"].reconciliation.local_ref_update.expected_old == $old
+    and .items["507"].reconciliation.local_ref_update.target == $target
+  ' "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "canonical evidence should durably stage the pending ref update"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$base" ]] \
+  || fail "interruption before CAS must leave the local ref unchanged"
+resume_result=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$stale_proof_file"
+) || fail "retry should complete an interrupted stale-local apply"
+printf '%s\n' "$resume_result" | jq -e '
+  .result == "recovered"
+  and .local_ref.result == "fast-forwarded"
+' >/dev/null || fail "retry should report recovered ref completion"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$merge_commit" ]] \
+  || fail "retry should CAS fast-forward the exact local branch"
+jq -e '.items["507"].reconciliation.local_ref_update.status == "completed"' \
+  "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "retry should finalize durable local ref intent"
+echo "PASS: pending canonical reconciliation resumes and completes exactly once"
+
+echo ""
+echo "Test 32: stale-local divergence and unattributed commits fail closed"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture stale-local-adversarial)
+tree=$(git -C "$repo" rev-parse "${base}^{tree}")
+unrelated=$(printf 'unrelated local\n' | git -C "$repo" commit-tree "$tree")
+git -C "$repo" update-ref "refs/heads/$branch" "$unrelated" "$merge_commit"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "local integration branch does not fast-forward" \
+  GH_PR_COMMITS_MODE=valid
+
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$unrelated"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "remote-only commit is not uniquely attributed" \
+  GH_PR_COMMITS_MODE=empty
+assert_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "pull request commit evidence is invalid" \
+  GH_PR_COMMITS_MODE=duplicate
+echo "PASS: divergent and ambiguous stale-local histories are rejected"
+
+echo ""
+echo "Test 33: stale local proof accepts later uniquely canonical integrated commits"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture canonical-descendant)
+git -C "$repo" checkout -q "$branch"
+printf 'canonical later slice\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "Integrate canonical slice 508"
+canonical_tip=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" push -q origin "$branch"
+git -C "$repo" checkout -q main
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$canonical_tip"
+jq --arg tip "$canonical_tip" '
+  .items["508"] = {
+    status: "slice-integrated",
+    pr_number: "534",
+    integrated_commit: $tip,
+    integrated_at: "2026-08-25T21:00:00Z",
+    pid: null
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+canonical_proof=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
+) || fail "canonical descendant should account for stale-local remote history"
+printf '%s\n' "$canonical_proof" | jq -e \
+  --arg tip "$canonical_tip" '
+    .remote.tip == $tip
+    and .remote.policy == "accounted-stale-local-fast-forward"
+    and (.remote_only_commits[-1].sha == $tip)
+    and (.remote_only_commits[-1].attribution == {
+      kind: "canonical-slice-integrated",
+      issue_number: 508,
+      pr_number: 534
+    })
+  ' >/dev/null || fail "proof should bind the later canonical integration evidence"
+echo "PASS: canonical integrated evidence accounts for later remote movement"
+
+echo ""
+echo "Test 34: post-state remote and local movement remain pending and fail closed"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture ref-races)
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$merge_commit"
+race_proof="$TEST_ROOT/ref-races/proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$race_proof"
+if race_output=$(
+  GH_REF_MODE=move-before-cas \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$race_proof" 2>&1
+); then
+  fail "remote movement after state write should reject apply"
+fi
+grep -Fqi "remote integration branch moved before local ref update" <<<"$race_output" \
+  || fail "post-state remote movement should be explicit"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$base" ]] \
+  || fail "remote race must not update the local ref"
+jq -e '.items["507"].reconciliation.local_ref_update.status == "pending"' \
+  "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "remote race should retain durable pending recovery intent"
+
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture local-ref-race)
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$merge_commit"
+local_race_proof="$TEST_ROOT/local-ref-race/proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$local_race_proof"
+tree=$(git -C "$repo" rev-parse "${base}^{tree}")
+moved_local=$(printf 'concurrent local\n' | git -C "$repo" commit-tree "$tree")
+if race_output=$(
+  GH_REF_MODE=move-local-before-cas \
+  GH_MOVE_LOCAL_SHA="$moved_local" \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$local_race_proof" 2>&1
+); then
+  fail "concurrent local movement should reject compare-and-swap"
+fi
+grep -Fqi "local integration branch changed before compare-and-swap" <<<"$race_output" \
+  || fail "local CAS rejection should be explicit"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$moved_local" ]] \
+  || fail "failed CAS must not overwrite concurrent local movement"
+echo "PASS: remote recheck and expected-old CAS reject concurrent ref changes"
+
+echo ""
+echo "Test 35: interruption after CAS finalizes on retry and completed apply is idempotent"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture post-cas-recovery)
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$merge_commit"
+post_cas_proof="$TEST_ROOT/post-cas-recovery/proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$post_cas_proof"
+if interrupted_output=$(
+  RALPH_RECONCILE_TEST_FAIL_AFTER_REF_UPDATE=1 \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$post_cas_proof" 2>&1
+); then
+  fail "injected post-CAS interruption should fail apply"
+fi
+grep -Fqi "injected interruption after local ref update" <<<"$interrupted_output" \
+  || fail "post-CAS interruption should identify its recovery point"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$merge_commit" ]] \
+  || fail "post-CAS interruption should preserve the completed fast-forward"
+jq -e '.items["507"].reconciliation.local_ref_update.status == "pending"' \
+  "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "post-CAS interruption should leave pending durable intent"
+if fresh_pending_output=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run 2>&1
+); then
+  fail "fresh proof must not bypass an exact-tip pending post-CAS intent"
+fi
+grep -Fqi "pending local ref update requires the original reviewed proof" \
+  <<<"$fresh_pending_output" \
+  || fail "exact-tip pending state should direct the operator to the bound proof"
+recovered_result=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$post_cas_proof"
+) || fail "retry should finalize a ref update that already reached its target"
+printf '%s\n' "$recovered_result" | jq -e '
+  .result == "recovered"
+  and .local_ref.result == "already-fast-forwarded"
+' >/dev/null || fail "retry should report post-CAS recovery"
+completed_before=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
+idempotent_result=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$post_cas_proof"
+) || fail "completed stale-local proof should reapply idempotently"
+printf '%s\n' "$idempotent_result" | jq -e '.result == "unchanged"' >/dev/null \
+  || fail "completed retry should report unchanged"
+completed_after=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
+[[ "$completed_after" == "$completed_before" ]] \
+  || fail "completed retry must not rewrite canonical state"
+echo "PASS: both interruption windows recover without repeated mutation"
+
+echo ""
+echo "Test 36: pre-existing canonical status stages complete proof before stale ref update"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture canonical-stale-local)
+jq --arg commit "$merge_commit" '
+  .items["507"] = {
+    status: "slice-integrated",
+    pr_number: "533",
+    integrated_commit: $commit,
+    integrated_at: "2026-08-25T20:00:00Z",
+    pid: null
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$merge_commit"
+canonical_stale_proof="$TEST_ROOT/canonical-stale-local/proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$canonical_stale_proof"
+canonical_stale_result=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$canonical_stale_proof"
+) || fail "canonical stale-local evidence should stage provenance before CAS"
+printf '%s\n' "$canonical_stale_result" | jq -e '
+  .result == "recorded"
+  and .local_ref.result == "fast-forwarded"
+' >/dev/null || fail "canonical stale-local apply should record proof-bound recovery"
+jq -e '
+  .items["507"].reconciliation.schema_version == 1
+  and .items["507"].reconciliation.source
+    == "operator-guarded-reconciliation"
+  and .items["507"].reconciliation.previous_status == "slice-integrated"
+  and (.items["507"].reconciliation.proof | type == "object")
+  and .items["507"].reconciliation.local_ref_update.status == "completed"
+  and (.items["507"].reconciliation.local_ref_update.ref | type == "string")
+  and (.items["507"].reconciliation.local_ref_update.expected_old | type == "string")
+  and (.items["507"].reconciliation.local_ref_update.target | type == "string")
+' "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "canonical stale-local apply must not autovivify incomplete provenance"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >/dev/null \
+  || fail "completed canonical stale-local provenance should remain valid"
+echo "PASS: existing canonical status cannot bypass durable proof-bound intent"
+
+echo ""
+echo "Test 37: accounted descendant pending intent resumes to the remote tip"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture descendant-resume)
+git -C "$repo" checkout -q "$branch"
+printf 'later canonical integration\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "Integrate canonical slice 508"
+descendant_target=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" push -q origin "$branch"
+git -C "$repo" checkout -q main
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$descendant_target"
+jq --arg tip "$descendant_target" '
+  .items["508"] = {
+    status: "slice-integrated",
+    pr_number: "534",
+    integrated_commit: $tip,
+    integrated_at: "2026-08-25T21:00:00Z",
+    pid: null
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+descendant_proof="$TEST_ROOT/descendant-resume/proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$descendant_proof"
+if interrupted_output=$(
+  RALPH_RECONCILE_TEST_FAIL_AFTER_STATE_WRITE=1 \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$descendant_proof" 2>&1
+); then
+  fail "descendant recovery injection should interrupt after state write"
+fi
+jq -e \
+  --arg merge "$merge_commit" \
+  --arg target "$descendant_target" '
+    .items["507"].integrated_commit == $merge
+    and .items["507"].reconciliation.local_ref_update.status == "pending"
+    and .items["507"].reconciliation.local_ref_update.target == $target
+    and .items["507"].reconciliation.proof.local_ref.target == $target
+  ' "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "pending descendant intent should distinguish merge evidence from ref target"
+descendant_resume_result=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$descendant_proof"
+) || fail "pending descendant intent should resume"
+printf '%s\n' "$descendant_resume_result" | jq -e '.result == "recovered"' >/dev/null \
+  || fail "descendant pending intent should report recovery"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$descendant_target" ]] \
+  || fail "descendant recovery should fast-forward to the exact remote tip"
+echo "PASS: descendant recovery validates and resumes its distinct ref target"
+
+echo ""
+echo "Test 38: a later remote target replaces only proof-mismatched completed intent"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture successive-completed)
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$merge_commit"
+first_proof="$TEST_ROOT/successive-completed/first-proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$first_proof"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 \
+    --apply --proof "$first_proof" >/dev/null \
+  || fail "first stale-local reconciliation should complete"
+git -C "$repo" checkout -q "$branch"
+printf 'new canonical target\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "Integrate canonical slice 508"
+new_target=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" push -q origin "$branch"
+git -C "$repo" checkout -q main
+git -C "$repo" update-ref "refs/heads/$branch" "$merge_commit" "$new_target"
+jq --arg tip "$new_target" '
+  .items["508"] = {
+    status: "slice-integrated",
+    pr_number: "534",
+    integrated_commit: $tip,
+    integrated_at: "2026-08-25T21:00:00Z",
+    pid: null
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+second_proof="$TEST_ROOT/successive-completed/second-proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$second_proof"
+second_result=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$second_proof"
+) || fail "new target should stage a new proof-bound intent"
+printf '%s\n' "$second_result" | jq -e '
+  .result == "recorded" and .local_ref.result == "fast-forwarded"
+' >/dev/null || fail "new target must not inherit a completed old intent"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$new_target" ]] \
+  || fail "new proof should fast-forward to its own target"
+jq -e \
+  --arg target "$new_target" '
+    .items["507"].reconciliation.local_ref_update.status == "completed"
+    and .items["507"].reconciliation.local_ref_update.target == $target
+    and .items["507"].reconciliation.proof.local_ref.target == $target
+  ' "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "new completed intent should replace the older proof-bound intent"
+echo "PASS: completed intent cannot authorize a later target"
+
+echo ""
+echo "Test 39: a later remote target replaces pending mismatched intent before CAS"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture successive-pending)
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$merge_commit"
+pending_first_proof="$TEST_ROOT/successive-pending/first-proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$pending_first_proof"
+if pending_output=$(
+  GH_REF_MODE=move-before-cas \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$pending_first_proof" 2>&1
+); then
+  fail "first apply should retain pending intent after remote movement"
+fi
+git -C "$repo" update-ref "refs/heads/$branch" "$merge_commit" "$base"
+git -C "$repo" checkout -q "$branch"
+printf 'replacement canonical target\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "Integrate replacement canonical slice 508"
+replacement_target=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" push -q origin "$branch"
+git -C "$repo" checkout -q main
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$replacement_target"
+jq --arg tip "$replacement_target" '
+  .items["508"] = {
+    status: "slice-integrated",
+    pr_number: "534",
+    integrated_commit: $tip,
+    integrated_at: "2026-08-25T21:00:00Z",
+    pid: null
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+pending_second_proof="$TEST_ROOT/successive-pending/second-proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$pending_second_proof"
+pending_second_result=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$pending_second_proof"
+) || fail "fresh proof should replace mismatched pending intent before CAS"
+printf '%s\n' "$pending_second_result" | jq -e '
+  .result == "recorded" and .local_ref.result == "fast-forwarded"
+' >/dev/null || fail "mismatched pending intent must not authorize the fresh target"
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$replacement_target" ]] \
+  || fail "fresh pending intent should reach its bound replacement target"
+jq -e \
+  --arg target "$replacement_target" '
+    .items["507"].reconciliation.local_ref_update.status == "completed"
+    and .items["507"].reconciliation.local_ref_update.target == $target
+  ' "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "fresh proof should durably replace mismatched pending intent"
+echo "PASS: pending intent cannot authorize or strand a later target"
+
+echo ""
+echo "Test 40: descendant window-2 interruption and completion remain recoverable"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture descendant-window-two)
+git -C "$repo" checkout -q "$branch"
+printf 'window two descendant\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "Integrate canonical slice 508"
+window_two_target=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" push -q origin "$branch"
+git -C "$repo" checkout -q main
+git -C "$repo" update-ref "refs/heads/$branch" "$base" "$window_two_target"
+jq --arg tip "$window_two_target" '
+  .items["508"] = {
+    status: "slice-integrated",
+    pr_number: "534",
+    integrated_commit: $tip,
+    integrated_at: "2026-08-25T21:00:00Z",
+    pid: null
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+window_two_proof="$TEST_ROOT/descendant-window-two/proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >"$window_two_proof"
+if interrupted_output=$(
+  RALPH_RECONCILE_TEST_FAIL_AFTER_REF_UPDATE=1 \
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$window_two_proof" 2>&1
+); then
+  fail "descendant window-2 injection should interrupt after CAS"
+fi
+[[ "$(git -C "$repo" rev-parse "refs/heads/$branch")" == "$window_two_target" ]] \
+  || fail "descendant window-2 interruption should leave the ref at target"
+jq -e '.items["507"].reconciliation.local_ref_update.status == "pending"' \
+  "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "descendant window-2 interruption should retain pending intent"
+if fresh_pending_output=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run 2>&1
+); then
+  fail "fresh proof must not silently bypass a pending post-CAS intent"
+fi
+grep -Fqi "pending local ref update requires the original reviewed proof" \
+  <<<"$fresh_pending_output" \
+  || fail "pending post-CAS state should direct the operator to the bound proof"
+window_two_resume=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$window_two_proof"
+) || fail "descendant window-2 pending intent should finalize"
+printf '%s\n' "$window_two_resume" | jq -e '
+  .result == "recovered"
+  and .local_ref.result == "already-fast-forwarded"
+' >/dev/null || fail "descendant window-2 retry should report recovery"
+window_two_completed=$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")
+window_two_idempotent=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 \
+      --apply --proof "$window_two_proof"
+) || fail "completed descendant proof should reapply idempotently"
+printf '%s\n' "$window_two_idempotent" | jq -e '.result == "unchanged"' >/dev/null \
+  || fail "completed descendant proof should report unchanged"
+[[ "$(jq -cS . "$repo/.ralph/runs/$run_id/status.json")" == "$window_two_completed" ]] \
+  || fail "completed descendant proof must not rewrite state"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >/dev/null \
+  || fail "fresh descendant dry-run should accept exact completed provenance"
+echo "PASS: descendant window-2 and completed states converge idempotently"

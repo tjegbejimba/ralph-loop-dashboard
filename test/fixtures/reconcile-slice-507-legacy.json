@@ -34,5 +34,14 @@
     "updated_at": "2026-08-25T23:05:34Z",
     "author_permission": "admin"
   },
-  "remote_integration_tip": "f1d5213c3e07148afa508b044ea630406ad98422"
+  "remote_integration_tip": "f1d5213c3e07148afa508b044ea630406ad98422",
+  "local_integration_tip": "564815515e4cc5cb4cfc9d0cd4d0f07cf58d016a",
+  "local_tip_is_ancestor": true,
+  "remote_only_commits": [
+    {
+      "sha": "f1d5213c3e07148afa508b044ea630406ad98422",
+      "pull_request": 533,
+      "issue": 507
+    }
+  ]
 }
