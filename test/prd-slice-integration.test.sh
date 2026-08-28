@@ -55,6 +55,7 @@ git commit -qm "Initial commit"
 mkdir -p ".ralph/runs"
 STATE_DIR="$TEMP_REPO/.ralph"
 STATE_FILE="$STATE_DIR/state.json"
+REPO="origin/user/repo"
 RUN_ID="run-prd-200"
 export RUN_ID
 
@@ -153,6 +154,14 @@ gh() {
     [[ "${CLOSE_SHOULD_FAIL:-0}" == "0" ]] || return 1
     return 0
   fi
+  if [[ "$1 $2 $3" == "issue view ${GH_SATISFY_ISSUE:-}" ]]; then
+    printf '{"state":"CLOSED","stateReason":"COMPLETED","closedByPullRequestsReferences":[{"number":999}]}\n'
+    return 0
+  fi
+  if [[ "$1 $2" == "pr view" && "${GH_SATISFY_ISSUE:-}" != "" ]]; then
+    printf '2026-08-27T00:00:00Z\n'
+    return 0
+  fi
   command gh "$@"
 }
 export -f gh
@@ -249,6 +258,58 @@ if command -v is_slice_dependency_satisfied >/dev/null 2>&1; then
 else
   fail "is_slice_dependency_satisfied function not found"
 fi
+
+# Test 8a: An older rejected attempt cannot shadow canonical integration
+older_run="20260825-184227-ab53afce"
+integrated_run="20260825-184631-43b25623"
+mkdir -p "$STATE_DIR/runs/$older_run" "$STATE_DIR/runs/$integrated_run"
+printf '%s\n' \
+  '{"run_id":"20260825-184227-ab53afce","items":{"507":{"status":"rejected"}}}' \
+  > "$STATE_DIR/runs/$older_run/status.json"
+printf '%s\n' \
+  '{"run_id":"20260825-184631-43b25623","items":{"507":{"status":"slice-integrated","pr_number":"533","integrated_commit":"f1d5213c3e07148afa508b044ea630406ad98422"}}}' \
+  > "$STATE_DIR/runs/$integrated_run/status.json"
+printf '%s\n' '{"prd_number":"200"}' \
+  > "$STATE_DIR/runs/$older_run/ownership.json"
+printf '%s\n' '{"prd_number":"200"}' \
+  > "$STATE_DIR/runs/$integrated_run/ownership.json"
+
+selected_run=$(find_run_for_issue "507" 2>/dev/null || true)
+shared_satisfied=$(is_issue_satisfied "507")
+if [[ "$selected_run" == "$integrated_run" \
+      && "$shared_satisfied" == "1" ]] \
+    && is_slice_dependency_satisfied "507" "$RUN_ID"; then
+  pass "rejected history cannot shadow canonical slice integration"
+else
+  fail "expected integrated run '$integrated_run', got '$selected_run' (shared=$shared_satisfied)"
+fi
+
+# Test 8b: Conflicting canonical integration records fail closed
+conflict_a="20260825-190000-conflict-a"
+conflict_b="20260825-190100-conflict-b"
+mkdir -p "$STATE_DIR/runs/$conflict_a" "$STATE_DIR/runs/$conflict_b"
+printf '%s\n' \
+  '{"run_id":"20260825-190000-conflict-a","items":{"509":{"status":"slice-integrated","pr_number":"540","integrated_commit":"aaaaaaaa"}}}' \
+  > "$STATE_DIR/runs/$conflict_a/status.json"
+printf '%s\n' \
+  '{"run_id":"20260825-190100-conflict-b","items":{"509":{"status":"slice-integrated","pr_number":"541","integrated_commit":"bbbbbbbb"}}}' \
+  > "$STATE_DIR/runs/$conflict_b/status.json"
+printf '%s\n' '{"prd_number":"200"}' \
+  > "$STATE_DIR/runs/$conflict_a/ownership.json"
+printf '%s\n' '{"prd_number":"200"}' \
+  > "$STATE_DIR/runs/$conflict_b/ownership.json"
+
+GH_SATISFY_ISSUE="509"
+if find_run_for_issue "509" >/dev/null 2>&1; then
+  fail "conflicting canonical integration records selected a run"
+elif [[ "$(is_issue_satisfied "509" 2>/dev/null)" != "0" ]]; then
+  fail "shared dependency lookup fell back to GitHub after canonical conflict"
+elif is_slice_dependency_satisfied "509" "$RUN_ID" 2>/dev/null; then
+  fail "slice dependency lookup accepted conflicting canonical records"
+else
+  pass "conflicting canonical integration records fail closed"
+fi
+GH_SATISFY_ISSUE=""
 
 # ===========================================================================
 # Group 5 — PRD not marked delivered

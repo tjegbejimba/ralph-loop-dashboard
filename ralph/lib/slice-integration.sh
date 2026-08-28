@@ -211,31 +211,6 @@ is_slice_dependency_satisfied() {
   fi
 }
 
-# find_run_for_issue ISSUE_NUMBER
-# Finds the run ID that contains the given issue in its queue.
-#
-# Args:
-#   ISSUE_NUMBER — issue number to find
-#
-# Outputs: run ID or empty string
-find_run_for_issue() {
-  local issue="$1"
-  
-  # Search all run status files for this issue
-  local run_dir status_file run_id
-  for status_file in "$STATE_DIR/runs"/*/status.json; do
-    [[ -f "$status_file" ]] || continue
-    if jq -e ".items[\"$issue\"] // false" "$status_file" >/dev/null 2>&1; then
-      run_dir=$(dirname "$status_file")
-      run_id=$(basename "$run_dir")
-      echo "$run_id"
-      return 0
-    fi
-  done
-  
-  return 1
-}
-
 # get_run_prd_number RUN_ID
 # Returns the PRD number for the given run, or empty string for non-PRD runs.
 #
