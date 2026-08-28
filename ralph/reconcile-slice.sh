@@ -811,7 +811,9 @@ reconcile_build_proof() {
         ]
         | if length == 1
             and .[0].body == $body
-            and .[0].created_at == $closed_at
+            and ((($closed_at | fromdateiso8601)
+                - (.[0].created_at | fromdateiso8601)) as $seconds_before_close
+              | $seconds_before_close == 0 or $seconds_before_close == 1)
             and .[0].updated_at == .[0].created_at
             and .[0].user.login == $closed_by
             and (.[0].author_association
