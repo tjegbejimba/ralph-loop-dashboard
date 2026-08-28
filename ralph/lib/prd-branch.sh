@@ -901,6 +901,12 @@ retire_owned_prd_branch() {
 # Transfers a published same-PRD branch without deleting or rewriting either ref.
 # The prior record stages transfer intent before the new record is created, so an
 # interrupted transfer can be completed idempotently by the intended new run.
+prd_report_startup_phase() {
+  if declare -F write_startup_phase >/dev/null 2>&1; then
+    write_startup_phase "$1"
+  fi
+}
+
 transfer_owned_prd_branch() {
   local owner_run_id="$1"
   local new_run_id="$2"
@@ -1003,6 +1009,7 @@ transfer_owned_prd_branch() {
   fi
 
   local pr_json
+  prd_report_startup_phase "prd-transfer-checking-pull-requests"
   if ! pr_json=$("$GH" pr list --repo "$REPO" --state all --head "$branch_name" --json number); then
     echo "ERROR: Ralph could not verify pull requests for '$branch_name'" >&2
     return 1
@@ -1017,11 +1024,13 @@ transfer_owned_prd_branch() {
   fi
 
   local remote_tip remote_rc=0 fetched_tip
+  prd_report_startup_phase "prd-transfer-reading-remote"
   remote_tip=$(prd_remote_branch_tip "$remote" "$branch_name") || remote_rc=$?
   if [[ "$remote_rc" -ne 0 ]]; then
     echo "ERROR: Published branch '$remote/$branch_name' is unavailable for ownership transfer" >&2
     return 1
   fi
+  prd_report_startup_phase "prd-transfer-fetching-remote"
   if ! git fetch "$remote" \
     "refs/heads/$branch_name:refs/remotes/$remote/$branch_name" >/dev/null 2>&1; then
     echo "ERROR: Failed to fetch published branch '$remote/$branch_name'" >&2
@@ -1032,6 +1041,7 @@ transfer_owned_prd_branch() {
     echo "ERROR: Remote branch '$remote/$branch_name' moved while transfer evidence was fetched" >&2
     return 1
   fi
+  prd_report_startup_phase "prd-transfer-verifying-history"
   if ! git cat-file -e "${frozen_base}^{commit}" 2>/dev/null \
     || ! git cat-file -e "${owned_tip}^{commit}" 2>/dev/null \
     || ! git merge-base --is-ancestor "$frozen_base" "$remote_tip" \
@@ -1083,6 +1093,7 @@ transfer_owned_prd_branch() {
     return 1
   fi
 
+  prd_report_startup_phase "prd-transfer-rechecking-evidence"
   state_lock || return 1
 
   local rechecked_reason
