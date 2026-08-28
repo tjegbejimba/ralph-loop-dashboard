@@ -309,6 +309,9 @@ if [[ "\$1" == "api" && "\$2" == "repos/test/example/issues/507/comments?per_pag
   comment_mode="\${GH_COMMENT_MODE:-\${GH_ISSUE_MODE:-closed}}"
   case "\$comment_mode" in
     closed|valid) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    one-second-before-close) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:04:59Z","updated_at":"2026-08-25T20:04:59Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    one-second-after-close) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:01Z","updated_at":"2026-08-25T20:05:01Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
+    two-seconds-before-close) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:04:58Z","updated_at":"2026-08-25T20:04:58Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
     no-closure|missing) printf '[[]]\n' ;;
     untrusted-closure|association-mismatch) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:05:00Z","updated_at":"2026-08-25T20:05:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"CONTRIBUTOR"}]]\n' "$branch" ;;
     stale-closure) printf '[[{"id":7001,"html_url":"https://github.com/test/example/issues/507#issuecomment-7001","user":{"login":"test-owner"},"created_at":"2026-08-25T20:01:00Z","updated_at":"2026-08-25T20:01:00Z","body":"Merged via PR #533 into \`%s\`.","author_association":"OWNER"}]]\n' "$branch" ;;
@@ -1007,8 +1010,16 @@ echo "PASS: large body proof is streamed and hash-bound"
 
 echo ""
 echo "Test 26: closure comments must be exact, unique, unedited, and actor-bound"
+GH_COMMENT_MODE=one-second-before-close \
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >/dev/null \
+  || fail "exact unedited closure comment one second before closure should be accepted"
 for comment_mode in \
-  missing edited duplicate conflicting wrong-pr wrong-branch association-mismatch; do
+  missing edited duplicate conflicting wrong-pr wrong-branch association-mismatch \
+  one-second-after-close two-seconds-before-close; do
   assert_dry_run_rejected "$repo" "$bin" "$run_id" \
     "closure comment is missing or ambiguous" \
     GH_COMMENT_MODE="$comment_mode"
