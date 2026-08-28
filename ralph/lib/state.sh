@@ -279,6 +279,68 @@ parse_blockers() {
     | grep -oE '#[0-9]+' | tr -d '#' | sort -u || true
 }
 
+# find_run_for_issue ISSUE_NUMBER
+# Select the sole canonical slice-integration record for an issue while
+# retaining all older failed/rejected attempts as history.
+#
+# Returns:
+#   0 and prints the canonical run ID
+#   1 when no canonical integration record exists
+#   2 when run evidence is malformed or ambiguous
+find_run_for_issue() {
+  local issue="$1"
+  if [[ ! "$issue" =~ ^[0-9]+$ ]]; then
+    echo "Invalid issue number for run lookup: $issue" >&2
+    return 2
+  fi
+  [[ -n "${STATE_DIR:-}" && -d "$STATE_DIR/runs" ]] || return 1
+
+  local status_file record_kind
+  local -a integrated_runs=()
+  for status_file in "$STATE_DIR/runs"/*/status.json; do
+    [[ -f "$status_file" ]] || continue
+    if ! record_kind=$(jq -er --arg issue "$issue" '
+    if type != "object" or (.items | type) != "object" then
+      error("invalid status document")
+    elif (.items | has($issue) | not) then
+      "absent"
+    else
+      .items[$issue] as $item
+      | if ($item | type) != "object"
+          or ($item.status | type) != "string"
+          or ($item.status | length) == 0 then
+          error("invalid issue status record")
+        elif $item.status != "slice-integrated" then
+          "historical"
+        elif (($item.pr_number | tostring) | test("^[0-9]+$"))
+          and ($item.integrated_commit | type) == "string"
+          and ($item.integrated_commit | length) > 0 then
+          "integrated"
+        else
+          error("invalid slice integration record")
+        end
+    end
+    ' "$status_file" 2>/dev/null); then
+    echo "Malformed run evidence: $status_file" >&2
+    return 2
+    fi
+
+    if [[ "$record_kind" == "integrated" ]]; then
+    integrated_runs+=("$(basename "$(dirname "$status_file")")")
+    fi
+  done
+
+  if [[ ${#integrated_runs[@]} -eq 0 ]]; then
+    return 1
+  fi
+  if [[ ${#integrated_runs[@]} -ne 1 ]]; then
+    echo "Ambiguous canonical integration for issue #$issue" >&2
+    return 2
+  fi
+
+  printf '%s\n' "${integrated_runs[0]}"
+}
+
 # Check whether an issue is closed by a *merged PR* — the same predicate the
 # loop uses to verify its own iteration succeeded. Stronger than just
 # checking issue.state == CLOSED, which can be true for wontfix/duplicate
@@ -304,6 +366,18 @@ is_issue_satisfied() {
 # split with `IFS='|' read`.
 issue_satisfaction_detail() {
   local n="$1"
+  local integrated_run selector_rc
+  if integrated_run=$(find_run_for_issue "$n"); then
+    printf '1|CLOSED|SLICE_INTEGRATED|\n'
+    return
+  else
+    selector_rc=$?
+    if [[ "$selector_rc" -ne 1 ]]; then
+      printf '0|||\n'
+      return
+    fi
+  fi
+
   local closure state state_reason prs_csv pr_numbers pr merged_at satisfied
   closure=$(gh issue view "$n" --repo "$REPO" \
     --json state,stateReason,closedByPullRequestsReferences 2>/dev/null || echo "")
