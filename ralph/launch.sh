@@ -258,9 +258,14 @@ write_startup_phase() {
   local run_dir="${RALPH_RUN_DIR:-}"
   [[ -n "$run_dir" ]] || return 0
 
-  STARTUP_SEQUENCE=$((STARTUP_SEQUENCE + 1))
   mkdir -p "$run_dir"
   local startup_file="$run_dir/startup.json"
+  local recorded_sequence
+  recorded_sequence=$(jq -r '.sequence // 0' "$startup_file" 2>/dev/null || printf '0\n')
+  if [[ "$recorded_sequence" =~ ^[0-9]+$ && "$recorded_sequence" -gt "$STARTUP_SEQUENCE" ]]; then
+    STARTUP_SEQUENCE="$recorded_sequence"
+  fi
+  STARTUP_SEQUENCE=$((STARTUP_SEQUENCE + 1))
   local tmp
   tmp=$(mktemp "$run_dir/.startup.XXXXXX")
   jq -n \
@@ -1130,6 +1135,7 @@ initialize_prd_run() {
 
   local branch_name
   branch_name=$(resolve_prd_branch_name "$prd_number" "$prd_title" "$template")
+  write_startup_phase "prd-ownership-recovery"
   if ! (
     cd "$MAIN_REPO"
     recover_stale_prd_branch \
@@ -1137,6 +1143,7 @@ initialize_prd_run() {
   ); then
     return 1
   fi
+  write_startup_phase "prd-ownership-recovered"
 
   # Recovery may clear a terminal prior run from state.json. Enforce the
   # one-active-PRD guard against the resulting current state.
