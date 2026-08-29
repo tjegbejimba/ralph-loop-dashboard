@@ -848,7 +848,7 @@ test("launchRun resumes only an exact registered dirty worker session and revali
     let caseRepoChecks = 0;
     const caseResult = await launchRun({
       ...caseColliding,
-      recovery: { ...caseColliding.recovery, worktreePath: caseColliding.worktreePath.toUpperCase() },
+      recovery: { ...caseColliding.recovery, worktreePath: `${caseColliding.worktreePath}${process.platform === "win32" ? "\\." : "/."}` },
       isWindows: false,
       recoveryExecFile: (command, args) => command === "gh" && args[0] === "repo"
         ? (++caseRepoChecks === 1 ? "testowner/testrepo" : "other/repo")
