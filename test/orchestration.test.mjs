@@ -25,7 +25,7 @@ const recovery = {
   issueNumber: 509,
   workerId: 1,
   sessionId: "595b45ce-c350-40b1-8844-a16e4bd5baa9",
-  worktreePath: "C:\\workers\\slice-509",
+  worktreePath: join(tmpdir(), "workers", "slice-509"),
   branch: "slice-509-backlog-parent-hierarchy",
   prdNumber: 505,
   baseCommit: "fedf2469c6d419222168d52cf4326f2f6f6ccb5f",

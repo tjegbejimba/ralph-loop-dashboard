@@ -799,7 +799,7 @@ test("launchRun resumes only an exact registered dirty worker session and revali
       .every((args) => args.includes("--repo") && args.includes("testowner/testrepo")), true);
     assert.equal(await waitForFile(fixture.capture), true);
     const [actualWorktree, ...actualFields] = readFileSync(fixture.capture, "utf8").trim().split("|");
-    const nativeWorktree = execFileSync(resolveTestBash(), ["-lc", `cygpath -w '${actualWorktree}'`], { encoding: "utf8" }).trim();
+    const nativeWorktree = process.platform === "win32" ? execFileSync(resolveTestBash(), ["-lc", `cygpath -w '${actualWorktree}'`], { encoding: "utf8" }).trim() : actualWorktree;
     assert.equal(realpathSync(nativeWorktree), realpathSync(fixture.worktreePath));
     assert.equal(
       actualFields.join("|"),
