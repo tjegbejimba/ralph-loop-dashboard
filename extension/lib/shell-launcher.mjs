@@ -11,11 +11,14 @@ import {
   fstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
+  realpathSync,
   rmSync,
 } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import {
   isAlive,
   readPidFile,
@@ -86,6 +89,100 @@ function resolveSetupLockPaths(repoRoot) {
   return [...new Set(lockPaths)];
 }
 
+function recoveryText(execFile, command, args, options = {}) {
+  const output = execFile(command, args, {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    ...options,
+  });
+  return String(output ?? "").trim();
+}
+
+function recoveryJson(path) {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+function recoveryPathKey(path, isWindows) {
+  const normalized = path.replaceAll("\\", "/").replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`);
+  return isWindows ? normalized.toLowerCase() : normalized;
+}
+
+function assertExactRecovery({ repoRoot, runId, runDir, recovery, execFile, isWindows }) {
+  const fail = (message) => { throw new Error(`Recovery proof failed: ${message}`); };
+  const pathKey = (path) => recoveryPathKey(path, isWindows);
+  const ralphDir = join(repoRoot, ".ralph");
+  const expectedRunDir = join(ralphDir, "runs", recovery.runId);
+  if (runId !== recovery.runId || resolve(runDir) !== resolve(expectedRunDir)) fail("run directory mismatch");
+
+  let worktree;
+  try { worktree = realpathSync.native(recovery.worktreePath); } catch { fail("worktree does not exist"); }
+  if (pathKey(worktree) !== pathKey(recovery.worktreePath)) fail("worktree path is not canonical");
+  const git = (args) => recoveryText(execFile, "git", ["-C", worktree, ...args]);
+  if (pathKey(git(["rev-parse", "--show-toplevel"])) !== pathKey(worktree)) fail("worktree root mismatch");
+  if (git(["branch", "--show-current"]) !== recovery.branch) fail("worktree branch mismatch");
+  if (!git(["status", "--porcelain"])) fail("worktree is not dirty");
+  const registered = recoveryText(execFile, "git", ["-C", repoRoot, "worktree", "list", "--porcelain"])
+    .split(/\r?\n/).filter((line) => line.startsWith("worktree ")).map((line) => pathKey(line.slice(9)));
+  if (!registered.includes(pathKey(worktree))) fail("worktree is not registered");
+  try { recoveryText(execFile, "git", ["-C", worktree, "merge-base", "--is-ancestor", recovery.baseCommit, "HEAD"]); }
+  catch { fail("base commit is not an ancestor of the worker branch"); }
+
+  let queue, status, ownership, state, events;
+  try {
+    queue = recoveryJson(join(runDir, "queue.json"));
+    status = recoveryJson(join(runDir, "status.json"));
+    ownership = recoveryJson(join(runDir, "ownership.json"));
+    state = recoveryJson(join(ralphDir, "state.json"));
+    events = readFileSync(join(runDir, "copilot-sessions.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse);
+  } catch { fail("run evidence is missing or malformed"); }
+  if (queue.length !== 1 || Number(queue[0]?.number) !== recovery.issueNumber) fail("queue identity mismatch");
+  const item = status.items?.[recovery.issueNumber];
+  if (item?.status !== "failed" || item?.error !== "Worker process died" || Number(item.workerId) !== recovery.workerId) {
+    fail("status is not the exact dead-worker failure");
+  }
+  if (ownership.run_id !== recovery.runId || Number(ownership.prd_number) !== recovery.prdNumber
+      || ownership.initial_base_sha !== recovery.baseCommit) fail("immutable ownership mismatch");
+  if (state.active_run_id !== recovery.runId || Number(state.active_prd) !== recovery.prdNumber
+      || !state.claims || Object.keys(state.claims).length !== 0) fail("state has conflicting ownership or claims");
+  const workerEvents = events.filter((event) =>
+    event.runId === recovery.runId && Number(event.issue) === recovery.issueNumber && Number(event.workerId) === recovery.workerId);
+  if (workerEvents.length !== 1 || workerEvents[0].event !== "start"
+      || workerEvents[0].sessionId !== recovery.sessionId
+      || pathKey(workerEvents[0].cwd) !== pathKey(worktree)) fail("session ledger identity or lifecycle mismatch");
+
+  for (const pidFile of [join(ralphDir, "launcher.pid"), join(ralphDir, "lock", `worker-${recovery.workerId}`, "owner")]) {
+    if (!existsSync(pidFile)) continue;
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    if (!Number.isInteger(pid) || pid <= 0) fail("process ownership evidence is malformed");
+    if (isAlive(pid)) fail("launcher or worker is still live");
+  }
+  const sessionRoot = process.env.RALPH_COPILOT_SESSION_STATE_DIR || join(homedir(), ".copilot", "session-state");
+  const sessionDir = join(sessionRoot, recovery.sessionId);
+  const workspace = readFileSync(join(sessionDir, "workspace.yaml"), "utf8");
+  if (!workspace.includes(`id: ${recovery.sessionId}`) || !workspace.split(/\r?\n/)
+    .some((line) => line.startsWith("cwd: ") && pathKey(line.slice(5).replace(/^["']|["']$/g, "")) === pathKey(worktree))) {
+    fail("Copilot session workspace identity mismatch");
+  }
+  for (const name of readdirSync(sessionDir).filter((entry) => entry.startsWith("inuse."))) {
+    const match = /^inuse\.([1-9][0-9]*)\.lock$/.exec(name);
+    if (!match) fail("session lock evidence is malformed");
+    if (isAlive(Number(match[1]))) fail("Copilot session is still live");
+  }
+  const gh = process.env.RALPH_GH_BIN || "gh";
+  const ghOptions = { cwd: repoRoot };
+  const targetRepo = recoveryText(execFile, gh, ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], ghOptions);
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(targetRepo)) fail("target repository identity is malformed");
+  const issue = JSON.parse(recoveryText(execFile, gh, ["issue", "view", String(recovery.issueNumber), "--repo", targetRepo, "--json", "number,state,labels"], ghOptions));
+  const labels = new Set((issue.labels || []).map((label) => label.name));
+  if (Number(issue.number) !== recovery.issueNumber || issue.state !== "OPEN"
+      || !labels.has("ralph:running") || !labels.has("work:slice")) fail("issue is not OPEN and Ralph-owned");
+  const prs = JSON.parse(recoveryText(execFile, gh, ["pr", "list", "--repo", targetRepo, "--state", "open", "--head", recovery.branch, "--json", "number"], ghOptions));
+  if (!Array.isArray(prs) || prs.length !== 0) fail("worker branch already has an open pull request");
+  const script = join(worktree, ".ralph", "ralph.sh");
+  accessSync(script, constants.R_OK);
+  return { worktree, script, targetRepo };
+}
+
 function cleanupTokenOwnedSetupLocks(lockPaths, launchToken) {
   const retained = [];
   const errors = [];
@@ -100,6 +197,7 @@ function cleanupTokenOwnedSetupLocks(lockPaths, launchToken) {
       retained.push(`${lockPath} (missing or unreadable launch token: ${error.code ?? error.message})`);
       continue;
     }
+
     if (observedToken !== launchToken) {
       retained.push(`${lockPath} (owned by a different launch)`);
       continue;
@@ -325,6 +423,8 @@ export async function launchRun({
   resolveBash = resolveBashExe,
   toBash = toBashPath,
   killProcess = null,
+  recoveryExecFile = execFileSync,
+  recovery,
 }) {
   // Validate required parameters
   if (!runId || typeof runId !== "string") {
@@ -350,7 +450,17 @@ export async function launchRun({
     throw new TypeError("runOptions.runMode is required and must be a string");
   }
   
-  const scriptPath = shellScript || join(repoRoot, ".ralph", "launch.sh");
+  let recoveryLaunch;
+  if (recovery) {
+    try {
+      recoveryLaunch = assertExactRecovery({
+        repoRoot, runId, runDir, recovery, execFile: recoveryExecFile, isWindows,
+      });
+    } catch (error) {
+      return { success: false, error: String(error.message || error) };
+    }
+  }
+  const scriptPath = recoveryLaunch?.script || shellScript || join(repoRoot, ".ralph", "launch.sh");
   const launcherPidFile = join(repoRoot, ".ralph", "launcher.pid");
   
   // Verify script exists and is executable
@@ -362,7 +472,7 @@ export async function launchRun({
       error: `Shell script not found: ${scriptPath}`,
     };
   }
-  if (!shellScript && typeof confirmStarted === "function") {
+  if (!recovery && !shellScript && typeof confirmStarted === "function") {
     const installedScript = readFileSync(scriptPath, "utf-8");
     if (!installedScript.includes(LAUNCH_PROTOCOL_MARKER)) {
       return {
@@ -428,7 +538,25 @@ export async function launchRun({
       env.RALPH_BASE_BRANCH = base.branch;
       env.RALPH_BASE_COMMIT = base.commit;
     }
+    if (recovery) {
+      Object.assign(env, {
+        RALPH_RECOVERY_RUN_ID: recovery.runId,
+        RALPH_RECOVERY_ISSUE_NUMBER: String(recovery.issueNumber),
+        RALPH_RECOVERY_WORKER_ID: String(recovery.workerId),
+        RALPH_RECOVERY_SESSION_ID: recovery.sessionId,
+        RALPH_RECOVERY_WORKTREE_PATH: isWindows ? toBash(recoveryLaunch.worktree) : recoveryLaunch.worktree,
+        RALPH_RECOVERY_BRANCH: recovery.branch,
+        RALPH_RECOVERY_PRD_NUMBER: String(recovery.prdNumber),
+        RALPH_RECOVERY_BASE_COMMIT: recovery.baseCommit,
+        RALPH_LOG_DIR: isWindows ? toBash(join(repoRoot, ".ralph", "logs")) : join(repoRoot, ".ralph", "logs"),
+        RALPH_REPO: recoveryLaunch.targetRepo,
+      });
+    }
     const launchArgs = runOptions.runMode === "one-pass" ? ["--once"] : [];
+    const revalidate = () => {
+      const current = assertExactRecovery({ repoRoot, runId, runDir, recovery, execFile: recoveryExecFile, isWindows });
+      if (current.targetRepo !== recoveryLaunch.targetRepo) throw new Error("target repository identity changed");
+    };
 
     let child;
     let exit = null;
@@ -460,15 +588,25 @@ export async function launchRun({
         return;
       }
       const scriptBash = toBash(scriptPath);
-      const windowsLaunchArgs = ["--foreground", ...launchArgs];
+      try { if (recovery) revalidate(); } catch (error) {
+        resolve({ success: false, error: `Recovery proof changed before spawn: ${String(error.message || error)}` });
+        return;
+      }
+      const windowsLaunchArgs = recovery ? ["--once"] : ["--foreground", ...launchArgs];
       child = spawn(bashExe, [scriptBash, ...windowsLaunchArgs], {
+        cwd: recoveryLaunch?.worktree || repoRoot,
         detached: true,
         windowsHide: true,
         stdio: "ignore",
         env,
       });
     } else {
-      child = spawn(scriptPath, launchArgs, {
+      try { if (recovery) revalidate(); } catch (error) {
+        resolve({ success: false, error: `Recovery proof changed before spawn: ${String(error.message || error)}` });
+        return;
+      }
+      child = spawn(scriptPath, recovery ? ["--once"] : launchArgs, {
+        cwd: recoveryLaunch?.worktree || repoRoot,
         detached: true,
         stdio: "ignore",
         env,

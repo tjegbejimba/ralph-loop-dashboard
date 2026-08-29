@@ -88,7 +88,7 @@ if ! jq -nr --arg re "$TITLE_NUM_RE" '"Slice 1:" | capture($re)' >/dev/null 2>&1
   TITLE_NUM_RE="^Slice (?<x>[0-9]+):"
 fi
 PROMPT_FILE="$SCRIPT_DIR/RALPH.md"
-LOG_DIR="$SCRIPT_DIR/logs"
+LOG_DIR="${RALPH_LOG_DIR:-$SCRIPT_DIR/logs}"
 WORKER_ID="${RALPH_WORKER_ID:-1}"
 LOCK_DIR="$SCRIPT_DIR/lock/worker-${WORKER_ID}"
 MODEL="${RALPH_MODEL:-gpt-5.6-sol}"
@@ -252,6 +252,71 @@ fi
 # dirty-tree rescue to return here before the hard-reset in
 # sync_to_origin_main wipes a slice branch.
 INITIAL_BRANCH="${RALPH_INITIAL_BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
+
+# Exact-session recovery is controller-gated. A partial identity is always an
+# error; a complete identity may only continue in its already-dirty worktree.
+RECOVERY_EXACT=0
+_recovery_vars=(RALPH_RECOVERY_RUN_ID RALPH_RECOVERY_ISSUE_NUMBER RALPH_RECOVERY_WORKER_ID RALPH_RECOVERY_SESSION_ID RALPH_RECOVERY_WORKTREE_PATH RALPH_RECOVERY_BRANCH RALPH_RECOVERY_PRD_NUMBER RALPH_RECOVERY_BASE_COMMIT)
+_recovery_present=0
+for _recovery_var in "${_recovery_vars[@]}"; do
+  [[ -n "${!_recovery_var:-}" ]] && _recovery_present=$((_recovery_present + 1))
+done
+if [[ "$_recovery_present" -ne 0 && "$_recovery_present" -ne "${#_recovery_vars[@]}" ]]; then
+  echo "❌ Exact recovery identity is incomplete." >&2
+  exit 1
+fi
+if [[ "$_recovery_present" -gt 0 ]]; then
+  [[ "$RUN_ID" == "$RALPH_RECOVERY_RUN_ID" &&
+     "$WORKER_ID" == "$RALPH_RECOVERY_WORKER_ID" &&
+     "$(pwd -P)" == "$RALPH_RECOVERY_WORKTREE_PATH" &&
+     "$(git rev-parse --abbrev-ref HEAD)" == "$RALPH_RECOVERY_BRANCH" &&
+     "$BASE_COMMIT" == "$RALPH_RECOVERY_BASE_COMMIT" ]] || {
+    echo "❌ Exact recovery identity does not match worker state." >&2
+    exit 1
+  }
+  [[ "$RALPH_RECOVERY_ISSUE_NUMBER" =~ ^[1-9][0-9]*$ &&
+     "$RALPH_RECOVERY_PRD_NUMBER" =~ ^[1-9][0-9]*$ &&
+     "$RALPH_RECOVERY_SESSION_ID" =~ ^[0-9A-Fa-f-]{36}$ &&
+     -n "$(git status --porcelain)" ]] || {
+    echo "❌ Exact recovery requires numeric ownership, a session UUID, and dirty state." >&2
+    exit 1
+  }
+  git merge-base --is-ancestor "$BASE_COMMIT" HEAD || {
+    echo "❌ Exact recovery base is not an ancestor of the preserved branch." >&2
+    exit 1
+  }
+  _recovery_queue="$STATE_DIR/runs/$RUN_ID/queue.json"
+  jq -e --argjson issue "$RALPH_RECOVERY_ISSUE_NUMBER" \
+    'length == 1 and .[0].number == $issue' "$_recovery_queue" >/dev/null || {
+    echo "❌ Exact recovery queue identity changed." >&2
+    exit 1
+  }
+  RECOVERY_EXACT=1
+  export RESUME_NUM="$RALPH_RECOVERY_ISSUE_NUMBER" RESUME_BRANCH="$RALPH_RECOVERY_BRANCH"
+  export RESUME_ATTEMPT=1 RESUME_TITLE="" RESUME_BODY=""
+fi
+unset _recovery_var _recovery_vars _recovery_present _recovery_queue
+
+verify_exact_recovery_handoff() {
+  local run_dir="$STATE_DIR/runs/$RUN_ID" session_dir issue_json pr_json launcher_pid workspace cwd
+  jq -e --arg run "$RUN_ID" --arg prd "$RALPH_RECOVERY_PRD_NUMBER" --arg issue "$RALPH_RECOVERY_ISSUE_NUMBER" --argjson worker "$WORKER_ID" --arg base "$BASE_COMMIT" \
+    --slurpfile status "$run_dir/status.json" --slurpfile owner "$run_dir/ownership.json" \
+    '.active_run_id == $run and (.active_prd | tostring) == $prd and (.claims | length) == 0 and
+     ($status[0].items[$issue] | .status == "failed" and .error == "Worker process died" and .workerId == $worker) and
+     ($owner[0] | .run_id == $run and (.prd_number | tostring) == $prd and .initial_base_sha == $base)' "$STATE_FILE" >/dev/null || return 1
+  jq -se --arg run "$RUN_ID" --arg issue "$RALPH_RECOVERY_ISSUE_NUMBER" --argjson worker "$WORKER_ID" --arg session "$RALPH_RECOVERY_SESSION_ID" \
+    '[.[] | select(.runId == $run and (.issue | tostring) == $issue and .workerId == $worker and .sessionId == $session)] |
+     length == 1 and .[0].event == "start" and .[0].sessionId == $session' "$run_dir/copilot-sessions.jsonl" >/dev/null || return 1
+  if [[ -f "$STATE_DIR/launcher.pid" ]]; then launcher_pid=$(cat "$STATE_DIR/launcher.pid" 2>/dev/null); [[ "$launcher_pid" =~ ^[1-9][0-9]*$ ]] && ! is_pid_alive_and_ralph "$launcher_pid" || return 1; fi
+  session_dir="$(copilot_session_state_dir)/$RALPH_RECOVERY_SESSION_ID"; workspace="$session_dir/workspace.yaml"
+  cwd="$(copilot_session_workspace_value "$workspace" cwd)"; [[ "$cwd" =~ ^[A-Za-z]:[\\/] ]] && command -v cygpath >/dev/null 2>&1 && cwd="$(cygpath -u "$cwd")"
+  [[ "$(copilot_session_workspace_value "$workspace" id)" == "$RALPH_RECOVERY_SESSION_ID" && "$cwd" == "$(pwd -P)" ]] || return 1
+  ! copilot_session_has_live_lock "$session_dir" || return 1
+  [[ "$(gh repo view "$REPO" --json nameWithOwner --jq .nameWithOwner)" == "$REPO" ]] || return 1
+  issue_json=$(gh issue view "$RALPH_RECOVERY_ISSUE_NUMBER" --repo "$REPO" --json number,state,labels) || return 1; jq -e --argjson issue "$RALPH_RECOVERY_ISSUE_NUMBER" '.number == $issue and .state == "OPEN" and ([.labels[].name] | contains(["ralph:running","work:slice"]))' <<<"$issue_json" >/dev/null || return 1
+  pr_json=$(gh pr list --repo "$REPO" --state open --head "$RALPH_RECOVERY_BRANCH" --json number) || return 1
+  jq -e 'length == 0' <<<"$pr_json" >/dev/null
+}
 
 # Worktree isolation guards (issue #195): record the assigned worktree root
 # at startup and verify the worker never escapes to the primary checkout.
@@ -466,6 +531,8 @@ while true; do
       body="${RESUME_BODY:-$body}"
     fi
     chosen_blockers=""
+    [[ "$RECOVERY_EXACT" == "1" ]] && _is_recovery_claim=1
+    default_branch=$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)
     iter_start_ts=$(date -u +%FT%TZ)
     ts="$(date +%Y%m%d-%H%M%S)"
     log_file="$LOG_DIR/iter-${ts}-w${WORKER_ID}-issue-${num}.log"
@@ -475,7 +542,12 @@ while true; do
     unset RESUME_NUM RESUME_TITLE RESUME_BODY RESUME_BRANCH RESUME_ATTEMPT
 
     if [[ -n "$RUN_ID" ]]; then
-      state_lock || true
+      state_lock || { echo "❌ Could not lock recovery state." >&2; exit 1; }
+      if [[ "$RECOVERY_EXACT" == "1" ]] && ! verify_exact_recovery_handoff; then
+        state_unlock
+        echo "❌ Exact recovery proof changed after controller spawn." >&2
+        exit 1
+      fi
       # Status stays `running` (not `failed`) — this is what differentiates
       # a resumable iteration from a terminal halt.
       status_update_item "$num" "running" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
@@ -1106,7 +1178,15 @@ Use: gh pr create --base $target_base ...
 "
   fi
 
-  if [[ "$_iter_resume_active" == "1" ]]; then
+  if [[ "$RECOVERY_EXACT" == "1" ]]; then
+    full_prompt="${full_prompt}
+
+---
+RALPH_EXACT_SESSION_RECOVERY
+---
+Continue the existing work in this preserved worktree and session. Do not discard or replace dirty changes."
+    export RALPH_RESUME=1 RALPH_RESUME_ATTEMPT="$_iter_resume_attempt" RALPH_RESUME_BRANCH="$_iter_resume_branch"
+  elif [[ "$_iter_resume_active" == "1" ]]; then
     full_prompt="${full_prompt}
 
 ---
@@ -1139,7 +1219,10 @@ DO NOT re-plan or open a new branch. Instead:
   copilot_session_id=""
   copilot_session_name_value=""
   copilot_session_args=()
-  if declare -F copilot_session_new_id >/dev/null 2>&1; then
+  if [[ "$RECOVERY_EXACT" == "1" ]]; then
+    copilot_session_id="$RALPH_RECOVERY_SESSION_ID"
+    copilot_session_args=("--resume=$copilot_session_id")
+  elif declare -F copilot_session_new_id >/dev/null 2>&1; then
     copilot_session_id="$(copilot_session_new_id)"
     copilot_session_name_value="$(copilot_session_name "$num" "$WORKER_ID" "$RUN_ID")"
     copilot_session_args=(--session-id "$copilot_session_id" --name "$copilot_session_name_value" --no-remote)
@@ -1444,7 +1527,7 @@ DO NOT re-plan or open a new branch. Instead:
           status_update_item "$num" "running" "$WORKER_ID" "$$" "$(basename "$log_file")" "$iter_start_ts"
         fi
         state_unlock || true
-        if [[ -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
+        if [[ "$RECOVERY_EXACT" != "1" && -n "$copilot_session_id" ]] && declare -F copilot_session_record_terminal >/dev/null 2>&1; then
           copilot_session_record_terminal "$copilot_session_id" "$num" "$WORKER_ID" "resumed" "$RUN_ID" || true
           copilot_session_archive_id "$copilot_session_id" || true
         fi

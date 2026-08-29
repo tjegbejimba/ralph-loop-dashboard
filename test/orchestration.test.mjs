@@ -20,12 +20,105 @@ import { orchestrateRun, resolveOrchestrateRepoRoot } from "../extension/lib/loo
 
 const queue = [{ number: 42, title: "Slice 42: Test" }];
 const runOptions = { runMode: "until-empty", parallelism: 1, model: "claude-sonnet-4.5" };
+const recovery = {
+  runId: "20260829-002627-229db024",
+  issueNumber: 509,
+  workerId: 1,
+  sessionId: "595b45ce-c350-40b1-8844-a16e4bd5baa9",
+  worktreePath: join(tmpdir(), "workers", "slice-509"),
+  branch: "slice-509-backlog-parent-hierarchy",
+  prdNumber: 505,
+  baseCommit: "fedf2469c6d419222168d52cf4326f2f6f6ccb5f",
+};
 
 function makeRalphRepo(prefix = "ralph-orchestrate-target-") {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   mkdirSync(join(dir, ".ralph"), { recursive: true });
   return dir;
 }
+
+test("orchestrateRun reuses the operator-identified run for exact-session recovery", async () => {
+  const repoRoot = makeRalphRepo();
+  const runDir = join(repoRoot, ".ralph", "runs", recovery.runId);
+  mkdirSync(runDir, { recursive: true });
+  let createCalled = false;
+  let launchInput;
+  try {
+    const result = await orchestrateRun({
+      repoRoot,
+      defaultRepoRoot: repoRoot,
+      queue: [{ number: recovery.issueNumber, title: "Slice 509" }],
+      runOptions,
+      recovery,
+      userConfig: { allowAgentLaunch: true },
+      verify: false,
+      getLoopProcess: async () => [],
+      runPreflight: async () => ({
+        passed: true,
+        checks: [],
+        base: { remote: "origin", branch: "main", commit: recovery.baseCommit },
+      }),
+      createRun: () => {
+        createCalled = true;
+        throw new Error("must not create a replacement run");
+      },
+      launchLoop: async (input) => {
+        launchInput = input;
+        return { success: true, pid: 1234 };
+      },
+    });
+
+    assert.equal(result.ok, true, result.error);
+    assert.equal(createCalled, false);
+    assert.equal(result.runId, recovery.runId);
+    assert.equal(result.runDir, runDir);
+    assert.deepEqual(launchInput.recovery, recovery);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("orchestrateRun rejects incomplete or inconsistent recovery identity before launch", async () => {
+  const repoRoot = makeRalphRepo();
+  const runDir = join(repoRoot, ".ralph", "runs", recovery.runId);
+  mkdirSync(runDir, { recursive: true });
+  let launched = false;
+  const cases = [
+    [{ ...recovery, runId: "../escape" }, [recovery.issueNumber], "runId"],
+    [{ ...recovery, sessionId: "not-a-uuid" }, [recovery.issueNumber], "sessionId"],
+    [{ ...recovery, baseCommit: "abc" }, [recovery.issueNumber], "baseCommit"],
+    [recovery, [recovery.issueNumber, 510], "exactly one"],
+    [recovery, [510], "issueNumber"],
+  ];
+  try {
+    for (const [candidate, issueNumbers, expected] of cases) {
+      const result = await orchestrateRun({
+        repoRoot,
+        defaultRepoRoot: repoRoot,
+        issueNumbers,
+        runOptions,
+        recovery: candidate,
+        userConfig: { allowAgentLaunch: true },
+        verify: false,
+        getLoopProcess: async () => [],
+        runPreflight: async () => ({
+          passed: true,
+          checks: [],
+          base: { remote: "origin", branch: "main", commit: recovery.baseCommit },
+        }),
+        launchLoop: async () => {
+          launched = true;
+          return { success: true, pid: 1234 };
+        },
+      });
+      assert.equal(result.ok, false);
+      assert.match(result.error, new RegExp(expected, "i"));
+    }
+    assert.equal(launched, false);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
 
 test("orchestrateRun reaches safe fixture registration through the real Windows launcher", {
   skip: process.platform !== "win32" ? "requires native Windows" : false,

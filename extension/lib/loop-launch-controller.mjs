@@ -1,7 +1,7 @@
 // Safe Ralph loop startup orchestration shared by the dashboard UI and agent tool.
 
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { createRun as createRunImpl } from "./run-store.mjs";
 import { runPreflight as runPreflightImpl } from "./preflight.mjs";
 import { getRunOptions, validateModel, validateParallelism, validateRunMode } from "./run-options.mjs";
@@ -21,6 +21,49 @@ function sleep(ms) {
 function normalizeIssueNumber(value) {
   const number = Number(value);
   return Number.isInteger(number) && number > 0 ? number : null;
+}
+
+function validateRecoveryIdentity(recovery, queue) {
+  if (!recovery || typeof recovery !== "object" || Array.isArray(recovery)) {
+    return "recovery must be an object.";
+  }
+  const requiredStrings = ["runId", "sessionId", "worktreePath", "branch", "baseCommit"];
+  for (const field of requiredStrings) {
+    if (typeof recovery[field] !== "string" || recovery[field].length === 0) {
+      return `recovery.${field} must be a non-empty string.`;
+    }
+  }
+  for (const field of ["issueNumber", "workerId", "prdNumber"]) {
+    if (!Number.isInteger(recovery[field]) || recovery[field] < 1) {
+      return `recovery.${field} must be a positive integer.`;
+    }
+  }
+  if (!/^\d{8}-\d{6}-[0-9a-f]{8}$/i.test(recovery.runId)) {
+    return "recovery.runId is invalid.";
+  }
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(recovery.sessionId)) {
+    return "recovery.sessionId is invalid.";
+  }
+  if (!/^[0-9a-f]{40}$/i.test(recovery.baseCommit)) {
+    return "recovery.baseCommit must be a full commit SHA.";
+  }
+  if (!isAbsolute(recovery.worktreePath)) {
+    return "recovery.worktreePath must be absolute.";
+  }
+  if (
+    recovery.branch.startsWith("-") ||
+    recovery.branch.includes("..") ||
+    !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(recovery.branch)
+  ) {
+    return "recovery.branch is invalid.";
+  }
+  if (queue.length !== 1) {
+    return "Recovery requires exactly one queued issue.";
+  }
+  if (queue[0].number !== recovery.issueNumber) {
+    return "Recovery queue does not match recovery.issueNumber.";
+  }
+  return null;
 }
 
 export function normalizeQueue({ queue, issueNumbers } = {}) {
@@ -304,6 +347,7 @@ export async function startRalphLoop({
   isWindows = IS_WINDOWS,
   startupTimeoutMs,
   startupPollMs,
+  recovery,
 } = {}) {
   if (!repoRoot || typeof repoRoot !== "string") {
     return { ok: false, error: "repoRoot is required and must be a string." };
@@ -314,6 +358,10 @@ export async function startRalphLoop({
 
   const normalizedQueue = normalizeQueue({ queue, issueNumbers });
   if (!normalizedQueue.ok) return { ok: false, error: normalizedQueue.error };
+  if (recovery) {
+    const recoveryError = validateRecoveryIdentity(recovery, normalizedQueue.queue);
+    if (recoveryError) return { ok: false, error: recoveryError };
+  }
 
   const normalizedRunOptions = normalizeRunOptions(runOptions, { userConfig, repoConfig });
   if (!normalizedRunOptions.ok) return { ok: false, error: normalizedRunOptions.error };
@@ -331,16 +379,32 @@ export async function startRalphLoop({
   if (!preflight.passed) {
     return { ok: false, error: "Preflight failed.", preflight };
   }
+  if (recovery && preflight.base?.commit !== recovery.baseCommit) {
+    return {
+      ok: false,
+      error: "Preflight base commit does not match recovery.baseCommit.",
+      preflight,
+    };
+  }
 
   let run;
-  try {
-    run = createRun({
-      repoRoot,
-      queue: normalizedQueue.queue,
-      runOptions: normalizedRunOptions.runOptions,
-    });
-  } catch (err) {
-    return { ok: false, error: `Failed to create run: ${String(err.message || err)}` };
+  if (recovery) {
+    const runsDir = resolve(repoRoot, ".ralph", "runs");
+    const runDir = resolve(runsDir, recovery.runId);
+    if (!runDir.startsWith(`${runsDir}${IS_WINDOWS ? "\\" : "/"}`) || !isDirectory(runDir)) {
+      return { ok: false, error: "Recovery run does not exist." };
+    }
+    run = { runId: recovery.runId, runDir };
+  } else {
+    try {
+      run = createRun({
+        repoRoot,
+        queue: normalizedQueue.queue,
+        runOptions: normalizedRunOptions.runOptions,
+      });
+    } catch (err) {
+      return { ok: false, error: `Failed to create run: ${String(err.message || err)}` };
+    }
   }
 
   const launch = await launchLoop({
@@ -349,6 +413,7 @@ export async function startRalphLoop({
     runDir: run.runDir,
     runOptions: normalizedRunOptions.runOptions,
     base: preflight.base,
+    recovery,
     startupTimeoutMs,
     startupPollMs,
     confirmStarted: async () => {

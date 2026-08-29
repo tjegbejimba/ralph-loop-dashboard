@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -724,5 +725,142 @@ test("launchRun validates required parameters", async () => {
     await assert.rejects(() => launchRun({ runId: "test", runDir: "/tmp", repoRoot: tmpRepo, runOptions: { model: "test", parallelism: 1.5, runMode: "one-pass" } }), TypeError, "Should reject float parallelism");
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
+  }
+});
+
+function seedExactRecoveryFixture() {
+  const repoRoot = mkdtempSync(join(tmpdir(), "ralph-exact-recovery-"));
+  const worktreePath = `${repoRoot}-worker`;
+  const runId = "20260829-002627-229db024";
+  const issueNumber = 509;
+  const workerId = 1;
+  const sessionId = "595b45ce-c350-40b1-8844-a16e4bd5baa9";
+  const branch = "slice-509-backlog-parent-hierarchy";
+  const prdNumber = 505;
+  execFileSync("git", ["init", "--quiet", repoRoot]);
+  execFileSync("git", ["-C", repoRoot, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repoRoot, "config", "user.name", "Test"]);
+  writeFileSync(join(repoRoot, "README.md"), "base\n");
+  execFileSync("git", ["-C", repoRoot, "add", "README.md"]);
+  execFileSync("git", ["-C", repoRoot, "commit", "--quiet", "-m", "base"]);
+  const baseCommit = execFileSync("git", ["-C", repoRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", repoRoot, "worktree", "add", "--quiet", "-b", branch, worktreePath]);
+  writeFileSync(join(worktreePath, "README.md"), "preserved dirty work\n");
+
+  const ralphDir = join(repoRoot, ".ralph");
+  const runDir = join(ralphDir, "runs", runId);
+  const sessionRoot = join(repoRoot, "session-state");
+  mkdirSync(join(worktreePath, ".ralph"), { recursive: true });
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(join(sessionRoot, sessionId), { recursive: true });
+  writeFileSync(join(ralphDir, "state.json"), JSON.stringify({ claims: {}, active_prd: String(prdNumber), active_run_id: runId }));
+  writeFileSync(join(runDir, "queue.json"), JSON.stringify([{ number: issueNumber, title: "Slice" }]));
+  writeFileSync(join(runDir, "status.json"), JSON.stringify({ items: { [issueNumber]: { status: "failed", workerId, error: "Worker process died" } } }));
+  writeFileSync(join(runDir, "ownership.json"), JSON.stringify({ run_id: runId, prd_number: String(prdNumber), initial_base_sha: baseCommit }));
+  writeFileSync(join(runDir, "copilot-sessions.jsonl"), `${JSON.stringify({ event: "start", runId, issue: issueNumber, workerId, sessionId, cwd: worktreePath })}\n`);
+  writeFileSync(join(sessionRoot, sessionId, "workspace.yaml"), `id: ${sessionId}\ncwd: ${worktreePath}\nname: "Ralph #${issueNumber} w${workerId} ${runId}"\n`);
+  const capture = join(repoRoot, "recovery-env.txt");
+  writeFileSync(join(worktreePath, ".ralph", "ralph.sh"), `#!/usr/bin/env bash\nprintf '%s\\n' "$PWD|$RALPH_RECOVERY_SESSION_ID|$RALPH_RECOVERY_BRANCH|$RALPH_LOG_DIR|$RALPH_REPO" > '${toBashPath(capture)}'\n`);
+  return {
+    repoRoot, worktreePath, runId, runDir, sessionRoot, capture,
+    recovery: { runId, issueNumber, workerId, sessionId, worktreePath, branch, prdNumber, baseCommit },
+    runOptions: { runMode: "one-pass", parallelism: 1, model: "fixture-model" },
+  };
+}
+
+test("launchRun resumes only an exact registered dirty worker session and revalidates before spawn", async () => {
+  const fixture = seedExactRecoveryFixture();
+  const priorSessionRoot = process.env.RALPH_COPILOT_SESSION_STATE_DIR;
+  process.env.RALPH_COPILOT_SESSION_STATE_DIR = fixture.sessionRoot;
+  const issueJson = JSON.stringify({ number: 509, state: "OPEN", labels: [{ name: "ralph:running" }, { name: "work:slice" }] });
+  const ghCwds = [];
+  const ghCalls = [];
+  const recoveryExecFile = (command, args, options) => {
+    if (command === "gh") {
+      ghCwds.push(options?.cwd);
+      ghCalls.push(args);
+    }
+    if (command === "gh" && args[0] === "repo") return "testowner/testrepo";
+    if (command === "gh" && args[0] === "issue") return issueJson;
+    if (command === "gh" && args[0] === "pr") return "[]";
+    return execFileSync(command, args, { encoding: "utf8" });
+  };
+  try {
+    const result = await launchRun({
+      ...fixture,
+      recovery: fixture.recovery,
+      recoveryExecFile,
+      resolveBash: resolveTestBash,
+      confirmStarted: async () => true,
+    });
+    assert.equal(result.success, true, result.error);
+    assert.deepEqual([...new Set(ghCwds)], [fixture.repoRoot]);
+    assert.equal(ghCalls.filter(([type]) => type === "issue" || type === "pr")
+      .every((args) => args.includes("--repo") && args.includes("testowner/testrepo")), true);
+    assert.equal(await waitForFile(fixture.capture), true);
+    const [actualWorktree, ...actualFields] = readFileSync(fixture.capture, "utf8").trim().split("|");
+    const nativeWorktree = process.platform === "win32" ? execFileSync(resolveTestBash(), ["-lc", `cygpath -w '${actualWorktree}'`], { encoding: "utf8" }).trim() : actualWorktree;
+    assert.equal(realpathSync(nativeWorktree), realpathSync(fixture.worktreePath));
+    assert.equal(
+      actualFields.join("|"),
+      `${fixture.recovery.sessionId}|${fixture.recovery.branch}|${toBashPath(join(fixture.repoRoot, ".ralph", "logs"))}|testowner/testrepo`,
+    );
+
+    const mutated = seedExactRecoveryFixture();
+    process.env.RALPH_COPILOT_SESSION_STATE_DIR = mutated.sessionRoot;
+    const statusPath = join(mutated.runDir, "status.json");
+    const failed = await launchRun({
+      ...mutated,
+      recovery: mutated.recovery,
+      recoveryExecFile: (command, args, options) => {
+        if (command === "gh" && args[0] === "repo") writeFileSync(statusPath, JSON.stringify({ items: { 509: { status: "running", workerId: 1 } } }));
+        return recoveryExecFile(command, args, options);
+      },
+      confirmStarted: async () => true,
+    });
+    assert.equal(failed.success, false);
+    assert.match(failed.error, /recovery proof changed before spawn/i);
+    rmSync(mutated.repoRoot, { recursive: true, force: true });
+    rmSync(mutated.worktreePath, { recursive: true, force: true });
+
+    const mismatched = seedExactRecoveryFixture();
+    process.env.RALPH_COPILOT_SESSION_STATE_DIR = mismatched.sessionRoot;
+    let repoChecks = 0;
+    const mismatchResult = await launchRun({
+      ...mismatched,
+      recovery: mismatched.recovery,
+      recoveryExecFile: (command, args) => {
+        if (command === "gh" && args[0] === "repo") return ++repoChecks === 1 ? "testowner/testrepo" : "other/repo";
+        if (command === "gh" && args[0] === "issue") return issueJson;
+        if (command === "gh" && args[0] === "pr") return "[]";
+        return execFileSync(command, args, { encoding: "utf8" });
+      },
+      resolveBash: resolveTestBash,
+      confirmStarted: async () => true,
+    });
+    assert.equal(mismatchResult.success, false);
+    assert.match(mismatchResult.error, /target repository identity changed/i);
+    rmSync(mismatched.repoRoot, { recursive: true, force: true });
+    rmSync(mismatched.worktreePath, { recursive: true, force: true });
+
+    const caseColliding = seedExactRecoveryFixture();
+    process.env.RALPH_COPILOT_SESSION_STATE_DIR = caseColliding.sessionRoot;
+    let caseRepoChecks = 0;
+    const caseResult = await launchRun({
+      ...caseColliding,
+      recovery: { ...caseColliding.recovery, worktreePath: `${caseColliding.worktreePath}${process.platform === "win32" ? "\\." : "/."}` },
+      isWindows: false,
+      recoveryExecFile: (command, args) => command === "gh" && args[0] === "repo"
+        ? (++caseRepoChecks === 1 ? "testowner/testrepo" : "other/repo")
+        : recoveryExecFile(command, args, { cwd: caseColliding.repoRoot }),
+    });
+    assert.match(caseResult.error, /worktree path is not canonical/i);
+    rmSync(caseColliding.repoRoot, { recursive: true, force: true });
+    rmSync(caseColliding.worktreePath, { recursive: true, force: true });
+  } finally {
+    if (priorSessionRoot === undefined) delete process.env.RALPH_COPILOT_SESSION_STATE_DIR;
+    else process.env.RALPH_COPILOT_SESSION_STATE_DIR = priorSessionRoot;
+    rmSync(fixture.repoRoot, { recursive: true, force: true });
+    rmSync(fixture.worktreePath, { recursive: true, force: true });
   }
 });
