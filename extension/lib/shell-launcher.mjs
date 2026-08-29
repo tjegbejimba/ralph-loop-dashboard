@@ -53,6 +53,19 @@ function readStartupProgress(runDir) {
   }
 }
 
+function readFileSize(path) {
+  let fd;
+  try {
+    fd = openSync(path, "r");
+    return fstatSync(fd).size;
+  } catch (error) {
+    if (error.code === "ENOENT") return 0;
+    throw error;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
 function resolveSetupLockPaths(repoRoot) {
   const lockPaths = [join(repoRoot, ".ralph", "launch.lock")];
   try {
@@ -179,6 +192,8 @@ async function waitForStartup({
   scriptPath,
   confirmStarted,
   getStartupProgress,
+  getLauncherLogSize,
+  initialLauncherLogSize,
   startupTimeoutMs,
   startupMaxTimeoutMs,
   startupPollMs,
@@ -193,6 +208,7 @@ async function waitForStartup({
   let inactivityDeadline = startedAt + timeoutMs;
   const absoluteDeadline = startedAt + maxTimeoutMs;
   let lastProgress = null;
+  let lastLauncherLogSize = initialLauncherLogSize ?? 0;
 
   if (typeof confirmStarted === "function") {
     while (Date.now() < inactivityDeadline && Date.now() < absoluteDeadline) {
@@ -224,6 +240,21 @@ async function waitForStartup({
         }
         if (progress !== null && progress !== undefined && progress !== lastProgress) {
           lastProgress = progress;
+          inactivityDeadline = Math.min(Date.now() + timeoutMs, absoluteDeadline);
+        }
+      }
+      if (typeof getLauncherLogSize === "function") {
+        let launcherLogSize;
+        try {
+          launcherLogSize = await getLauncherLogSize();
+        } catch (err) {
+          return {
+            success: false,
+            error: `Launcher log progress read failed for ${scriptPath}: ${String(err.message || err)}`,
+          };
+        }
+        if (launcherLogSize > lastLauncherLogSize) {
+          lastLauncherLogSize = launcherLogSize;
           inactivityDeadline = Math.min(Date.now() + timeoutMs, absoluteDeadline);
         }
       }
@@ -377,6 +408,7 @@ export async function launchRun({
       error: `Cannot open launcher diagnostics at ${launcherLog}: ${error.message}`,
     };
   }
+  const initialLauncherLogSize = readFileSize(launcherLog);
   const launchToken = randomUUID();
 
   const childResult = await new Promise((resolve) => {
@@ -489,6 +521,8 @@ export async function launchRun({
       scriptPath,
       confirmStarted,
       getStartupProgress: getStartupProgress ?? (() => readStartupProgress(runDir)),
+      getLauncherLogSize: () => readFileSize(launcherLog),
+      initialLauncherLogSize,
       startupTimeoutMs,
       startupMaxTimeoutMs,
       startupPollMs,

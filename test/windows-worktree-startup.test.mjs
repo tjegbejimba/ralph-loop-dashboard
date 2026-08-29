@@ -15,7 +15,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { launchRun } from "../extension/lib/shell-launcher.mjs";
-import { resolveBashExe } from "../extension/lib/platform-shim.mjs";
+import { resolveBashExe, toBashPath } from "../extension/lib/platform-shim.mjs";
 
 const sourceRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -119,6 +119,72 @@ test("native Windows launch registers a worker from a linked worktree", {
     if (previousLoopRepo === undefined) delete process.env.RALPH_LOOP_REPO;
     else process.env.RALPH_LOOP_REPO = previousLoopRepo;
     await new Promise((resolve) => setTimeout(resolve, 1200));
+    rmSync(fixtureRoot, { recursive: true, force: true });
+  }
+});
+
+test("native Windows startup treats slow worktree checkout output as progress", {
+  skip: process.platform !== "win32" ? "requires native Windows timing" : false,
+}, async () => {
+  const fixtureRoot = mkdtempSync(join(tmpdir(), "ralph-windows-checkout-progress-"));
+  const runId = "windows-slow-worktree";
+  const runDir = join(fixtureRoot, ".ralph", "runs", runId);
+  const startupPath = join(runDir, "startup.json");
+  const startedPath = join(runDir, "started");
+  const launcherLog = join(runDir, "launcher.log");
+  const launchScript = join(fixtureRoot, "slow-worktree.sh");
+  const checkoutSamples = [];
+  let observedCheckoutLines = 0;
+  let observer;
+
+  try {
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(
+      launchScript,
+      [
+        "#!/usr/bin/env bash",
+        "set -euo pipefail",
+        'exec >> "$RALPH_LAUNCH_LOG" 2>&1',
+        `printf '%s\\n' '{"sequence":1,"phase":"worktree-checkout"}' > '${toBashPath(startupPath)}'`,
+        "for progress in 10 20 30 40 50; do",
+        "  printf 'Updating files: %s%%\\n' \"$progress\"",
+        "  sleep 1",
+        "done",
+        `touch '${toBashPath(startedPath)}'`,
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    chmodSync(launchScript, 0o755);
+    observer = setInterval(() => {
+      if (!existsSync(launcherLog)) return;
+      const checkoutLines = readFileSync(launcherLog, "utf8")
+        .split(/\r?\n/)
+        .filter((line) => line.startsWith("Updating files:")).length;
+      if (checkoutLines <= observedCheckoutLines) return;
+      observedCheckoutLines = checkoutLines;
+      checkoutSamples.push(readFileSync(startupPath, "utf8"));
+    }, 50);
+
+    const result = await launchRun({
+      runId,
+      runDir,
+      repoRoot: fixtureRoot,
+      runOptions: { runMode: "until-empty", parallelism: 1, model: "fixture-model" },
+      shellScript: launchScript,
+      isWindows: true,
+      resolveBash: resolveBashExe,
+      confirmStarted: async () => existsSync(startedPath),
+      startupTimeoutMs: 3500,
+      startupMaxTimeoutMs: 20000,
+      startupPollMs: 25,
+    });
+
+    assert.ok(checkoutSamples.length >= 3, "fixture must emit repeated checkout progress");
+    assert.equal(new Set(checkoutSamples).size, 1, "startup.json must stay unchanged during checkout");
+    assert.equal(result.success, true, result.error);
+  } finally {
+    clearInterval(observer);
     rmSync(fixtureRoot, { recursive: true, force: true });
   }
 });

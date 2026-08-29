@@ -310,7 +310,7 @@ test("launchRun reports immediate launcher failure instead of spawn success", as
   }
 });
 
-test("launchRun terminates POSIX launcher when startup confirmation fails", {
+test("launchRun terminates POSIX launcher when launcher output stalls before confirmation", {
   skip: process.platform === "win32" ? "requires POSIX signal semantics" : false,
 }, async () => {
   const tmpRepo = mkdtempSync(join(tmpdir(), "ralph-test-"));
@@ -320,7 +320,11 @@ test("launchRun terminates POSIX launcher when startup confirmation fails", {
     const runOptions = { runMode: "until-empty", parallelism: 1, model: "claude-sonnet-4.5" };
     const mockScript = join(tmpRepo, "launch-hangs.sh");
     const killed = [];
-    writeFileSync(mockScript, "#!/usr/bin/env bash\nsleep 10\n", "utf-8");
+    writeFileSync(
+      mockScript,
+      '#!/usr/bin/env bash\nexec >> "$RALPH_LAUNCH_LOG" 2>&1\necho "checkout started"\nsleep 10\n',
+      "utf-8",
+    );
 
     const result = await launchRun({
       runId,
@@ -361,9 +365,9 @@ test("launchRun treats advancing setup phases as startup progress", {
         "set -euo pipefail",
         'exec >> "$RALPH_LAUNCH_LOG" 2>&1',
         `printf '%s\\n' '{"sequence":1,"phase":"prd-ready"}' > '${toBashPath(startupPath)}'`,
-        "sleep 0.4",
+        "sleep 1.2",
         `printf '%s\\n' '{"sequence":2,"phase":"worktree-ready"}' > '${toBashPath(startupPath)}'`,
-        "sleep 0.4",
+        "sleep 1.2",
         `printf '%s\\n' '{"sequence":3,"phase":"worker-started"}' > '${toBashPath(startupPath)}'`,
         "",
       ].join("\n"),
@@ -388,10 +392,9 @@ test("launchRun treats advancing setup phases as startup progress", {
         const { readFileSync } = await import("node:fs");
         return readFileSync(startupPath, "utf-8");
       },
-      startupTimeoutMs: 650,
+      startupTimeoutMs: 2000,
       startupPollMs: 10,
     });
-    assert.equal(result.success, true, result.error);
     assert.equal(result.success, true, result.error);
   } finally {
     rmSync(tmpRepo, { recursive: true, force: true });
