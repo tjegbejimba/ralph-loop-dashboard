@@ -114,7 +114,7 @@ async function startLoop({ queue, issueNumbers, runOptions } = {}) {
   });
 }
 
-async function orchestrateRun({ queue, issueNumbers, runOptions, verify, timeoutMinutes, repoRoot } = {}) {
+async function orchestrateRun({ queue, issueNumbers, runOptions, recovery, verify, timeoutMinutes, repoRoot } = {}) {
   const { config: userConfig } = loadUserConfig();
   return orchestrateRalphRun({
     repoRoot,
@@ -122,6 +122,7 @@ async function orchestrateRun({ queue, issueNumbers, runOptions, verify, timeout
     queue,
     issueNumbers,
     runOptions,
+    recovery,
     verify,
     timeoutMinutes,
     userConfig,

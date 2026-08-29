@@ -54,6 +54,32 @@ export function createRalphOrchestrationTool({ orchestrateRun }) {
             model: { type: "string" },
           },
         },
+        recovery: {
+          type: "object",
+          description:
+            "Explicit identity for guarded recovery of one registered Copilot session in its preserved dirty worker worktree.",
+          properties: {
+            runId: { type: "string" },
+            issueNumber: { type: "integer", minimum: 1 },
+            workerId: { type: "integer", minimum: 1 },
+            sessionId: { type: "string" },
+            worktreePath: { type: "string" },
+            branch: { type: "string" },
+            prdNumber: { type: "integer", minimum: 1 },
+            baseCommit: { type: "string" },
+          },
+          required: [
+            "runId",
+            "issueNumber",
+            "workerId",
+            "sessionId",
+            "worktreePath",
+            "branch",
+            "prdNumber",
+            "baseCommit",
+          ],
+          additionalProperties: false,
+        },
         verify: {
           type: "boolean",
           description: "When true or omitted, poll the run status until all queue items are terminal or timeout.",

@@ -50,6 +50,32 @@ test("ralph orchestration tool forwards repoRoot to the gated orchestrator", asy
   assert.deepEqual(received.issueNumbers, [7]);
 });
 
+test("ralph orchestration tool declares and forwards exact-session recovery identity", async () => {
+  let received;
+  const tool = createRalphOrchestrationTool({
+    orchestrateRun: async (args) => {
+      received = args;
+      return { ok: true, runId: args.recovery.runId };
+    },
+  });
+  const recovery = {
+    runId: "run-509",
+    issueNumber: 509,
+    workerId: 1,
+    sessionId: "595b45ce-c350-40b1-8844-a16e4bd5baa9",
+    worktreePath: "C:\\workers\\slice-509",
+    branch: "slice-509-backlog-parent-hierarchy",
+    prdNumber: 505,
+    baseCommit: "fedf2469c6d419222168d52cf4326f2f6f6ccb5f",
+  };
+
+  assert.deepEqual(tool.parameters.properties.recovery.required, Object.keys(recovery));
+  const result = await tool.handler({ issueNumbers: [509], recovery });
+
+  assert.equal(result.resultType, "success");
+  assert.deepEqual(received.recovery, recovery);
+});
+
 test("ralph orchestration tool reports launch failures as failed tool results", async () => {
   const tool = createRalphOrchestrationTool({
     orchestrateRun: async () => ({ ok: false, error: "Preflight failed." }),
