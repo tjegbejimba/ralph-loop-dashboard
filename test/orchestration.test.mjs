@@ -37,9 +37,14 @@ function makeRalphRepo(prefix = "ralph-orchestrate-target-") {
   return dir;
 }
 
-test("orchestrateRun reuses the operator-identified run for exact-session recovery", async () => {
+test("orchestrateRun preserves coordinator main while recovering a historical worker base", async () => {
   const repoRoot = makeRalphRepo();
   const runDir = join(repoRoot, ".ralph", "runs", recovery.runId);
+  const coordinatorBase = {
+    remote: "origin",
+    branch: "main",
+    commit: "1061460d4f3cc4fa3353b9d0898da6f9a34873d2",
+  };
   mkdirSync(runDir, { recursive: true });
   let createCalled = false;
   let launchInput;
@@ -56,7 +61,7 @@ test("orchestrateRun reuses the operator-identified run for exact-session recove
       runPreflight: async () => ({
         passed: true,
         checks: [],
-        base: { remote: "origin", branch: "main", commit: recovery.baseCommit },
+        base: coordinatorBase,
       }),
       createRun: () => {
         createCalled = true;
@@ -72,6 +77,7 @@ test("orchestrateRun reuses the operator-identified run for exact-session recove
     assert.equal(createCalled, false);
     assert.equal(result.runId, recovery.runId);
     assert.equal(result.runDir, runDir);
+    assert.deepEqual(launchInput.base, coordinatorBase);
     assert.deepEqual(launchInput.recovery, recovery);
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
