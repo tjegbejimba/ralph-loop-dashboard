@@ -812,10 +812,9 @@ test("launchRun resumes only an exact registered dirty worker session and revali
     const failed = await launchRun({
       ...mutated,
       recovery: mutated.recovery,
-      recoveryExecFile,
-      resolveBash: () => {
-        writeFileSync(statusPath, JSON.stringify({ items: { 509: { status: "running", workerId: 1 } } }));
-        return resolveTestBash();
+      recoveryExecFile: (command, args, options) => {
+        if (command === "gh" && args[0] === "repo") writeFileSync(statusPath, JSON.stringify({ items: { 509: { status: "running", workerId: 1 } } }));
+        return recoveryExecFile(command, args, options);
       },
       confirmStarted: async () => true,
     });
