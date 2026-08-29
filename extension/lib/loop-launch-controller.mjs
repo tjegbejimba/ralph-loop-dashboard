@@ -379,14 +379,6 @@ export async function startRalphLoop({
   if (!preflight.passed) {
     return { ok: false, error: "Preflight failed.", preflight };
   }
-  if (recovery && preflight.base?.commit !== recovery.baseCommit) {
-    return {
-      ok: false,
-      error: "Preflight base commit does not match recovery.baseCommit.",
-      preflight,
-    };
-  }
-
   let run;
   if (recovery) {
     const runsDir = resolve(repoRoot, ".ralph", "runs");
