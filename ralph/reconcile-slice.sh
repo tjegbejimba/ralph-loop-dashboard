@@ -460,6 +460,10 @@ reconcile_validate_local_evidence() {
         ((.items[$issue].pr_number // $pr | tostring) == $pr)
         and (.items[$issue].integrated_commit // null) == null
         and (.items[$issue].reconciliation // null) == null
+      elif .items[$issue].status == "failed" then
+        ((.items[$issue].pr_number // $pr | tostring) == $pr)
+        and (.items[$issue].integrated_commit // null) == null
+        and (.items[$issue].reconciliation // null) == null
       elif .items[$issue].status == "slice-integrated" then
         (.items[$issue].pr_number | tostring) == $pr
         and (.items[$issue].integrated_commit
@@ -480,6 +484,7 @@ reconcile_validate_local_evidence() {
         and $reconciliation.schema_version == 1
         and $reconciliation.source == "operator-guarded-reconciliation"
         and ($reconciliation.previous_status == "merged"
+          or $reconciliation.previous_status == "failed"
           or $reconciliation.previous_status == "slice-integrated")
         and ($reconciliation.proof_generated_at
           | type == "string"

@@ -1720,3 +1720,57 @@ RALPH_GH_BIN="$bin/gh" \
     --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run >/dev/null \
   || fail "fresh descendant dry-run should accept exact completed provenance"
 echo "PASS: descendant window-2 and completed states converge idempotently"
+
+echo ""
+echo "Test 41: exact terminal failed evidence can be reconciled without weakening conflicts"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture failed-delivery)
+jq '
+  .items["507"].status = "failed"
+  | .items["507"].error = "Copilot exited with code 127"
+  | del(.items["507"].pr_number)
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+failed_proof=$(
+  RALPH_MAIN_REPO="$repo" \
+  RALPH_REPO="test/example" \
+  RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
+) || fail "exact terminal failed evidence should be reconcilable"
+printf '%s\n' "$failed_proof" \
+  | jq -e '.prior_evidence.status == "failed" and .prior_evidence.pr_number == null' \
+  >/dev/null || fail "failed proof should preserve exact prior evidence"
+
+jq '.items["507"].pr_number = "999"' \
+  "$repo/.ralph/runs/$run_id/status.json" >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" "$repo/.ralph/runs/$run_id/status.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "existing status evidence is malformed"
+
+jq --arg conflict "$base" '
+  .items["507"].pr_number = "533"
+  | .items["507"].integrated_commit = $conflict
+' "$repo/.ralph/runs/$run_id/status.json" >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" "$repo/.ralph/runs/$run_id/status.json"
+assert_dry_run_rejected "$repo" "$bin" "$run_id" "existing status evidence is malformed"
+
+jq 'del(.items["507"].pr_number, .items["507"].integrated_commit)' \
+  "$repo/.ralph/runs/$run_id/status.json" >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" "$repo/.ralph/runs/$run_id/status.json"
+failed_proof=$(
+  RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+    "$REPO_ROOT/ralph/reconcile-slice.sh" \
+      --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run
+) || fail "restored failed evidence should produce fresh proof"
+proof_file="$TEST_ROOT/failed-delivery/proof.json"
+printf '%s\n' "$failed_proof" >"$proof_file"
+RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --run "$run_id" --prd 505 --issue 507 --pr 533 \
+    --apply --proof "$proof_file" >/dev/null \
+  || fail "exact terminal failed evidence should apply"
+jq -e '.items["507"].reconciliation.previous_status == "failed"' \
+  "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "failed apply should preserve previous status provenance"
+echo "PASS: failed delivery accepts exact proof and rejects conflicting local evidence"
