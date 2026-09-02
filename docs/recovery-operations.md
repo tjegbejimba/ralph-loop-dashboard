@@ -294,6 +294,16 @@ item for it. Apply revalidates the exact reviewed proof under the setup and
 state locks, then atomically appends a content-addressed record to
 `.ralph/runs/<run-id>/hitl-integrations.json`. Existing records must have unique
 issue, PR, and merge-commit identities and valid proof hashes.
+Unlike normal reconciliation, the approved HITL PR must use a same-repository
+interactive branch rather than the configured `slice-<issue>-*` worker branch.
+The proof binds the exact head ref and head SHA from independent GraphQL and
+REST PR evidence and resolves the SHA through the repository commit API. The
+head must not match a canonical Ralph worker branch, any unretired Ralph-owned
+PRD integration branch, the repository default branch, or the configured
+delivery branch. A deleted source ref is acceptable only while the merged PR
+still supplies consistent head metadata and the exact commit remains
+resolvable; missing, changed, cross-repository, or unresolvable evidence fails
+closed.
 Each HITL proof requires its PR merge commit to equal the exact current remote
 tip. Record sequential HITL integrations in merge order; do not use a later
 remote tip to retroactively prove an earlier merge.
