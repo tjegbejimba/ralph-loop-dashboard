@@ -37,7 +37,7 @@ assert_hitl_dry_run_rejected() {
   shift 4
   local output
   if output=$(
-    env "$@" \
+    env GH_HEAD_MODE=interactive "$@" \
       RALPH_MAIN_REPO="$repo" \
       RALPH_REPO="test/example" \
       RALPH_GH_BIN="$bin/gh" \
@@ -1964,6 +1964,23 @@ jq -e \
   . "$REPO_ROOT/ralph/lib/prd-branch.sh"
   prd_terminal_remote_tip_is_proven "$run_id" "$merge_commit"
 ) || fail "guarded HITL provenance should account for the exact terminal remote tip"
+canonical_hitl="$TEST_ROOT/hitl-delivery/canonical-hitl.json"
+jq '.records[0].proof.pull_request.head = "slice-507-forged-worker"' \
+  "$repo/.ralph/runs/$run_id/hitl-integrations.json" >"$canonical_hitl"
+canonical_hitl_oid=$(jq -cSj '.records[0].proof' "$canonical_hitl" \
+  | git -C "$repo" hash-object --stdin)
+jq --arg oid "$canonical_hitl_oid" '.records[0].proof_oid = $oid' \
+  "$canonical_hitl" >"$repo/.ralph/runs/$run_id/hitl-integrations.json"
+if (
+  cd "$repo"
+  LOG_DIR="$repo/.ralph/logs"
+  REPO="test/example"
+  . "$REPO_ROOT/ralph/lib/state.sh"
+  . "$REPO_ROOT/ralph/lib/prd-branch.sh"
+  prd_terminal_remote_tip_is_proven "$run_id" "$merge_commit"
+); then
+  fail "content-addressed canonical worker provenance must not authorize transfer"
+fi
 echo "PASS: unowned HITL delivery is separately recorded and accepted"
 
 echo ""
@@ -2009,6 +2026,8 @@ assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
   "comment actor is not authorized" GH_PERMISSION_MODE=read
 assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
   "another open delivery PR" GH_OPEN_PRS_MODE=body-conflict
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "canonical Ralph worker branch" GH_HEAD_MODE=canonical
 assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
   "not an independent delivery branch" GH_HEAD_MODE=owned
 other_run="20260825-other-prd-owner"
@@ -2069,6 +2088,7 @@ jq --arg commit "$base" '
 mv "$repo/.ralph/runs/$run_id/status.tmp" \
   "$repo/.ralph/runs/$run_id/status.json"
 hitl_proof_file="$TEST_ROOT/hitl-stale-proof/proof.json"
+GH_HEAD_MODE=interactive \
 RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
   "$REPO_ROOT/ralph/reconcile-slice.sh" \
     --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
@@ -2076,7 +2096,7 @@ RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
   || fail "valid HITL evidence should produce the stale-proof fixture"
 queue_before=$(git -C "$repo" hash-object ".ralph/runs/$run_id/queue.json")
 status_before=$(git -C "$repo" hash-object ".ralph/runs/$run_id/status.json")
-if GH_COMMENT_MODE=edited \
+if GH_HEAD_MODE=interactive GH_COMMENT_MODE=edited \
   RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
   "$REPO_ROOT/ralph/reconcile-slice.sh" \
     --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 \
@@ -2104,6 +2124,7 @@ jq --arg commit "$base" '
 mv "$repo/.ralph/runs/$run_id/status.tmp" \
   "$repo/.ralph/runs/$run_id/status.json"
 hitl_proof_file="$TEST_ROOT/hitl-moving-tip/proof.json"
+GH_HEAD_MODE=interactive \
 RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
   "$REPO_ROOT/ralph/reconcile-slice.sh" \
     --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
@@ -2113,7 +2134,8 @@ printf 'unaccounted movement\n' >>"$repo/README.md"
 git -C "$repo" commit -qam "unaccounted movement"
 git -C "$repo" push -q origin "$branch"
 git -C "$repo" checkout -q main
-if RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+if GH_HEAD_MODE=interactive \
+  RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
   "$REPO_ROOT/ralph/reconcile-slice.sh" \
     --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 \
     --apply --proof "$hitl_proof_file" >/dev/null 2>&1; then
@@ -2179,10 +2201,12 @@ jq --arg commit "$base" '
 mv "$repo/.ralph/runs/$run_id/status.tmp" \
   "$repo/.ralph/runs/$run_id/status.json"
 first_proof="$TEST_ROOT/hitl-sequential/first-proof.json"
+GH_HEAD_MODE=interactive \
 RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
   "$REPO_ROOT/ralph/reconcile-slice.sh" \
     --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
     >"$first_proof"
+GH_HEAD_MODE=interactive \
 RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
   "$REPO_ROOT/ralph/reconcile-slice.sh" \
     --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 \
@@ -2210,7 +2234,7 @@ elif [[ "$1 $2 $3" == "issue view 509" ]]; then
 elif [[ "$1 $2 $3" == "pr view 535" ]]; then
   jq -cn --arg branch "$SEQ_BRANCH" --arg commit "$SEQ_COMMIT" '{
     number:535,state:"MERGED",mergedAt:"2026-08-25T22:00:00Z",
-    baseRefName:$branch,headRefName:"slice-509-approved",
+    baseRefName:$branch,headRefName:"tjegbejimba-prd-505-second-hitl",
     headRefOid:env.SEQ_SLICE_COMMIT,
     headRepository:{nameWithOwner:"test/example"},
     mergeCommit:{oid:$commit},closingIssuesReferences:[],
@@ -2230,7 +2254,7 @@ elif [[ "$1" == "api" && "$2" == "repos/test/example/pulls/535" ]]; then
     --arg head "$SEQ_SLICE_COMMIT" '{
       number:535,state:"closed",merged:true,merged_at:"2026-08-25T22:00:00Z",
       base:{ref:$branch},
-      head:{ref:"slice-509-approved",sha:$head,
+      head:{ref:"tjegbejimba-prd-505-second-hitl",sha:$head,
         repo:{full_name:"test/example"}},
       merge_commit_sha:$merge
     }'
@@ -2376,7 +2400,8 @@ printf 'later unreviewed advancement\n' >>"$writer/README.md"
 git -C "$writer" commit -qam "later unreviewed advancement"
 git -C "$writer" push -q origin "$branch"
 assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
-  "PR merge commit does not equal current remote integration tip"
+  "PR merge commit does not equal current remote integration tip" \
+  GH_HEAD_MODE=interactive
 [[ ! -e "$repo/.ralph/runs/$run_id/hitl-integrations.json" ]] \
   || fail "later-tip rejection must not record HITL provenance"
 echo "PASS: HITL recovery rejects a target merge behind the remote tip"

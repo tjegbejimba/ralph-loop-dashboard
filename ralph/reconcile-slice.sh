@@ -511,6 +511,14 @@ reconcile_validate_local_evidence() {
           != .proof.ownership.repository_default_branch
         and .proof.pull_request.head
           != .proof.ownership.configured_delivery_branch
+        and (
+          .proof.ownership.configured_issue_branch_prefix as $prefix
+          | .proof.pull_request.head as $head
+          | if ($head | startswith($prefix))
+            then ($head[($prefix | length):]
+              | test("^[1-9][0-9]*-.+") | not)
+            else true
+            end)
         and .proof.pull_request.head_commit.sha
           == .proof.pull_request.head_sha
         and .proof.pull_request.head_commit.url
@@ -846,6 +854,12 @@ reconcile_build_proof() {
     if [[ "$pr_head" == "$branch" || "$pr_head" == "$default_branch" \
       || "$pr_head" == "$delivery_branch" ]]; then
       error "PR #$PR_NUMBER HITL head '$pr_head' is not an independent delivery branch"
+      return 1
+    fi
+    local worker_head_suffix="${pr_head#"$RECONCILE_CONFIGURED_PREFIX"}"
+    if [[ "$pr_head" != "$worker_head_suffix" \
+      && "$worker_head_suffix" =~ ^[1-9][0-9]*-.+ ]]; then
+      error "PR #$PR_NUMBER HITL head '$pr_head' is a canonical Ralph worker branch"
       return 1
     fi
     local head_owner_files

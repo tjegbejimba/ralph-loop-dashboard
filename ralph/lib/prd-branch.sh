@@ -402,6 +402,14 @@ prd_terminal_remote_tip_is_proven() {
         != .proof.ownership.repository_default_branch
       and .proof.pull_request.head
         != .proof.ownership.configured_delivery_branch
+      and (
+        .proof.ownership.configured_issue_branch_prefix as $prefix
+        | .proof.pull_request.head as $head
+        | if ($head | startswith($prefix))
+          then ($head[($prefix | length):]
+            | test("^[1-9][0-9]*-.+") | not)
+          else true
+          end)
       and .proof.pull_request.head_commit.sha
         == .proof.pull_request.head_sha
       and .proof.pull_request.head_commit.url
