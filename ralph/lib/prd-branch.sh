@@ -393,6 +393,26 @@ prd_terminal_remote_tip_is_proven() {
       and .proof.pull_request.number == .pr_number
       and .proof.pull_request.merge_commit == .integrated_commit
       and .proof.pull_request.base == .branch
+      and (.proof.pull_request.head | type == "string" and length > 0)
+      and (.proof.pull_request.head_sha
+        | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+      and .proof.pull_request.head_repository == .repository
+      and .proof.pull_request.head != .branch
+      and .proof.pull_request.head
+        != .proof.ownership.repository_default_branch
+      and .proof.pull_request.head
+        != .proof.ownership.configured_delivery_branch
+      and .proof.pull_request.head_commit.sha
+        == .proof.pull_request.head_sha
+      and .proof.pull_request.head_commit.url
+        == ("https://github.com/" + .repository + "/commit/"
+          + .proof.pull_request.head_sha)
+      and (.proof.pull_request.head_commit.tree
+        | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+      and (.proof.pull_request.head_commit.parents
+        | type == "array" and length > 0)
+      and all(.proof.pull_request.head_commit.parents[];
+        type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
       and .proof.remote.tip == .integrated_commit
       and .proof.ownership.branch == .branch)
     and ((.records | map(.issue_number) | length)

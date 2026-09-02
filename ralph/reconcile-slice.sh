@@ -502,6 +502,26 @@ reconcile_validate_local_evidence() {
         and .proof.pull_request.number == .pr_number
         and .proof.pull_request.merge_commit == .integrated_commit
         and .proof.pull_request.base == .branch
+        and (.proof.pull_request.head | type == "string" and length > 0)
+        and (.proof.pull_request.head_sha
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and .proof.pull_request.head_repository == .repository
+        and .proof.pull_request.head != .branch
+        and .proof.pull_request.head
+          != .proof.ownership.repository_default_branch
+        and .proof.pull_request.head
+          != .proof.ownership.configured_delivery_branch
+        and .proof.pull_request.head_commit.sha
+          == .proof.pull_request.head_sha
+        and .proof.pull_request.head_commit.url
+          == ("https://github.com/" + .repository + "/commit/"
+            + .proof.pull_request.head_sha)
+        and (.proof.pull_request.head_commit.tree
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and (.proof.pull_request.head_commit.parents
+          | type == "array" and length > 0)
+        and all(.proof.pull_request.head_commit.parents[];
+          type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
         and .proof.remote.tip == .integrated_commit
         and .proof.ownership.branch == .branch)
       and ((.records | map(.issue_number) | length)
@@ -717,15 +737,17 @@ reconcile_build_proof() {
   local run_dir="$STATE_DIR/runs/$RUN_ID"
   local status_file="$run_dir/status.json"
   local ownership_file="$run_dir/ownership.json"
-  local branch remote remote_url initial_base owned_tip
+  local branch remote remote_url initial_base owned_tip delivery_branch
   branch=$(jq -r '.branch_name' "$ownership_file")
   remote=$(jq -r '.remote' "$ownership_file")
   initial_base=$(jq -r '.initial_base_sha' "$ownership_file")
   owned_tip=$(jq -r '.owned_tip_sha' "$ownership_file")
+  delivery_branch=$(jq -r '.delivery_branch' "$ownership_file")
   remote_url=$(reconcile_remote_repository "$remote") || return 1
   reconcile_assert_unmodified_graph || return 1
 
   local repository_json issue_json issue_rest_json pr_json related_prs
+  local pr_rest_json head_commit_json='null'
   local open_pr_pages operator_login
   operator_login=$("$GH" api user --jq .login) \
     || { error "GitHub operator identity lookup failed"; return 1; }
@@ -783,7 +805,7 @@ reconcile_build_proof() {
     || { error "GitHub issue closure lookup returned invalid evidence"; return 1; }
 
   pr_json=$("$GH" pr view "$PR_NUMBER" --repo "$REPO" \
-    --json number,state,mergedAt,baseRefName,headRefName,headRepository,mergeCommit,closingIssuesReferences,body,url) \
+    --json number,state,mergedAt,baseRefName,headRefName,headRefOid,headRepository,mergeCommit,closingIssuesReferences,body,url) \
     || { error "GitHub pull request lookup failed"; return 1; }
   printf '%s\n' "$pr_json" | jq -e \
     --argjson pr "$PR_NUMBER" \
@@ -812,12 +834,72 @@ reconcile_build_proof() {
       == ($repo | ascii_downcase))
   ' >/dev/null 2>&1 \
     || { error "PR #$PR_NUMBER head repository does not match '$REPO'"; return 1; }
-  printf '%s\n' "$pr_json" | jq -e \
-    --arg head_prefix "${RECONCILE_CONFIGURED_PREFIX}${ISSUE_NUMBER}-" '
-      (.headRefName | type == "string")
-      and (.headRefName | startswith($head_prefix))
-    ' >/dev/null 2>&1 \
-    || { error "PR #$PR_NUMBER does not use canonical issue head '${RECONCILE_CONFIGURED_PREFIX}${ISSUE_NUMBER}-*'"; return 1; }
+  local pr_head pr_head_sha pr_head_repository
+  pr_head=$(printf '%s\n' "$pr_json" | jq -r '.headRefName // empty')
+  pr_head_sha=$(printf '%s\n' "$pr_json" | jq -r '.headRefOid // empty')
+  pr_head_repository=$(printf '%s\n' "$pr_json" \
+    | jq -r '.headRepository.nameWithOwner // empty')
+  if [[ "$HITL_MODE" -eq 1 ]]; then
+    [[ "$pr_head_sha" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]] \
+      && git -C "$MAIN_REPO" check-ref-format --branch "$pr_head" >/dev/null 2>&1 \
+      || { error "PR #$PR_NUMBER HITL head evidence is missing or invalid"; return 1; }
+    if [[ "$pr_head" == "$branch" || "$pr_head" == "$default_branch" \
+      || "$pr_head" == "$delivery_branch" ]]; then
+      error "PR #$PR_NUMBER HITL head '$pr_head' is not an independent delivery branch"
+      return 1
+    fi
+    pr_rest_json=$("$GH" api "repos/$REPO/pulls/$PR_NUMBER" --jq .) \
+      || { error "GitHub HITL pull request head lookup failed"; return 1; }
+    printf '%s\n' "$pr_rest_json" | jq -e \
+      --argjson pr "$PR_NUMBER" \
+      --arg repo "$REPO" \
+      --arg branch "$branch" \
+      --arg head "$pr_head" \
+      --arg head_sha "$pr_head_sha" \
+      --arg merge_commit "$(printf '%s\n' "$pr_json" | jq -r '.mergeCommit.oid')" \
+      --arg merged_at "$(printf '%s\n' "$pr_json" | jq -r '.mergedAt')" '
+        type == "object"
+        and .number == $pr
+        and .state == "closed"
+        and .merged == true
+        and .merged_at == $merged_at
+        and .base.ref == $branch
+        and .head.ref == $head
+        and .head.sha == $head_sha
+        and ((.head.repo.full_name | ascii_downcase) == ($repo | ascii_downcase))
+        and .merge_commit_sha == $merge_commit
+      ' >/dev/null 2>&1 \
+      || { error "PR #$PR_NUMBER HITL head evidence changed or conflicts across GitHub lookups"; return 1; }
+    head_commit_json=$("$GH" api "repos/$REPO/commits/$pr_head_sha" --jq .) \
+      || { error "GitHub HITL head commit lookup failed"; return 1; }
+    printf '%s\n' "$head_commit_json" | jq -e \
+      --arg repo "$REPO" \
+      --arg sha "$pr_head_sha" '
+        type == "object"
+        and .sha == $sha
+        and .html_url == ("https://github.com/" + $repo + "/commit/" + $sha)
+        and (.commit.tree.sha
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and (.parents | type == "array" and length > 0)
+        and all(.parents[];
+          .sha | type == "string"
+            and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+      ' >/dev/null 2>&1 \
+      || { error "GitHub HITL head commit lookup returned invalid evidence"; return 1; }
+    head_commit_json=$(printf '%s\n' "$head_commit_json" | jq -c '{
+      sha,
+      url: .html_url,
+      tree: .commit.tree.sha,
+      parents: [.parents[].sha]
+    }')
+  else
+    printf '%s\n' "$pr_json" | jq -e \
+      --arg head_prefix "${RECONCILE_CONFIGURED_PREFIX}${ISSUE_NUMBER}-" '
+        (.headRefName | type == "string")
+        and (.headRefName | startswith($head_prefix))
+      ' >/dev/null 2>&1 \
+      || { error "PR #$PR_NUMBER does not use canonical issue head '${RECONCILE_CONFIGURED_PREFIX}${ISSUE_NUMBER}-*'"; return 1; }
+  fi
 
   local pr_issue_link="github-closing-reference"
   local closing_refs_json pr_body pr_body_oid closing_directive=""
@@ -1381,8 +1463,10 @@ reconcile_build_proof() {
     --arg pr_state "$(printf '%s\n' "$pr_json" | jq -r '.state')" \
     --arg merged_at "$(printf '%s\n' "$pr_json" | jq -r '.mergedAt')" \
     --arg pr_url "$(printf '%s\n' "$pr_json" | jq -r '.url')" \
-    --arg pr_head "$(printf '%s\n' "$pr_json" | jq -r '.headRefName')" \
-    --arg pr_head_repository "$(printf '%s\n' "$pr_json" | jq -r '.headRepository.nameWithOwner')" \
+    --arg pr_head "$pr_head" \
+    --arg pr_head_sha "$pr_head_sha" \
+    --arg pr_head_repository "$pr_head_repository" \
+    --argjson pr_head_commit "$head_commit_json" \
     --arg pr_body_oid "$pr_body_oid" \
     --arg pr_issue_link "$pr_issue_link" \
     --arg closing_directive "$closing_directive" \
@@ -1439,7 +1523,9 @@ reconcile_build_proof() {
           url: $pr_url,
           base: $branch,
           head: $pr_head,
+          head_sha: (if $pr_head_sha == "" then null else $pr_head_sha end),
           head_repository: $pr_head_repository,
+          head_commit: $pr_head_commit,
           issue_link: $pr_issue_link,
           body_oid: $pr_body_oid,
           merge_commit: $merge_commit
