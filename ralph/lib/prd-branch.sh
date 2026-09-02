@@ -342,7 +342,8 @@ prd_terminal_remote_tip_is_proven() {
 
   [[ -f "$status_file" && -f "$ownership_file" ]] || return 1
   prd_assert_unmodified_graph || return 1
-  owned_tip=$(jq -r '.owned_tip_sha // empty' "$ownership_file" 2>/dev/null) || return 1
+  owned_tip=$(jq -r '.owned_tip_sha // .initial_base_sha // empty' \
+    "$ownership_file" 2>/dev/null) || return 1
   prd_number=$(jq -r '.prd_number // empty' "$ownership_file" 2>/dev/null) || return 1
   branch=$(jq -r '.branch_name // empty' "$ownership_file" 2>/dev/null) || return 1
   [[ "$owned_tip" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]] || return 1
