@@ -150,6 +150,7 @@ case "\${GH_HEAD_MODE:-canonical}" in
     head_sha="$base"
     ;;
   owned) head_ref="$branch" ;;
+  other-owned) head_ref="ralph/prd/other-owned-600" ;;
   default) head_ref="main" ;;
   delivery) head_ref="release" ;;
   missing-ref) head_ref="" ;;
@@ -2010,6 +2011,16 @@ assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
   "another open delivery PR" GH_OPEN_PRS_MODE=body-conflict
 assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
   "not an independent delivery branch" GH_HEAD_MODE=owned
+other_run="20260825-other-prd-owner"
+mkdir -p "$repo/.ralph/runs/$other_run"
+jq --arg run "$other_run" '
+  .run_id = $run
+  | .prd_number = "600"
+  | .branch_name = "ralph/prd/other-owned-600"
+' "$repo/.ralph/runs/$run_id/ownership.json" \
+  >"$repo/.ralph/runs/$other_run/ownership.json"
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "Ralph-owned PRD integration branch" GH_HEAD_MODE=other-owned
 assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
   "not an independent delivery branch" GH_HEAD_MODE=default
 assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \

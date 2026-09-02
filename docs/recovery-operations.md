@@ -298,11 +298,11 @@ Unlike normal reconciliation, the approved HITL PR may use a same-repository
 interactive branch instead of the configured `slice-<issue>-*` worker branch.
 The proof binds the exact head ref and head SHA from independent GraphQL and
 REST PR evidence and resolves the SHA through the repository commit API. The
-head must not be the owned PRD integration branch, repository default branch,
-or configured delivery branch. A deleted source ref is acceptable only while
-the merged PR still supplies consistent head metadata and the exact commit
-remains resolvable; missing, changed, cross-repository, or unresolvable evidence
-fails closed.
+head must not match any unretired Ralph-owned PRD integration branch, the
+repository default branch, or the configured delivery branch. A deleted source
+ref is acceptable only while the merged PR still supplies consistent head
+metadata and the exact commit remains resolvable; missing, changed,
+cross-repository, or unresolvable evidence fails closed.
 Each HITL proof requires its PR merge commit to equal the exact current remote
 tip. Record sequential HITL integrations in merge order; do not use a later
 remote tip to retroactively prove an earlier merge.

@@ -848,6 +848,11 @@ reconcile_build_proof() {
       error "PR #$PR_NUMBER HITL head '$pr_head' is not an independent delivery branch"
       return 1
     fi
+    local head_owner_files
+    head_owner_files=$(prd_active_ownership_files "$pr_head") \
+      || { error "could not inspect PRD branch ownership for HITL head '$pr_head'"; return 1; }
+    [[ -z "$head_owner_files" ]] \
+      || { error "PR #$PR_NUMBER HITL head '$pr_head' matches a Ralph-owned PRD integration branch"; return 1; }
     pr_rest_json=$("$GH" api "repos/$REPO/pulls/$PR_NUMBER" --jq .) \
       || { error "GitHub HITL pull request head lookup failed"; return 1; }
     printf '%s\n' "$pr_rest_json" | jq -e \
