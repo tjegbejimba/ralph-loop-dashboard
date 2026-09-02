@@ -8,6 +8,8 @@ usage() {
 Usage:
   .ralph/reconcile-slice.sh --run RUN --prd N --issue N --pr N --dry-run
   .ralph/reconcile-slice.sh --run RUN --prd N --issue N --pr N --apply --proof FILE
+  .ralph/reconcile-slice.sh --hitl --run RUN --prd N --issue N --pr N --dry-run
+  .ralph/reconcile-slice.sh --hitl --run RUN --prd N --issue N --pr N --apply --proof FILE
 EOF
 }
 
@@ -26,6 +28,7 @@ ISSUE_NUMBER=""
 PR_NUMBER=""
 MODE=""
 PROOF_FILE=""
+HITL_MODE=0
 RECONCILE_SETUP_LOCK=""
 RECONCILE_COMMON_SETUP_LOCK=""
 RECONCILE_STATE_LOCKED=0
@@ -88,6 +91,10 @@ while [[ $# -gt 0 ]]; do
     --proof)
       PROOF_FILE="${2:-}"
       shift 2
+      ;;
+    --hitl)
+      HITL_MODE=1
+      shift
       ;;
     --help|-h)
       usage
@@ -446,12 +453,87 @@ reconcile_validate_local_evidence() {
   prd_validate_ownership_records || return 1
   prd_run_is_terminal "$RUN_ID" \
     || { error "run '$RUN_ID' is not a valid terminal prior run"; return 1; }
-  jq -e --argjson issue "$ISSUE_NUMBER" '
-    type == "array"
-    and ([.[] | select(.number == $issue)] | length == 1)
-  ' "$queue_file" >/dev/null 2>&1 \
-    || { error "issue #$ISSUE_NUMBER is not uniquely owned by run '$RUN_ID'"; return 1; }
-  jq -e --arg issue "$ISSUE_NUMBER" --arg pr "$PR_NUMBER" '
+  if [[ "$HITL_MODE" -eq 1 ]]; then
+    jq -e --argjson issue "$ISSUE_NUMBER" '
+      type == "array"
+      and ([.[] | select(.number == $issue)] | length == 0)
+    ' "$queue_file" >/dev/null 2>&1 \
+      || { error "HITL issue #$ISSUE_NUMBER must not be owned by run '$RUN_ID'"; return 1; }
+    jq -e --arg issue "$ISSUE_NUMBER" '
+      type == "object"
+      and (.items | type == "object")
+      and (.items[$issue] == null)
+    ' "$status_file" >/dev/null 2>&1 \
+      || { error "HITL issue #$ISSUE_NUMBER conflicts with canonical worker status"; return 1; }
+    local hitl_file="$run_dir/hitl-integrations.json"
+    if [[ -f "$hitl_file" ]] && ! jq -e \
+      --arg repository "$REPO" \
+      --arg run "$RUN_ID" \
+      --arg prd "$PRD_NUMBER" \
+      --slurpfile ownership "$ownership_file" '
+      type == "object"
+      and .schema_version == 1
+      and (.records | type == "array")
+      and ($ownership | length == 1)
+      and all(.records[];
+        type == "object"
+        and .source == "operator-guarded-hitl-integration"
+        and .repository == $repository
+        and .run_id == $run
+        and .prd_number == $prd
+        and .branch == $ownership[0].branch_name
+        and (.issue_number | type == "number" and . > 0)
+        and (.pr_number | type == "number" and . > 0)
+        and (.integrated_commit
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and (.proof_oid
+          | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+        and (.proof | type == "object")
+        and .proof.action == "record-hitl-slice-integrated"
+        and .proof.mode == "dry-run"
+        and .proof.issue.state == "CLOSED"
+        and (.proof.issue.labels | type == "array")
+        and (.proof.issue.labels | index("work:slice") != null)
+        and (.proof.issue.labels | index("ralph:hitl") != null)
+        and .proof.repository == .repository
+        and .proof.run_id == .run_id
+        and .proof.prd_number == .prd_number
+        and .proof.issue.number == .issue_number
+        and .proof.pull_request.number == .pr_number
+        and .proof.pull_request.merge_commit == .integrated_commit
+        and .proof.pull_request.base == .branch
+        and .proof.remote.tip == .integrated_commit
+        and .proof.ownership.branch == .branch)
+      and ((.records | map(.issue_number) | length)
+        == (.records | map(.issue_number) | unique | length))
+      and ((.records | map(.pr_number) | length)
+        == (.records | map(.pr_number) | unique | length))
+      and ((.records | map(.integrated_commit) | length)
+        == (.records | map(.integrated_commit) | unique | length))
+    ' "$hitl_file" >/dev/null 2>&1; then
+      error "existing HITL integration provenance is malformed or ambiguous"
+      return 1
+    fi
+    if [[ -f "$hitl_file" ]]; then
+      local hitl_record stored_oid actual_oid
+      while IFS= read -r hitl_record; do
+        [[ -n "$hitl_record" ]] || continue
+        stored_oid=$(printf '%s\n' "$hitl_record" | jq -r '.proof_oid') \
+          || { error "could not read HITL proof identity"; return 1; }
+        actual_oid=$(printf '%s\n' "$hitl_record" | jq -cSj '.proof' \
+          | git_proof hash-object --stdin) \
+          || { error "could not recompute HITL proof identity"; return 1; }
+        [[ "$actual_oid" == "$stored_oid" ]] \
+          || { error "existing HITL integration proof identity is invalid"; return 1; }
+      done < <(jq -c '.records[]' "$hitl_file")
+    fi
+  else
+    jq -e --argjson issue "$ISSUE_NUMBER" '
+      type == "array"
+      and ([.[] | select(.number == $issue)] | length == 1)
+    ' "$queue_file" >/dev/null 2>&1 \
+      || { error "issue #$ISSUE_NUMBER is not uniquely owned by run '$RUN_ID'"; return 1; }
+    jq -e --arg issue "$ISSUE_NUMBER" --arg pr "$PR_NUMBER" '
     type == "object"
     and (.items | type == "object")
     and (.items[$issue] | type == "object")
@@ -474,9 +556,9 @@ reconcile_validate_local_evidence() {
       else false
       end
     )
-  ' "$status_file" >/dev/null 2>&1 \
-    || { error "existing status evidence is malformed or conflicts with PR #$PR_NUMBER"; return 1; }
-  if ! jq -e --arg issue "$ISSUE_NUMBER" --arg pr "$PR_NUMBER" '
+    ' "$status_file" >/dev/null 2>&1 \
+      || { error "existing status evidence is malformed or conflicts with PR #$PR_NUMBER"; return 1; }
+    if ! jq -e --arg issue "$ISSUE_NUMBER" --arg pr "$PR_NUMBER" '
     (.items[$issue].reconciliation // null) as $reconciliation
     | $reconciliation == null
       or (
@@ -529,9 +611,10 @@ reconcile_validate_local_evidence() {
           )
         )
       )
-  ' --arg RUN_ID "$RUN_ID" "$status_file" >/dev/null 2>&1; then
-    error "existing reconciliation provenance is malformed or conflicts with canonical evidence"
-    return 1
+    ' --arg RUN_ID "$RUN_ID" "$status_file" >/dev/null 2>&1; then
+      error "existing reconciliation provenance is malformed or conflicts with canonical evidence"
+      return 1
+    fi
   fi
   jq -e \
     --arg run "$RUN_ID" \
@@ -661,7 +744,7 @@ reconcile_build_proof() {
   git -C "$MAIN_REPO" check-ref-format --branch "$default_branch" >/dev/null 2>&1 \
     || { error "GitHub repository default branch is invalid"; return 1; }
   issue_json=$("$GH" issue view "$ISSUE_NUMBER" --repo "$REPO" \
-    --json number,state,stateReason,closedAt,url) \
+    --json number,state,stateReason,closedAt,labels,url) \
     || { error "GitHub issue lookup failed"; return 1; }
   printf '%s\n' "$issue_json" | jq -e \
     --argjson issue "$ISSUE_NUMBER" \
@@ -675,6 +758,14 @@ reconcile_build_proof() {
       and .url == ("https://github.com/" + $repo + "/issues/" + ($issue | tostring))
     ' >/dev/null 2>&1 \
     || { error "issue #$ISSUE_NUMBER is not closed or returned invalid evidence"; return 1; }
+  if [[ "$HITL_MODE" -eq 1 ]] && ! printf '%s\n' "$issue_json" | jq -e '
+    (.labels | type == "array")
+    and ([.labels[].name] | index("work:slice") != null)
+    and ([.labels[].name] | index("ralph:hitl") != null)
+  ' >/dev/null 2>&1; then
+    error "HITL issue #$ISSUE_NUMBER must have work:slice and ralph:hitl labels"
+    return 1
+  fi
   issue_rest_json=$("$GH" api "repos/$REPO/issues/$ISSUE_NUMBER" --jq .) \
     || { error "GitHub issue closure lookup failed"; return 1; }
   printf '%s\n' "$issue_rest_json" | jq -e \
@@ -1075,6 +1166,10 @@ reconcile_build_proof() {
   git_proof merge-base --is-ancestor "$initial_base" "$remote_tip" \
     && git_proof merge-base --is-ancestor "$owned_tip" "$remote_tip" \
     || { error "remote integration history does not descend from owned history"; return 1; }
+  if [[ "$HITL_MODE" -eq 1 && "$merge_commit" != "$remote_tip" ]]; then
+    error "PR merge commit does not equal current remote integration tip"
+    return 1
+  fi
   local settled_accounted_tip=0 settled_accounted_status=""
   local stored_reconciliation_proof=""
   if [[ "$local_ref_present" == true && "$local_tip" == "$remote_tip" ]]; then
@@ -1138,6 +1233,11 @@ reconcile_build_proof() {
   local tip_policy="exact-tip"
   local local_relation="absent" local_update="none"
   local remote_only_commits_json='[]' pr_commits_pages pr_commits_json
+  local existing_hitl_integrations='{"schema_version":1,"records":[]}'
+  if [[ -f "$run_dir/hitl-integrations.json" ]]; then
+    existing_hitl_integrations=$(jq -cS . "$run_dir/hitl-integrations.json") \
+      || { error "could not read existing HITL integration provenance"; return 1; }
+  fi
   if [[ "$local_ref_present" == true ]]; then
     rechecked_local_tip=$(git_proof rev-parse "refs/heads/$branch") \
       || { error "could not recheck local integration branch tip"; return 1; }
@@ -1189,7 +1289,7 @@ reconcile_build_proof() {
               } else empty end
             ]
           ') || { error "could not attribute remote-only integration commit"; return 1; }
-        local canonical_attributions
+        local canonical_attributions hitl_attributions
         canonical_attributions=$(jq -c \
           --arg sha "$remote_only_commit" \
           --arg issue "$ISSUE_NUMBER" '
@@ -1210,10 +1310,27 @@ reconcile_build_proof() {
             ]
           ' "$status_file") \
           || { error "could not inspect canonical integrated commit evidence"; return 1; }
+        hitl_attributions=$(printf '%s\n' "$existing_hitl_integrations" | jq -c \
+          --arg sha "$remote_only_commit" '
+            [
+              .records[]
+              | select(
+                  .integrated_commit == $sha
+                  or ((.proof.remote_only_commits // [])
+                    | map(.sha) | index($sha) != null)
+                )
+              | {
+                  kind: "operator-guarded-hitl-integration",
+                  issue_number: .issue_number,
+                  pr_number: .pr_number
+                }
+            ]
+          ') || { error "could not inspect HITL integrated commit evidence"; return 1; }
         attribution_json=$(jq -cn \
           --argjson target "$attribution_json" \
           --argjson canonical "$canonical_attributions" \
-          '$target + $canonical') \
+          --argjson hitl "$hitl_attributions" \
+          '$target + $canonical + $hitl') \
           || { error "could not combine remote-only commit attribution"; return 1; }
         attribution_count=$(printf '%s\n' "$attribution_json" | jq 'length')
         [[ "$attribution_count" -eq 1 ]] \
@@ -1230,11 +1347,21 @@ reconcile_build_proof() {
     fi
   fi
 
-  local prior_status prior_pr prior_commit integrated_at
-  prior_status=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].status' "$status_file")
-  prior_pr=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].pr_number // empty | tostring' "$status_file")
-  prior_commit=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].integrated_commit // empty' "$status_file")
-  integrated_at=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].integrated_at // empty' "$status_file")
+  local prior_status prior_pr prior_commit integrated_at proof_action
+  proof_action="reconcile-slice-integrated"
+  if [[ "$HITL_MODE" -eq 1 ]]; then
+    proof_action="record-hitl-slice-integrated"
+    prior_status=""
+    prior_pr=""
+    prior_commit=""
+    integrated_at=""
+    local_update="none"
+  else
+    prior_status=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].status' "$status_file")
+    prior_pr=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].pr_number // empty | tostring' "$status_file")
+    prior_commit=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].integrated_commit // empty' "$status_file")
+    integrated_at=$(jq -r --arg issue "$ISSUE_NUMBER" '.items[$issue].integrated_at // empty' "$status_file")
+  fi
   [[ -z "$prior_commit" || "$prior_commit" == "$merge_commit" ]] \
     || { error "existing integrated commit conflicts with PR #$PR_NUMBER"; return 1; }
 
@@ -1244,6 +1371,8 @@ reconcile_build_proof() {
     --arg prd "$PRD_NUMBER" \
     --argjson issue "$ISSUE_NUMBER" \
     --arg issue_state "$(printf '%s\n' "$issue_json" | jq -r '.state')" \
+    --argjson issue_labels "$(printf '%s\n' "$issue_json" | jq -c \
+      '[(.labels // [])[].name] | sort')" \
     --arg issue_closed_at "$(printf '%s\n' "$issue_json" | jq -r '.closedAt')" \
     --arg issue_closed_by "$(printf '%s\n' "$issue_rest_json" | jq -r '.closed_by.login')" \
     --arg issue_url "$(printf '%s\n' "$issue_json" | jq -r '.url')" \
@@ -1285,10 +1414,11 @@ reconcile_build_proof() {
     --arg prior_commit "$prior_commit" \
     --arg integrated_at "$integrated_at" \
     --arg operator_login "$operator_login" \
+    --arg proof_action "$proof_action" \
     --arg generated_at "$(date -u +%FT%TZ)" '
       {
         schema_version: 1,
-        action: "reconcile-slice-integrated",
+        action: $proof_action,
         mode: "dry-run",
         repository: $repository,
         run_id: $run,
@@ -1296,6 +1426,7 @@ reconcile_build_proof() {
         issue: {
           number: $issue,
           state: $issue_state,
+          labels: $issue_labels,
           closed_at: $issue_closed_at,
           closed_by: $issue_closed_by,
           url: $issue_url,
@@ -1374,15 +1505,18 @@ if [[ ! -f "$PROOF_FILE" ]]; then
 fi
 supplied_proof=$(jq -cS . "$PROOF_FILE") \
   || { error "proof file contains malformed JSON"; exit 1; }
+expected_action="reconcile-slice-integrated"
+[[ "$HITL_MODE" -eq 1 ]] && expected_action="record-hitl-slice-integrated"
 if ! printf '%s\n' "$supplied_proof" | jq -e \
   --arg repository "$REPO" \
   --arg run "$RUN_ID" \
   --arg prd "$PRD_NUMBER" \
   --argjson issue "$ISSUE_NUMBER" \
-  --argjson pr "$PR_NUMBER" '
+  --argjson pr "$PR_NUMBER" \
+  --arg action "$expected_action" '
     type == "object"
     and .schema_version == 1
-    and .action == "reconcile-slice-integrated"
+    and .action == $action
     and .mode == "dry-run"
     and .repository == $repository
     and .run_id == $run
@@ -1447,6 +1581,108 @@ if [[ "$current_fingerprint" != "$supplied_fingerprint" ]]; then
     error "live evidence changed after dry-run; generate and review a new proof"
     exit 1
   fi
+fi
+
+if [[ "$HITL_MODE" -eq 1 ]]; then
+  hitl_path="$STATE_DIR/runs/$RUN_ID/hitl-integrations.json"
+  merge_commit=$(printf '%s\n' "$current_proof" | jq -r '.pull_request.merge_commit')
+  branch=$(printf '%s\n' "$current_proof" | jq -r '.ownership.branch')
+  merged_at=$(printf '%s\n' "$current_proof" | jq -r '.pull_request.merged_at')
+  proof_oid=$(printf '%s' "$supplied_proof" | git_proof hash-object --stdin) \
+    || { error "could not content-address reviewed HITL proof"; exit 1; }
+  existing_hitl='{"schema_version":1,"records":[]}'
+  if [[ -f "$hitl_path" ]]; then
+    existing_hitl=$(jq -cS . "$hitl_path") \
+      || { error "could not read existing HITL integration provenance"; exit 1; }
+  fi
+  matching_record=$(printf '%s\n' "$existing_hitl" | jq -c \
+    --argjson issue "$ISSUE_NUMBER" \
+    --argjson pr "$PR_NUMBER" \
+    --arg commit "$merge_commit" '
+      [.records[] | select(
+        .issue_number == $issue
+        or .pr_number == $pr
+        or .integrated_commit == $commit
+      )]
+    ') || { error "could not inspect existing HITL integration provenance"; exit 1; }
+  if [[ "$(printf '%s\n' "$matching_record" | jq 'length')" -gt 0 ]]; then
+    if ! printf '%s\n' "$matching_record" | jq -e \
+      --argjson issue "$ISSUE_NUMBER" \
+      --argjson pr "$PR_NUMBER" \
+      --arg commit "$merge_commit" \
+      --arg branch "$branch" \
+      --arg repository "$REPO" \
+      --arg prd "$PRD_NUMBER" \
+      --arg run "$RUN_ID" '
+        length == 1
+        and .[0].issue_number == $issue
+        and .[0].pr_number == $pr
+        and .[0].integrated_commit == $commit
+        and .[0].branch == $branch
+        and .[0].repository == $repository
+        and .[0].prd_number == $prd
+        and .[0].run_id == $run
+      ' >/dev/null 2>&1; then
+      error "existing HITL integration provenance conflicts with reviewed proof"
+      exit 1
+    fi
+    result="unchanged"
+  else
+    hitl_tmp=$(mktemp "$STATE_DIR/runs/$RUN_ID/.hitl-integrations.XXXXXX") \
+      || { error "could not stage HITL integration provenance"; exit 1; }
+    if ! printf '%s\n' "$existing_hitl" | jq \
+      --arg repository "$REPO" \
+      --arg run "$RUN_ID" \
+      --arg prd "$PRD_NUMBER" \
+      --argjson issue "$ISSUE_NUMBER" \
+      --argjson pr "$PR_NUMBER" \
+      --arg branch "$branch" \
+      --arg commit "$merge_commit" \
+      --arg merged_at "$merged_at" \
+      --arg proof_oid "$proof_oid" \
+      --arg applied_at "$(date -u +%FT%TZ)" \
+      --argjson proof "$supplied_proof" '
+        .records += [{
+          source: "operator-guarded-hitl-integration",
+          repository: $repository,
+          run_id: $run,
+          prd_number: $prd,
+          issue_number: $issue,
+          pr_number: $pr,
+          branch: $branch,
+          integrated_commit: $commit,
+          merged_at: $merged_at,
+          proof_oid: $proof_oid,
+          applied_at: $applied_at,
+          proof: $proof
+        }]
+      ' >"$hitl_tmp"; then
+      rm -f "$hitl_tmp"
+      error "could not prepare HITL integration provenance"
+      exit 1
+    fi
+    mv "$hitl_tmp" "$hitl_path" \
+      || { rm -f "$hitl_tmp"; error "could not atomically record HITL integration provenance"; exit 1; }
+    result="recorded"
+  fi
+  jq -n \
+    --arg result "$result" \
+    --arg run "$RUN_ID" \
+    --argjson issue "$ISSUE_NUMBER" \
+    --argjson pr "$PR_NUMBER" \
+    --arg commit "$merge_commit" '
+      {
+        schema_version: 1,
+        action: "record-hitl-slice-integrated",
+        mode: "apply",
+        result: $result,
+        run_id: $run,
+        issue_number: $issue,
+        pr_number: $pr,
+        integrated_commit: $commit
+      }
+    '
+  exit 0
 fi
 
 status_path=$(status_file "$RUN_ID")

@@ -362,6 +362,15 @@ published PRD branch. Legacy local-only branches can still be retired when all
 guards pass and the local ref equals its frozen base. Any unprovable condition
 stops recovery without adopting, resetting, or deleting the branch.
 
+For an approved `work:slice` + `ralph:hitl` issue merged outside a Ralph queue,
+operators can use `.ralph/reconcile-slice.sh --hitl` with the normal reviewed
+dry-run/proof/apply flow. The command records content-addressed provenance in
+the prior run's `hitl-integrations.json` without changing queue or worker
+status. A later ownership transfer accepts only an exact remote tip whose
+first-parent advancements are all uniquely accounted for by canonical Ralph
+slice integrations and/or these guarded HITL records. See
+[Recovery Operations](docs/recovery-operations.md#approved-hitl-slice-integration).
+
 ### Per-worktree loops
 
 You can install and run an independent Ralph loop in each git worktree of a
