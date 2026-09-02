@@ -32,6 +32,24 @@ assert_dry_run_rejected() {
     || fail "rejection should explain '$expected' (got: $output)"
 }
 
+assert_hitl_dry_run_rejected() {
+  local repo="$1" bin="$2" run_id="$3" expected="$4"
+  shift 4
+  local output
+  if output=$(
+    env "$@" \
+      RALPH_MAIN_REPO="$repo" \
+      RALPH_REPO="test/example" \
+      RALPH_GH_BIN="$bin/gh" \
+      "$REPO_ROOT/ralph/reconcile-slice.sh" \
+        --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run 2>&1
+  ); then
+    fail "$expected should be rejected for HITL recovery"
+  fi
+  grep -Fqi "$expected" <<<"$output" \
+    || fail "HITL rejection should explain '$expected' (got: $output)"
+}
+
 create_fixture() {
   local name="$1"
   local root="$TEST_ROOT/$name"
@@ -123,7 +141,9 @@ merged_at="2026-08-25T20:00:00Z"
   && merged_at="2026-08-25T21:00:00Z"
 if [[ "\$1 \$2 \$3" == "issue view 507" ]]; then
   case "\${GH_ISSUE_MODE:-closed}" in
-    closed) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"test-owner"},"authorAssociation":"OWNER","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T20:01:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    closed) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"labels":[{"name":"work:slice"},{"name":"ralph:hitl"}],"comments":[{"author":{"login":"test-owner"},"authorAssociation":"OWNER","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T20:01:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    missing-hitl-label) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","labels":[{"name":"work:slice"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
+    wrong-label) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","labels":[{"name":"work:slice"},{"name":"ralph:ready"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
     closed-by-pr) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[{"number":533}],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
     no-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[],"url":"https://github.com/test/example/issues/507"}\n' ;;
     untrusted-closure) printf '{"number":507,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T20:05:00Z","closedByPullRequestsReferences":[],"comments":[{"author":{"login":"outside-user"},"authorAssociation":"CONTRIBUTOR","body":"Merged via PR #533 into \`$branch\`.","createdAt":"2026-08-25T20:01:00Z"}],"url":"https://github.com/test/example/issues/507"}\n' ;;
@@ -164,6 +184,7 @@ if [[ "\$1 \$2 \$3" == "pr view 533" ]]; then
     closing-ref) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}],"body":"","url":"https://github.com/test/example/pull/533"}\n' ;;
     cross-repo-ref) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"attacker"}},"url":"https://github.com/attacker/example/issues/507"}],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
     wrong-base) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"main","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
+    wrong-number) printf '{"number":999,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/999"}\n' ;;
     wrong-link) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":999,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/999"}],"body":"Closes #999","url":"https://github.com/test/example/pull/533"}\n' ;;
     wrong-head) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"feature-unrelated","headRepository":{"nameWithOwner":"test/example"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
     wrong-head-repo) printf '{"number":533,"state":"MERGED","mergedAt":"2026-08-25T20:00:00Z","baseRefName":"$branch","headRefName":"slice-507-safe-canonical-parent-hierarchy","headRepository":{"nameWithOwner":"attacker/fork"},"mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[],"body":"Closes #507","url":"https://github.com/test/example/pull/533"}\n' ;;
@@ -178,6 +199,11 @@ if [[ "\$1 \$2 \$3" == "pr view 534" && -n "\${GH_DESCENDANT_COMMIT:-}" ]]; then
   exit 0
 fi
 if [[ "\$1 \$2" == "pr list" ]]; then
+  if [[ "\${GH_TRANSFER_MODE:-}" == "ownership" ]] \
+    && [[ " \$* " == *" --head $branch "* ]]; then
+    printf '[]\n'
+    exit 0
+  fi
   case "\${GH_PR_MODE:-merged}" in
     closing-ref)
       printf '[{"number":533,"state":"MERGED","baseRefName":"$branch","mergeCommit":{"oid":"$merge_commit"},"closingIssuesReferences":[{"number":507,"repository":{"name":"example","owner":{"login":"test"}},"url":"https://github.com/test/example/issues/507"}],"body":""}]\n'
@@ -1774,3 +1800,438 @@ jq -e '.items["507"].reconciliation.previous_status == "failed"' \
   "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
   || fail "failed apply should preserve previous status provenance"
 echo "PASS: failed delivery accepts exact proof and rejects conflicting local evidence"
+
+echo ""
+echo "Test 42: guarded HITL provenance accounts for an unowned integration"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-delivery)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {
+    "508": {
+      status: "slice-integrated",
+      pr_number: "534",
+      integrated_commit: $commit,
+      integrated_at: "2026-08-25T19:00:00Z",
+      pid: null
+    }
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+
+if (
+  cd "$repo"
+  LOG_DIR="$repo/.ralph/logs"
+  REPO="test/example"
+  . "$REPO_ROOT/ralph/lib/state.sh"
+  . "$REPO_ROOT/ralph/lib/prd-branch.sh"
+  prd_terminal_remote_tip_is_proven "$run_id" "$merge_commit"
+); then
+  fail "unrecorded HITL advancement must reproduce the terminal transfer blocker"
+fi
+
+hitl_proof_file="$TEST_ROOT/hitl-delivery/proof.json"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$hitl_proof_file" \
+  || fail "approved HITL integration should produce a guarded proof"
+RALPH_MAIN_REPO="$repo" \
+RALPH_REPO="test/example" \
+RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 \
+    --apply --proof "$hitl_proof_file" >/dev/null \
+  || fail "approved HITL integration should apply its exact proof"
+
+jq -e 'map(.number) == [508]' "$repo/.ralph/runs/$run_id/queue.json" >/dev/null \
+  || fail "HITL recovery must not forge queue ownership"
+jq -e '.items["507"] == null' "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "HITL recovery must not forge canonical worker status"
+jq -e \
+  --arg commit "$merge_commit" '
+    .schema_version == 1
+    and (.records | length) == 1
+    and .records[0].source == "operator-guarded-hitl-integration"
+    and .records[0].issue_number == 507
+    and .records[0].pr_number == 533
+    and .records[0].integrated_commit == $commit
+    and (.records[0].proof.issue.labels
+      | sort == ["ralph:hitl", "work:slice"])
+    and (.records[0].proof_oid | type == "string" and length > 0)
+  ' "$repo/.ralph/runs/$run_id/hitl-integrations.json" >/dev/null \
+  || fail "HITL recovery should write separate content-addressed provenance"
+(
+  cd "$repo"
+  LOG_DIR="$repo/.ralph/logs"
+  REPO="test/example"
+  . "$REPO_ROOT/ralph/lib/state.sh"
+  . "$REPO_ROOT/ralph/lib/prd-branch.sh"
+  prd_terminal_remote_tip_is_proven "$run_id" "$merge_commit"
+) || fail "guarded HITL provenance should account for the exact terminal remote tip"
+echo "PASS: unowned HITL delivery is separately recorded and accepted"
+
+echo ""
+echo "Test 43: HITL recovery rejects mismatched approval and delivery evidence"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-evidence-matrix)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {
+    "508": {
+      status: "slice-integrated",
+      pr_number: "534",
+      integrated_commit: $commit,
+      integrated_at: "2026-08-25T19:00:00Z",
+      pid: null
+    }
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "work:slice and ralph:hitl labels" GH_ISSUE_MODE=missing-hitl-label
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "work:slice and ralph:hitl labels" GH_ISSUE_MODE=wrong-label
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "not closed" GH_ISSUE_MODE=open
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "not merged" GH_PR_MODE=open
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "not merged into owned branch" GH_PR_MODE=wrong-base
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "not merged or returned invalid evidence" GH_PR_MODE=wrong-number
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "literal closing directive" GH_PR_BODY_MODE=wrong-issue
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "integration closure comment" GH_COMMENT_MODE=wrong-pr
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "integration closure comment" GH_COMMENT_MODE=wrong-branch
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "invalid evidence" GH_PR_TIME_MODE=future
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "comment actor is not authorized" GH_PERMISSION_MODE=read
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "another open delivery PR" GH_OPEN_PRS_MODE=body-conflict
+[[ ! -e "$repo/.ralph/runs/$run_id/hitl-integrations.json" ]] \
+  || fail "rejected HITL dry-runs must not create provenance"
+echo "PASS: HITL approval, PR, branch, body, comment, time, actor, and conflict mismatches fail closed"
+
+echo ""
+echo "Test 44: HITL apply is proof-bound and leaves no mutation on stale evidence"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-stale-proof)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {
+    "508": {
+      status: "slice-integrated",
+      pr_number: "534",
+      integrated_commit: $commit,
+      integrated_at: "2026-08-25T19:00:00Z",
+      pid: null
+    }
+  }
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+hitl_proof_file="$TEST_ROOT/hitl-stale-proof/proof.json"
+RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$hitl_proof_file" \
+  || fail "valid HITL evidence should produce the stale-proof fixture"
+queue_before=$(git -C "$repo" hash-object ".ralph/runs/$run_id/queue.json")
+status_before=$(git -C "$repo" hash-object ".ralph/runs/$run_id/status.json")
+if GH_COMMENT_MODE=edited \
+  RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 \
+    --apply --proof "$hitl_proof_file" >/dev/null 2>&1; then
+  fail "stale HITL proof should be rejected"
+fi
+[[ "$queue_before" == "$(git -C "$repo" hash-object ".ralph/runs/$run_id/queue.json")" \
+  && "$status_before" == "$(git -C "$repo" hash-object ".ralph/runs/$run_id/status.json")" \
+  && ! -e "$repo/.ralph/runs/$run_id/hitl-integrations.json" ]] \
+  || fail "failed HITL apply must not mutate queue, status, or provenance"
+echo "PASS: stale HITL proof fails without mutation"
+
+echo ""
+echo "Test 45: moved tips and active Ralph state invalidate HITL recovery"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-moving-tip)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {"508":{
+    status:"slice-integrated",pr_number:"534",integrated_commit:$commit,
+    integrated_at:"2026-08-25T19:00:00Z",pid:null
+  }}
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+hitl_proof_file="$TEST_ROOT/hitl-moving-tip/proof.json"
+RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$hitl_proof_file"
+git -C "$repo" checkout -q "$branch"
+printf 'unaccounted movement\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "unaccounted movement"
+git -C "$repo" push -q origin "$branch"
+git -C "$repo" checkout -q main
+if RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 \
+    --apply --proof "$hitl_proof_file" >/dev/null 2>&1; then
+  fail "moved remote tip should invalidate HITL proof"
+fi
+[[ ! -e "$repo/.ralph/runs/$run_id/hitl-integrations.json" ]] \
+  || fail "moved-tip rejection must not record HITL provenance"
+
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-live-claim)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {"508":{
+    status:"slice-integrated",pr_number:"534",integrated_commit:$commit,
+    integrated_at:"2026-08-25T19:00:00Z",pid:null
+  }}
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+printf '{"claims":{"507":{"workerId":1,"pid":%s}},"active_prd":"505","active_run_id":"%s"}\n' \
+  "$$" "$run_id" >"$repo/.ralph/state.json"
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" "claimed"
+
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-live-worker)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {"508":{
+    status:"slice-integrated",pr_number:"534",integrated_commit:$commit,
+    integrated_at:"2026-08-25T19:00:00Z",pid:null
+  }}
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+cat >"$repo/.ralph/ralph.sh" <<'EOF'
+#!/usr/bin/env bash
+sleep 30
+EOF
+chmod +x "$repo/.ralph/ralph.sh"
+"$repo/.ralph/ralph.sh" &
+live_pid=$!
+sleep 0.2
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "launcher or worker is still active"
+kill "$live_pid" 2>/dev/null || true
+wait "$live_pid" 2>/dev/null || true
+echo "PASS: moved tips, live claims, and live workers reject HITL recovery"
+
+echo ""
+echo "Test 46: terminal transfer accepts sequential accounted HITL integrations only"
+IFS='|' read -r repo bin run_id branch base first_merge < <(create_fixture hitl-sequential)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {"508":{
+    status:"slice-integrated",pr_number:"534",integrated_commit:$commit,
+    integrated_at:"2026-08-25T19:00:00Z",pid:null
+  }}
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+first_proof="$TEST_ROOT/hitl-sequential/first-proof.json"
+RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 --dry-run \
+    >"$first_proof"
+RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" RALPH_GH_BIN="$bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 507 --pr 533 \
+    --apply --proof "$first_proof" >/dev/null
+
+git -C "$repo" checkout -qb slice-509 "$branch"
+printf 'second approved HITL slice\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "slice 509"
+second_slice=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" checkout -q "$branch"
+git -C "$repo" merge -q --no-ff slice-509 -m "Merge PR 535"
+second_merge=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" push -q origin "$branch"
+git -C "$repo" checkout -q main
+sequential_bin="$TEST_ROOT/hitl-sequential/sequential-bin"
+mkdir -p "$sequential_bin"
+cat >"$sequential_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${GH_TRANSFER_MODE:-}" == "ownership" && "$1 $2" == "pr list" \
+  && " $* " == *" --head $SEQ_BRANCH "* ]]; then
+  printf '[]\n'
+elif [[ "$1 $2 $3" == "issue view 509" ]]; then
+  printf '{"number":509,"state":"CLOSED","stateReason":"COMPLETED","closedAt":"2026-08-25T22:05:00Z","labels":[{"name":"work:slice"},{"name":"ralph:hitl"}],"url":"https://github.com/test/example/issues/509"}\n'
+elif [[ "$1 $2 $3" == "pr view 535" ]]; then
+  jq -cn --arg branch "$SEQ_BRANCH" --arg commit "$SEQ_COMMIT" '{
+    number:535,state:"MERGED",mergedAt:"2026-08-25T22:00:00Z",
+    baseRefName:$branch,headRefName:"slice-509-approved",
+    headRepository:{nameWithOwner:"test/example"},
+    mergeCommit:{oid:$commit},closingIssuesReferences:[],
+    body:"Closes #509",url:"https://github.com/test/example/pull/535"
+  }'
+elif [[ "$1 $2" == "pr list" ]]; then
+  jq -cn --arg branch "$SEQ_BRANCH" --arg commit "$SEQ_COMMIT" '[{
+    number:535,state:"MERGED",baseRefName:$branch,
+    mergeCommit:{oid:$commit},closingIssuesReferences:[],body:"Closes #509"
+  }]'
+elif [[ "$1 $2" == "api --paginate" ]]; then
+  printf '[[]]\n'
+elif [[ "$1" == "api" && "$2" == "repos/test/example/issues/509" ]]; then
+  printf '{"number":509,"state":"closed","state_reason":"completed","closed_at":"2026-08-25T22:05:00Z","closed_by":{"login":"test-owner"},"html_url":"https://github.com/test/example/issues/509","repository_url":"https://api.github.com/repos/test/example"}\n'
+elif [[ "$1" == "api" && "$2" == "repos/test/example/issues/509/comments?per_page=100" ]]; then
+  jq -cn --arg branch "$SEQ_BRANCH" '[[{
+    id:9001,
+    html_url:"https://github.com/test/example/issues/509#issuecomment-9001",
+    user:{login:"test-owner"},
+    created_at:"2026-08-25T22:05:00Z",
+    updated_at:"2026-08-25T22:05:00Z",
+    body:("Merged via PR #535 into `" + $branch + "`."),
+    author_association:"OWNER"
+  }]]'
+elif [[ "$1" == "api" && "$2" == "repos/test/example/pulls/535/commits?per_page=100" ]]; then
+  jq -cn --arg commit "$SEQ_SLICE_COMMIT" '[[{sha:$commit}]]'
+else
+  exec "$ORIGINAL_GH" "$@"
+fi
+EOF
+chmod +x "$sequential_bin/gh"
+second_proof_file="$TEST_ROOT/hitl-sequential/second-proof.json"
+SEQ_BRANCH="$branch" SEQ_COMMIT="$second_merge" \
+SEQ_SLICE_COMMIT="$second_slice" ORIGINAL_GH="$bin/gh" \
+RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" \
+RALPH_GH_BIN="$sequential_bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 509 --pr 535 --dry-run \
+    >"$second_proof_file" \
+  || fail "second sequential HITL integration should produce an accounted proof"
+SEQ_BRANCH="$branch" SEQ_COMMIT="$second_merge" \
+SEQ_SLICE_COMMIT="$second_slice" ORIGINAL_GH="$bin/gh" \
+RALPH_MAIN_REPO="$repo" RALPH_REPO="test/example" \
+RALPH_GH_BIN="$sequential_bin/gh" \
+  "$REPO_ROOT/ralph/reconcile-slice.sh" \
+    --hitl --run "$run_id" --prd 505 --issue 509 --pr 535 \
+    --apply --proof "$second_proof_file" >/dev/null \
+  || fail "second sequential HITL integration should apply against prior provenance"
+(
+  cd "$repo"
+  LOG_DIR="$repo/.ralph/logs"
+  REPO="test/example"
+  . "$REPO_ROOT/ralph/lib/state.sh"
+  . "$REPO_ROOT/ralph/lib/prd-branch.sh"
+  prd_terminal_remote_tip_is_proven "$run_id" "$second_merge"
+) || fail "multiple sequential guarded HITL integrations should be fully accounted"
+
+new_run_id="20260825-hitl-successor"
+(
+  cd "$repo"
+  LOG_DIR="$repo/.ralph/logs"
+  REPO="test/example"
+  GH="$sequential_bin/gh"
+  export GH_TRANSFER_MODE=ownership
+  export SEQ_BRANCH="$branch" SEQ_COMMIT="$second_merge"
+  export SEQ_SLICE_COMMIT="$second_slice" ORIGINAL_GH="$bin/gh"
+  . "$REPO_ROOT/ralph/lib/state.sh"
+  . "$REPO_ROOT/ralph/lib/prd-branch.sh"
+  transfer_owned_prd_branch "$run_id" "$new_run_id"
+) >/dev/null || fail "terminal ownership transfer should accept the exactly accounted tip"
+jq -e --arg tip "$second_merge" --arg run "$new_run_id" '
+  .run_id == $run and .owned_tip_sha == $tip
+' "$repo/.ralph/runs/$new_run_id/ownership.json" >/dev/null \
+  || fail "successor ownership should bind the exact accounted remote tip"
+
+git -C "$repo" checkout -q "$branch"
+printf 'unknown descendant\n' >>"$repo/README.md"
+git -C "$repo" commit -qam "unknown descendant"
+unknown_tip=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" checkout -q main
+if (
+  cd "$repo"
+  LOG_DIR="$repo/.ralph/logs"
+  REPO="test/example"
+  . "$REPO_ROOT/ralph/lib/state.sh"
+  . "$REPO_ROOT/ralph/lib/prd-branch.sh"
+  prd_terminal_remote_tip_is_proven "$run_id" "$unknown_tip"
+); then
+  fail "unknown descendant must not be accepted after accounted integrations"
+fi
+echo "PASS: sequential accounted integrations transfer exactly and unknown descendants fail"
+
+echo ""
+echo "Test 47: terminal ownership proof rejects locally rewritten Git history"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-graph-tamper)
+printf '[{"number":507,"title":"Terminal integrated slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$merge_commit" '
+  .items = {"507":{
+    status:"slice-integrated",pr_number:"533",integrated_commit:$commit,
+    integrated_at:"2026-08-25T19:00:00Z",pid:null
+  }}
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+replacement_tree=$(git -C "$repo" rev-parse "${merge_commit}^{tree}")
+replacement_commit=$(printf 'replacement graph\n' \
+  | git -C "$repo" commit-tree "$replacement_tree" -p "$base")
+git -C "$repo" replace "$merge_commit" "$replacement_commit"
+if (
+  cd "$repo"
+  LOG_DIR="$repo/.ralph/logs"
+  REPO="test/example"
+  . "$REPO_ROOT/ralph/lib/state.sh"
+  . "$REPO_ROOT/ralph/lib/prd-branch.sh"
+  prd_terminal_remote_tip_is_proven "$run_id" "$merge_commit"
+); then
+  fail "replacement refs must not rewrite terminal ownership attribution"
+fi
+jq -e --arg commit "$merge_commit" '
+  .items["507"].integrated_commit == $commit
+' "$repo/.ralph/runs/$run_id/status.json" >/dev/null \
+  || fail "graph tampering rejection must not mutate terminal evidence"
+echo "PASS: replacement refs cannot rewrite terminal ownership attribution"
+
+echo ""
+echo "Test 48: HITL recovery requires the target merge to be the exact remote tip"
+IFS='|' read -r repo bin run_id branch base merge_commit < <(create_fixture hitl-later-tip)
+printf '[{"number":508,"title":"Ralph-owned terminal slice"}]\n' \
+  >"$repo/.ralph/runs/$run_id/queue.json"
+jq --arg commit "$base" '
+  .items = {"508":{
+    status:"slice-integrated",pr_number:"534",integrated_commit:$commit,
+    integrated_at:"2026-08-25T19:00:00Z",pid:null
+  }}
+' "$repo/.ralph/runs/$run_id/status.json" \
+  >"$repo/.ralph/runs/$run_id/status.tmp"
+mv "$repo/.ralph/runs/$run_id/status.tmp" \
+  "$repo/.ralph/runs/$run_id/status.json"
+writer="$TEST_ROOT/hitl-later-tip/writer"
+git clone -q --branch "$branch" "$TEST_ROOT/hitl-later-tip/origin.git" "$writer"
+git -C "$writer" config user.email "test@example.com"
+git -C "$writer" config user.name "Test"
+printf 'later unreviewed advancement\n' >>"$writer/README.md"
+git -C "$writer" commit -qam "later unreviewed advancement"
+git -C "$writer" push -q origin "$branch"
+assert_hitl_dry_run_rejected "$repo" "$bin" "$run_id" \
+  "PR merge commit does not equal current remote integration tip"
+[[ ! -e "$repo/.ralph/runs/$run_id/hitl-integrations.json" ]] \
+  || fail "later-tip rejection must not record HITL provenance"
+echo "PASS: HITL recovery rejects a target merge behind the remote tip"

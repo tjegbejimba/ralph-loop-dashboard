@@ -58,9 +58,9 @@ the following are positively proven:
   ancestor that can be compare-and-swap fast-forwarded after transfer.
 - The remote tip still equals the run's owned tip and descends from the
   immutable initial base. Zero-registration recovery never adopts later remote
-  movement; terminal recovery accepts a later tip only when it exactly matches
-  a recorded `slice-integrated` commit and every recorded integrated commit is
-  in that tip's history.
+  movement; terminal recovery accepts a later tip only when every first-parent
+  advancement is uniquely attributed to canonical `slice-integrated` evidence
+  or separately recorded, operator-guarded HITL integration evidence.
 
 Missing or malformed evidence fails closed. Terminal runs retain their existing
 transfer path, which may preserve delivered commits beyond the tip owned at
@@ -255,6 +255,61 @@ completion returns `unchanged` without rewriting status. While the intent is
 pending, a new dry-run also fails closed and directs the operator to reapply the
 original reviewed proof stored in canonical reconciliation evidence; it cannot
 produce a no-op proof that leaves the pending intent unresolved.
+
+## Approved HITL Slice Integration
+
+Use the same command with `--hitl` when an approved `ralph:hitl` slice was
+merged interactively into a terminal run's owned PRD integration branch. This
+mode is only for an issue that was never in that run's queue and has no
+canonical worker status. It does not add the issue to `queue.json` or
+`status.json`, and it does not claim that Ralph delivered the slice.
+
+```bash
+proof_file="$(mktemp "${TMPDIR:-/tmp}/ralph-hitl-513.XXXXXX.json")"
+
+.ralph/reconcile-slice.sh \
+  --hitl \
+  --run 20260830-210025-e9b13095 \
+  --prd 505 \
+  --issue 513 \
+  --pr 553 \
+  --dry-run >"$proof_file"
+
+# Review every identity, SHA, timestamp, actor, comment, and attribution.
+jq . "$proof_file"
+
+.ralph/reconcile-slice.sh \
+  --hitl \
+  --run 20260830-210025-e9b13095 \
+  --prd 505 \
+  --issue 513 \
+  --pr 553 \
+  --apply \
+  --proof "$proof_file"
+```
+
+In addition to the legacy reconciliation checks above, HITL mode requires both
+`work:slice` and `ralph:hitl`, zero queue ownership for the issue, and no status
+item for it. Apply revalidates the exact reviewed proof under the setup and
+state locks, then atomically appends a content-addressed record to
+`.ralph/runs/<run-id>/hitl-integrations.json`. Existing records must have unique
+issue, PR, and merge-commit identities and valid proof hashes.
+Each HITL proof requires its PR merge commit to equal the exact current remote
+tip. Record sequential HITL integrations in merge order; do not use a later
+remote tip to retroactively prove an earlier merge.
+
+Terminal ownership transfer reads this file as separate provenance. It accepts
+the current remote tip only when every first-parent advancement after
+`owned_tip_sha` has exactly one canonical Ralph or guarded HITL attribution.
+This permits multiple sequential, fully accounted integrations while rejecting
+unknown or multiply attributed descendants. Transfer snapshots both status and
+HITL provenance and rejects either changing under its lock. Local replacement
+refs, legacy grafts, and shallow history are also rejected so local Git graph
+rewrites cannot hide an unaccounted advancement.
+
+Do not use `--hitl` for queued work, generic descendants, open or conflicting
+delivery PRs, or to repair missing approval evidence. A rejected dry-run or
+failed apply does not mutate queue, status, ownership, or HITL provenance.
 
 ## Stale Worker Reconciliation
 

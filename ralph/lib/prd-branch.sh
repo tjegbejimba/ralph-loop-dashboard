@@ -297,39 +297,141 @@ prd_run_is_terminal() {
   ' "$queue_file" >/dev/null 2>&1
 }
 
+prd_git_proof() {
+  GIT_NO_REPLACE_OBJECTS=1 git "$@"
+}
+
+prd_assert_unmodified_graph() {
+  local repo_root common_git_dir replacement_ref shallow
+  repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
+  common_git_dir=$(git rev-parse --git-common-dir 2>/dev/null) || return 1
+  case "$common_git_dir" in
+    /*|[A-Za-z]:/*) ;;
+    *) common_git_dir="$repo_root/$common_git_dir" ;;
+  esac
+  common_git_dir=$(cd "$common_git_dir" 2>/dev/null && pwd -P) || return 1
+  replacement_ref=$(prd_git_proof for-each-ref \
+    --format='%(refname)' refs/replace 2>/dev/null) || return 1
+  [[ -z "$replacement_ref" ]] || {
+    echo "ERROR: Replacement refs are not permitted during PRD ownership proof" >&2
+    return 1
+  }
+  [[ ! -e "$common_git_dir/info/grafts" ]] || {
+    echo "ERROR: Legacy grafts are not permitted during PRD ownership proof" >&2
+    return 1
+  }
+  shallow=$(prd_git_proof rev-parse --is-shallow-repository 2>/dev/null) || return 1
+  [[ "$shallow" == "false" ]] || {
+    echo "ERROR: Shallow history is not permitted during PRD ownership proof" >&2
+    return 1
+  }
+}
+
 # prd_terminal_remote_tip_is_proven RUN_ID REMOTE_TIP
-# Proves that terminal slice-integration evidence accounts for the exact remote
-# tip. A descendant commit not recorded as an integrated slice is ambiguous.
+# Proves that every first-parent advancement from the run-owned tip to the exact
+# remote tip has one canonical Ralph or operator-guarded HITL attribution.
 prd_terminal_remote_tip_is_proven() {
   local run_id="$1"
   local remote_tip="$2"
-  local status_file="$STATE_DIR/runs/$run_id/status.json"
-  local commits commit
+  local run_dir="$STATE_DIR/runs/$run_id"
+  local ownership_file="$run_dir/ownership.json"
+  local status_file="$run_dir/status.json"
+  local hitl_file="$run_dir/hitl-integrations.json"
+  local hitl_doc='{"schema_version":1,"records":[]}'
+  local owned_tip prd_number branch commits commit attribution_count
 
-  [[ -f "$status_file" ]] || return 1
-  if ! jq -e --arg remote_tip "$remote_tip" '
+  [[ -f "$status_file" && -f "$ownership_file" ]] || return 1
+  prd_assert_unmodified_graph || return 1
+  owned_tip=$(jq -r '.owned_tip_sha // empty' "$ownership_file" 2>/dev/null) || return 1
+  prd_number=$(jq -r '.prd_number // empty' "$ownership_file" 2>/dev/null) || return 1
+  branch=$(jq -r '.branch_name // empty' "$ownership_file" 2>/dev/null) || return 1
+  [[ "$owned_tip" =~ ^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$ ]] || return 1
+  if [[ -f "$hitl_file" ]]; then
+    hitl_doc=$(jq -cS . "$hitl_file") || return 1
+  fi
+  jq -e '
     type == "object"
     and (.items | type == "object")
-    and (([.items[] | select(.status == "slice-integrated")]) as $integrated
-      | ($integrated | length) > 0
-        and all($integrated[];
-          (.integrated_commit
-            | type == "string"
-              and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$")))
-        and any($integrated[]; .integrated_commit == $remote_tip))
-  ' "$status_file" >/dev/null 2>&1; then
-    return 1
-  fi
+    and all(.items[] | select(.status == "slice-integrated");
+      (.integrated_commit
+        | type == "string"
+          and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$")))
+  ' "$status_file" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$hitl_doc" | jq -e \
+    --arg repository "$REPO" \
+    --arg run "$run_id" \
+    --arg prd "$prd_number" \
+    --arg branch "$branch" '
+    type == "object"
+    and .schema_version == 1
+    and (.records | type == "array")
+    and all(.records[];
+      type == "object"
+      and .source == "operator-guarded-hitl-integration"
+      and .repository == $repository
+      and .run_id == $run
+      and .prd_number == $prd
+      and .branch == $branch
+      and (.issue_number | type == "number" and . > 0)
+      and (.pr_number | type == "number" and . > 0)
+      and (.integrated_commit
+        | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+      and (.proof_oid
+        | type == "string" and test("^([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})$"))
+      and (.proof | type == "object")
+      and .proof.action == "record-hitl-slice-integrated"
+      and .proof.mode == "dry-run"
+      and .proof.issue.state == "CLOSED"
+      and (.proof.issue.labels | type == "array")
+      and (.proof.issue.labels | index("work:slice") != null)
+      and (.proof.issue.labels | index("ralph:hitl") != null)
+      and .proof.run_id == .run_id
+      and .proof.repository == .repository
+      and .proof.prd_number == .prd_number
+      and .proof.issue.number == .issue_number
+      and .proof.pull_request.number == .pr_number
+      and .proof.pull_request.merge_commit == .integrated_commit
+      and .proof.pull_request.base == .branch
+      and .proof.remote.tip == .integrated_commit
+      and .proof.ownership.branch == .branch)
+    and ((.records | map(.issue_number) | length)
+      == (.records | map(.issue_number) | unique | length))
+    and ((.records | map(.pr_number) | length)
+      == (.records | map(.pr_number) | unique | length))
+    and ((.records | map(.integrated_commit) | length)
+      == (.records | map(.integrated_commit) | unique | length))
+  ' >/dev/null 2>&1 || return 1
 
-  commits=$(jq -r '
-    .items[]
-    | select(.status == "slice-integrated")
-    | .integrated_commit
-  ' "$status_file") || return 1
+  local record stored_oid actual_oid
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    stored_oid=$(printf '%s\n' "$record" | jq -r '.proof_oid') || return 1
+    actual_oid=$(printf '%s\n' "$record" | jq -cSj '.proof' \
+      | git hash-object --stdin) || return 1
+    [[ "$actual_oid" == "$stored_oid" ]] || return 1
+  done < <(printf '%s\n' "$hitl_doc" | jq -c '.records[]')
+
+  prd_git_proof cat-file -e "${owned_tip}^{commit}" 2>/dev/null || return 1
+  prd_git_proof cat-file -e "${remote_tip}^{commit}" 2>/dev/null || return 1
+  prd_git_proof merge-base --is-ancestor "$owned_tip" "$remote_tip" || return 1
+  commits=$(prd_git_proof rev-list --first-parent --reverse \
+    "$owned_tip..$remote_tip") || return 1
+  [[ -n "$commits" ]] || return 1
   while IFS= read -r commit; do
     [[ -n "$commit" ]] || continue
-    git cat-file -e "${commit}^{commit}" 2>/dev/null || return 1
-    git merge-base --is-ancestor "$commit" "$remote_tip" || return 1
+    attribution_count=$(
+      jq -n \
+        --slurpfile status "$status_file" \
+        --argjson hitl "$hitl_doc" \
+        --arg commit "$commit" '
+          ([$status[0].items[]
+            | select(.status == "slice-integrated"
+              and .integrated_commit == $commit)] | length)
+          + ([$hitl.records[]
+            | select(.integrated_commit == $commit)] | length)
+        '
+    ) || return 1
+    [[ "$attribution_count" -eq 1 ]] || return 1
   done <<<"$commits"
 }
 
@@ -978,7 +1080,7 @@ transfer_owned_prd_branch() {
     return 1
   }
 
-  local transfer_reason status_expected=""
+  local transfer_reason status_expected="" hitl_expected="" hitl_present=0
   if prd_run_is_terminal "$owner_run_id"; then
     transfer_reason="terminal PRD ownership transferred"
     status_expected=$(jq -cS . "$STATE_DIR/runs/$owner_run_id/status.json") || return 1
@@ -987,6 +1089,11 @@ transfer_owned_prd_branch() {
   else
     echo "ERROR: Run '$owner_run_id' is not terminal and cannot transfer '$branch_name'" >&2
     return 1
+  fi
+  if [[ -f "$STATE_DIR/runs/$owner_run_id/hitl-integrations.json" ]]; then
+    hitl_present=1
+    hitl_expected=$(jq -cS . \
+      "$STATE_DIR/runs/$owner_run_id/hitl-integrations.json") || return 1
   fi
   if prd_run_has_live_worker "$owner_run_id"; then
     echo "ERROR: Run '$owner_run_id' still has a live worker; refusing transfer" >&2
@@ -1042,10 +1149,11 @@ transfer_owned_prd_branch() {
     return 1
   fi
   prd_report_startup_phase "prd-transfer-verifying-history"
-  if ! git cat-file -e "${frozen_base}^{commit}" 2>/dev/null \
-    || ! git cat-file -e "${owned_tip}^{commit}" 2>/dev/null \
-    || ! git merge-base --is-ancestor "$frozen_base" "$remote_tip" \
-    || ! git merge-base --is-ancestor "$owned_tip" "$remote_tip"; then
+  prd_assert_unmodified_graph || return 1
+  if ! prd_git_proof cat-file -e "${frozen_base}^{commit}" 2>/dev/null \
+    || ! prd_git_proof cat-file -e "${owned_tip}^{commit}" 2>/dev/null \
+    || ! prd_git_proof merge-base --is-ancestor "$frozen_base" "$remote_tip" \
+    || ! prd_git_proof merge-base --is-ancestor "$owned_tip" "$remote_tip"; then
     echo "ERROR: Remote branch '$remote/$branch_name' does not descend from owned history" >&2
     return 1
   fi
@@ -1065,13 +1173,13 @@ transfer_owned_prd_branch() {
     if [[ "$local_tip" != "$remote_tip" ]]; then
       local local_lag_is_proven=0
       if [[ "$transfer_reason" == "terminal PRD ownership transferred" ]] \
-        && git merge-base --is-ancestor "$owned_tip" "$local_tip" \
-        && git merge-base --is-ancestor "$local_tip" "$remote_tip"; then
+        && prd_git_proof merge-base --is-ancestor "$owned_tip" "$local_tip" \
+        && prd_git_proof merge-base --is-ancestor "$local_tip" "$remote_tip"; then
         local_lag_is_proven=1
       elif [[ "$transfer_reason" == "zero-registration PRD ownership transferred" ]] \
         && prd_transferred_ownership_is_proven \
           "$owner_run_id" "$branch_name" "$owned_tip" \
-        && git merge-base --is-ancestor "$local_tip" "$owned_tip"; then
+        && prd_git_proof merge-base --is-ancestor "$local_tip" "$owned_tip"; then
         local_lag_is_proven=1
       fi
       if [[ "$local_lag_is_proven" -ne 1 ]]; then
@@ -1115,6 +1223,14 @@ transfer_owned_prd_branch() {
     && "$(jq -cS . "$STATE_DIR/runs/$owner_run_id/status.json" 2>/dev/null)" != "$status_expected" ]]; then
     state_unlock
     echo "ERROR: Terminal delivery evidence for run '$owner_run_id' changed during transfer" >&2
+    return 1
+  fi
+  if [[ "$hitl_present" -eq 1 \
+    && "$(jq -cS . "$STATE_DIR/runs/$owner_run_id/hitl-integrations.json" 2>/dev/null)" != "$hitl_expected" ]] \
+    || [[ "$hitl_present" -eq 0 \
+      && -e "$STATE_DIR/runs/$owner_run_id/hitl-integrations.json" ]]; then
+    state_unlock
+    echo "ERROR: HITL delivery evidence for run '$owner_run_id' changed during transfer" >&2
     return 1
   fi
 
